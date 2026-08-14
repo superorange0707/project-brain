@@ -75,6 +75,10 @@ python -m pip install https://github.com/superorange0707/project-brain/releases/
 brew install superorange0707/tap/project-brain
 ```
 
+The small, separate [Homebrew tap](https://github.com/superorange0707/homebrew-tap)
+is Homebrew's standard index for third-party formulae; the application source
+and releases remain in this repository.
+
 Then verify:
 
 ```bash

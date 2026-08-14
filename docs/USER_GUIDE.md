@@ -40,6 +40,10 @@ pipx install "project-brain-context @ git+https://github.com/superorange0707/pro
 brew install superorange0707/tap/project-brain
 ```
 
+Homebrew maps `superorange0707/tap` to the separate
+[`homebrew-tap`](https://github.com/superorange0707/homebrew-tap) formula index.
+Project Brain's application source remains in the main repository.
+
 ### From a source checkout
 
 ```bash
