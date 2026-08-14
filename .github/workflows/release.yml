@@ -23,7 +23,7 @@ jobs:
           python -m unittest discover -s tests -v
           python -m pip install build
           python -m build
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: python-package-distributions
           path: dist/
