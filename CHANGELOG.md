@@ -2,6 +2,12 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.1.1] - 2026-08-14
+
+### Fixed
+
+- Give the GitHub CLI an explicit repository context when publishing release assets.
+
 ## [0.1.0] - 2026-08-14
 
 ### Added
@@ -17,4 +23,5 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.1.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.1.1
 [0.1.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.1.0

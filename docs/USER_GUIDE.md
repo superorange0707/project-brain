@@ -19,7 +19,7 @@ uses its built-in scanner. Non-Git directories can still be searched.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.1"
 ```
 
 Upgrade later with:
@@ -31,7 +31,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.1"
 ```
 
 ### Homebrew

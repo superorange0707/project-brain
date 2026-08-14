@@ -54,19 +54,19 @@ Project Brain requires Python 3.11 or newer.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.1"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.1"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.1.0/project_brain_context-0.1.0-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.1.1/project_brain_context-0.1.1-py3-none-any.whl
 ```
 
 ### Homebrew
