@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a reproducible Project Brain problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not paste credentials, private source, proprietary repository names, or
+        unsanitized context packs. Use a minimal public example.
+  - type: input
+    id: version
+    attributes:
+      label: Project Brain version
+      placeholder: brain 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Operating system
+      options: [macOS, Linux, Windows, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Sanitized reproduction
+      description: Include commands, expected behavior, and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context

@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Project Brain output can contain repository paths and source evidence.
+.runs/
+state/
+generated/
+knowledge/
+brain.toml
+config.yml
+config.yaml
+
+# Never commit local credentials or publishing configuration.
+.env
+.env.*
+!.env.example
+.pypirc
+*.key
+*.pem
+*.p12
+*.pfx

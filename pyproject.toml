@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-brain-context"
+version = "0.1.0"
+description = "Give any chat AI read-only, multi-repository codebase exploration"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Project Brain contributors"}]
+keywords = ["code-search", "coding-agent", "multi-repository", "claude", "copilot"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://github.com/superorange0707/project-brain"
+Documentation = "https://github.com/superorange0707/project-brain/blob/main/docs/USER_GUIDE.md"
+Issues = "https://github.com/superorange0707/project-brain/issues"
+Source = "https://github.com/superorange0707/project-brain"
+
+[project.scripts]
+brain = "brain.cli:main"
+
+[tool.setuptools.package-data]
+brain = ["prompt.md"]
