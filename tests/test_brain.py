@@ -205,6 +205,24 @@ path = "trading-service"
 
 
 class InitTest(unittest.TestCase):
+    def test_init_discovers_all_nested_git_repositories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "payments/customer-service/.git").mkdir(parents=True)
+            (root / "trading/risk-service/.git").mkdir(parents=True)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                code = main(["init", "--name", "auto-demo"])
+            finally:
+                os.chdir(previous)
+            config = (root / "brain.toml").read_text(encoding="utf-8")
+            self.assertEqual(0, code)
+            self.assertIn('name = "customer-service"', config)
+            self.assertIn('path = "payments/customer-service"', config)
+            self.assertIn('name = "risk-service"', config)
+            self.assertIn('path = "trading/risk-service"', config)
+
     def test_init_creates_portable_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

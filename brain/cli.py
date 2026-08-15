@@ -93,7 +93,7 @@ def _discover_repos(values: list[str]) -> list[Path]:
         if (current / ".git").exists():
             paths = [current]
         else:
-            paths = sorted(path.parent for path in current.glob("*/.git"))
+            paths = sorted({path.parent for path in current.rglob(".git")})
     invalid = [path for path in paths if not path.is_dir()]
     if invalid:
         raise BrainError("Repository paths do not exist: " + ", ".join(map(str, invalid)))

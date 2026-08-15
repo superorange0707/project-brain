@@ -54,19 +54,19 @@ Project Brain requires Python 3.11 or newer.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.2"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.2"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.1.1/project_brain_context-0.1.1-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.1.2/project_brain_context-0.1.2-py3-none-any.whl
 ```
 
 ### Homebrew
@@ -87,21 +87,18 @@ brain --version
 
 ## Quick start
 
-Keep the Brain workspace beside your repositories so its generated context never
-pollutes them:
+Run `brain init` from the folder that contains your repositories. It recursively
+discovers nested Git repositories, so you do not need to list them:
 
 ```bash
-mkdir payments-brain && cd payments-brain
-
-brain init \
-  ~/code/customer-service \
-  ~/code/trading-service \
-  ~/code/risk-service \
-  --name payments-platform
+cd ~/code/payments-platform
+brain init --name payments-platform
 
 brain doctor
 brain refresh
 ```
+
+Pass repository paths explicitly only when you want to restrict the scope.
 
 Start a ticket investigation:
 

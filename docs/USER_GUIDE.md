@@ -19,7 +19,7 @@ uses its built-in scanner. Non-Git directories can still be searched.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.2"
 ```
 
 Upgrade later with:
@@ -31,7 +31,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.2"
 ```
 
 ### Homebrew
@@ -61,39 +61,40 @@ brain --help
 
 ## 3. Create a Brain workspace
 
-Use a separate directory for Project Brain state. Target repositories remain
-untouched.
+Run Project Brain from the common parent folder. Generated state stays in that
+parent folder; target repositories remain untouched.
 
 ```text
-~/work/
+~/work/payments-platform/
 ├── customer-service/
 ├── trading-service/
-├── risk-service/
-└── payments-brain/
+└── risk-service/
 ```
 
-Initialize it:
+Initialize it without listing repositories. Project Brain recursively finds all
+nested Git repositories:
 
 ```bash
-cd ~/work/payments-brain
-brain init \
-  ../customer-service \
-  ../trading-service \
-  ../risk-service \
-  --name payments-platform
+cd ~/work/payments-platform
+brain init --name payments-platform
 ```
 
 This creates:
 
 ```text
-payments-brain/
+payments-platform/
 ├── brain.toml
-└── knowledge/
+├── knowledge/
     ├── PROJECT_MAP.md
     ├── glossary.md
     ├── flows/
     └── tickets/
+├── customer-service/
+├── trading-service/
+└── risk-service/
 ```
+
+Explicit repository paths remain available when you want a narrower scope.
 
 Run diagnostics and generate deterministic facts:
 
