@@ -199,7 +199,7 @@
           <article class="card"><span class="eyebrow">Attention</span><div class="metric warn" id="warning-count">—</div><span class="help">Fetch or index warnings</span></article>
           <article class="card wide">
             <div class="row"><div class="grow"><h2>Repository health</h2><p class="help">The exact source snapshot used for new ticket investigations.</p></div></div>
-            <div style="overflow:auto"><table><thead><tr><th>Repository</th><th>Path</th><th>Source</th><th>Commit</th><th>Index</th></tr></thead><tbody id="repo-table"></tbody></table></div>
+            <div style="overflow:auto"><table><thead><tr><th>Repository</th><th>Path</th><th>Branch / status</th><th>Commit</th><th>Index</th></tr></thead><tbody id="repo-table"></tbody></table></div>
           </article>
           <article class="card wide">
             <h2>Investigations</h2><p class="help">Open a previous ticket, its requests, evidence, and implementation feedback.</p>
@@ -360,7 +360,7 @@
       var rows = data.repositories.map(function (repo) {
         var healthy = repo.status === "current" && repo.indexed;
         var indexLabel = !repo.indexed ? '<span class="warn">Stale</span>' : (repo.structural ? '<span class="good">Structural</span>' : '<span>Lexical</span>');
-        return "<tr><td><strong>" + esc(repo.name) + "</strong></td><td>" + esc(repo.path) + "</td><td><span class=\"pill " + (healthy ? "current" : "problem") + "\">" + esc(repo.status) + "</span></td><td><code>" + esc(repo.sha || "unknown") + "</code></td><td>" + indexLabel + "</td></tr>";
+        return "<tr><td><strong>" + esc(repo.name) + "</strong></td><td>" + esc(repo.path) + "</td><td><code>" + esc(repo.ref || "working tree") + "</code><br><span class=\"pill " + (healthy ? "current" : "problem") + "\">" + esc(repo.status) + "</span></td><td><code>" + esc(repo.sha || "unknown") + "</code></td><td>" + indexLabel + "</td></tr>";
       }).join("");
       document.getElementById("repo-table").innerHTML = rows || '<tr><td colspan="5" class="empty">No repositories configured.</td></tr>';
       ["session-select", "request-ticket", "review-ticket"].forEach(function (id) {

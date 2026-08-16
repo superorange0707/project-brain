@@ -2,6 +2,13 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.4.1] - 2026-08-16
+
+### Fixed
+
+- Show each repository's analyzed branch/ref next to its sync status in the
+  local cockpit instead of showing only `current`.
+
 ## [0.4.0] - 2026-08-16
 
 ### Added
@@ -116,6 +123,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.4.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.4.1
 [0.4.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.4.0
 [0.3.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.2
 [0.3.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.1

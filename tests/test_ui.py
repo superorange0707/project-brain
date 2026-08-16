@@ -65,6 +65,8 @@ class LocalUiTest(unittest.TestCase):
         status, html, headers = self.get("/", authorized=False)
         self.assertEqual(200, status)
         self.assertIn("Project Brain", html)
+        self.assertIn("Branch / status", html)
+        self.assertIn('esc(repo.ref || "working tree")', html)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         with self.assertRaises(HTTPError) as caught:
             self.get("/api/status", authorized=False)
