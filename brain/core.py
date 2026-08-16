@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -756,6 +757,11 @@ def request_preview(text: str, settings: Settings | None = None) -> dict[str, An
     for item in request["history"]:
         actions.append({"kind": "history", "value": str(item["query"]), "repos": repos_for(item)})
 
+    if not actions:
+        raise BrainError("CONTEXT_REQUEST contains no repository operations")
+    signature = hashlib.sha256(
+        json.dumps(sorted(actions, key=lambda item: json.dumps(item, sort_keys=True)), sort_keys=True).encode("utf-8")
+    ).hexdigest()
     return {
         "valid": True,
         "protocol_version": PROTOCOL_VERSION,
@@ -763,6 +769,7 @@ def request_preview(text: str, settings: Settings | None = None) -> dict[str, An
         "request": request,
         "actions": actions,
         "operation_count": len(actions),
+        "signature": signature,
         "counts": {
             "searches": len(request["searches"]),
             "symbols": len(request["symbols"]),
@@ -943,7 +950,13 @@ def _language(path: str) -> str:
     }.get(suffix, "text")
 
 
-def pack_context(settings: Settings, ticket: str, request_number: int, bundle: ContextBundle) -> str:
+def pack_context(
+    settings: Settings,
+    ticket: str,
+    request_number: int,
+    bundle: ContextBundle,
+    progress: dict[str, Any] | None = None,
+) -> str:
     output = [
         "# PROJECT BRAIN CONTEXT", "", f"Ticket: `{ticket}`", f"Request: `{request_number:03d}`", "",
         "## Objective", "", bundle.objective, "", "## Repository state", "",
@@ -962,6 +975,30 @@ def pack_context(settings: Settings, ticket: str, request_number: int, bundle: C
     if warnings:
         output.extend(["", "## Warnings", ""])
         output.extend(f"- {warning}" for warning in warnings)
+    if progress:
+        output.extend([
+            "",
+            "## Investigation progress",
+            "",
+            f"- Retrieval requests completed: {request_number}",
+            f"- Operations in this request: {progress['operations']}",
+            f"- New unique evidence regions: {progress['new_evidence']}",
+            f"- Previously seen evidence regions: {progress['known_evidence']}",
+            f"- Consecutive requests with no new evidence: {progress['no_progress_rounds']}",
+        ])
+        history = progress.get("history") or []
+        if history:
+            output.extend(["", "Earlier retrieval objectives:", ""])
+            output.extend(
+                f"- {int(item.get('number') or 0):03d}: {item.get('objective')} "
+                f"({item.get('new_evidence', 0)} new evidence regions)"
+                for item in history[-8:]
+            )
+        if progress["no_progress_rounds"]:
+            output.append(
+                "- This request added no new repository evidence. Do not repeat open-ended retrieval; "
+                "either ask the user for the specific external/runtime fact that blocks the decision or produce FINAL_SOLUTION."
+            )
     if bundle.relationships:
         output.extend(["", "## Static execution relationships", "", "```text", *sorted(set(bundle.relationships)), "```"])
     output.extend(["", "## Source evidence", ""])
@@ -1109,10 +1146,18 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
     start_path = directory / "start.md"
     start_path.write_text(content, encoding="utf-8")
     state = session_state(settings, ticket)
+    source_signature = hashlib.sha256(
+        json.dumps(
+            [(repo.name, repo.source_ref, repo.source_sha or git_head(repo)) for repo in settings.repositories],
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     state.update(
         {
             "ticket": ticket,
             "started_at": datetime.now(UTC).isoformat(),
+            "status": "waiting_for_ai",
+            "source_signature": source_signature,
             "requests": state.get("requests", 0),
             "feedbacks": state.get("feedbacks", 0),
             "sources": {
@@ -1136,8 +1181,15 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
     directory = session_dir(settings, ticket)
     if not directory.is_dir():
         raise BrainError(f"Session {ticket} does not exist. Run `brain start {ticket}` first.")
-    request = parse_context_request(request_text)
+    plan = request_preview(request_text, settings)
+    request = plan["request"]
     state = session_state(settings, ticket)
+    for previous in state.get("request_history") or []:
+        if previous.get("signature") == plan["signature"] and previous.get("source_signature") == state.get("source_signature"):
+            raise BrainError(
+                f"This retrieval plan already ran as request {int(previous.get('number') or 0):03d}. "
+                "Return that result to the AI instead of repeating it."
+            )
     for repo in settings.repositories:
         source = (state.get("sources") or {}).get(repo.name) or {}
         snapshot = Path(str(source.get("snapshot") or ""))
@@ -1151,10 +1203,41 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
     number = int(state.get("requests") or 0) + 1
     (directory / f"request-{number:03d}.yml").write_text(request_text.rstrip() + "\n", encoding="utf-8")
     bundle = retrieve_context(settings, request, include_diff=include_diff)
-    content = pack_context(settings, ticket, number, bundle)
+    evidence_keys = {
+        hashlib.sha256(
+            f"{item.repo}\0{item.path}\0{item.line_start}\0{item.line_end}\0{item.content}".encode("utf-8")
+        ).hexdigest()
+        for item in bundle.evidence
+    }
+    known_keys = set(state.get("evidence_keys") or [])
+    new_evidence = evidence_keys - known_keys
+    no_progress_rounds = 0 if new_evidence else int(state.get("no_progress_rounds") or 0) + 1
+    progress = {
+        "operations": plan["operation_count"],
+        "new_evidence": len(new_evidence),
+        "known_evidence": len(evidence_keys & known_keys),
+        "no_progress_rounds": no_progress_rounds,
+        "history": list(state.get("request_history") or []),
+    }
+    content = pack_context(settings, ticket, number, bundle, progress)
     path = directory / f"context-{number:03d}.md"
     path.write_text(content, encoding="utf-8")
     state["requests"] = number
+    state["status"] = "waiting_for_ai"
+    state["no_progress_rounds"] = no_progress_rounds
+    state["evidence_keys"] = sorted(known_keys | evidence_keys)
+    history = list(state.get("request_history") or [])
+    history.append({
+        "number": number,
+        "objective": plan["objective"],
+        "signature": plan["signature"],
+        "source_signature": state.get("source_signature"),
+        "operations": plan["operation_count"],
+        "new_evidence": len(new_evidence),
+        "unresolved": len(bundle.unresolved),
+        "created_at": datetime.now(UTC).isoformat(),
+    })
+    state["request_history"] = history
     save_session(settings, ticket, state)
     return content, path, number
 
@@ -1216,6 +1299,7 @@ def create_feedback(
     path = directory / f"feedback-{number:03d}.md"
     path.write_text(content, encoding="utf-8")
     state["feedbacks"] = number
+    state["status"] = "reviewing_implementation"
     save_session(settings, ticket, state)
     return content, path, number
 
@@ -1271,9 +1355,15 @@ def deliver(settings: Settings, ticket: str, text: str, target: str, *, copy: bo
     directory = session_dir(settings, ticket)
     state = session_state(settings, ticket)
     if target == "m365":
-        parts = [text]
-    else:
-        parts = chunk_text(text, settings.clipboard_chunk_chars)
+        handoff = directory / "current-handoff.md"
+        handoff.write_text(text, encoding="utf-8")
+        paths = [handoff]
+        state["delivery"] = {"target": target, "parts": [str(handoff)], "current": 1, "handoff": str(handoff)}
+        save_session(settings, ticket, state)
+        if copy:
+            clipboard_write(text)
+        return paths, 1
+    parts = chunk_text(text, settings.clipboard_chunk_chars)
     delivery_dir = directory / "delivery"
     delivery_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []

@@ -22,11 +22,11 @@ Project Brain fills the missing tool loop between a normal chat window and your
 local repositories:
 
 ```text
-Ticket → Chat AI → CONTEXT_REQUEST → Project Brain → source evidence
-                    ↑                                  ↓
-                    └──────── investigation ───────────┘
-                                      ↓
-                               FINAL_SOLUTION
+Ticket + docs ↔ Chat AI ↔ you
+                 │
+                 ├── human/runtime question → answer directly in the chat
+                 ├── CONTEXT_REQUEST → Project Brain → source evidence
+                 └── enough evidence → FINAL_SOLUTION
 ```
 
 The AI decides what it still needs to understand. Project Brain expands one
@@ -45,6 +45,8 @@ configured repositories. You apply the final solution in your IDE.
 | 📚 **Evidence-complete** | Retrieves production source, tests, config, relationships, and history |
 | 🧠 **Structural + exact** | Pinned code graph when bundled; deterministic exact/lexical fallback everywhere |
 | 🔍 **Honest uncertainty** | Missing evidence and static-analysis limits are reported, never hidden |
+| 🎯 **Convergent investigation** | Rejects duplicate retrievals and reports new evidence, prior objectives, and no-progress turns |
+| 🧑‍💻 **Persistent M365 Agent** | Generates permanent Instructions and Knowledge so Copilot always knows when to use Brain or ask you directly |
 
 No vector database, hosted indexing service, or model/API credential.
 
@@ -69,7 +71,7 @@ Download the archive for your CPU from the
 extract it, and place both executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.4.1-macos-arm64.tar.gz
+tar -xzf project-brain-v0.5.0-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp ~/.local/bin/
 ```
@@ -80,19 +82,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.4.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.0"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.4.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.0"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.4.1/project_brain_context-0.4.1-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.5.0/project_brain_context-0.5.0-py3-none-any.whl
 ```
 
 Then verify:
@@ -139,8 +141,9 @@ brain ui
 
 The browser page is served only on `127.0.0.1` and protected by a random session
 token. Paste a ticket, click **Start investigation**, and copy the generated
-context to your chat AI. Paste the AI's complete reply into **AI Request**, review
-the exact local operations, and click **Approve and run**.
+context to your chat AI. Paste a complete reply into **Continue with AI**. Brain
+routes repository requests, tells you when to answer the AI directly, recognizes a
+final plan, and previews every local operation before it runs.
 
 Prefer the terminal? Start a ticket investigation directly:
 
@@ -156,15 +159,37 @@ brain start ABC-1234 --branch payment-service=feature/ABC-1234 --ticket-file tic
 ```
 
 All other repositories still use their development/default branches. Paste the
-generated start context into the chat. When the AI responds with a
-`CONTEXT_REQUEST`, copy it and run:
+generated start context into the chat. Route any complete AI reply with:
 
 ```bash
-brain ctx ABC-1234 --clipboard --target claude
+brain continue ABC-1234 --clipboard --target claude
 ```
 
-Paste the result back. Repeat until the AI returns `FINAL_SOLUTION`. For M365
-Copilot, use `--target m365` and upload the printed Markdown path instead.
+If it contains `CONTEXT_REQUEST`, Brain retrieves and returns evidence. If the AI
+asked a human question, Brain tells you to answer it directly. If it contains
+`FINAL_SOLUTION`, Brain marks the ticket ready to implement. The strict legacy
+`brain ctx` command remains available for automation.
+
+### Microsoft 365 Copilot Agent — recommended
+
+Generate a one-time setup kit:
+
+```bash
+brain agent-kit m365
+```
+
+Paste `generated/m365-agent/INSTRUCTIONS.md` into the Agent Builder Instructions
+field and add `PROJECT_KNOWLEDGE.md` plus approved internal architecture/IPF docs
+to Knowledge. The AI then permanently knows that it should talk to you directly
+for business, document, runtime, and environment facts, and emit a
+`CONTEXT_REQUEST` only for local repository evidence.
+
+Start every M365 ticket with `--target m365`. Brain continually replaces one
+stable file, so upload the same path each round:
+
+```text
+.runs/ABC-1234/current-handoff.md
+```
 
 ### Try the complete workflow without your own repositories
 
@@ -184,8 +209,12 @@ The GUI is a thin, local layer over the same tested retrieval core as the CLI:
 - **Project health** shows snapshot SHAs, fetch state, and structural/lexical index status.
 - **Start ticket** optionally synchronizes every repo, accepts per-repo feature
   branches, and pins the investigation to exact commits.
-- **AI Request Inbox** extracts YAML or JSON from the complete chat response, validates repository names, and previews every operation before execution.
+- **Continue with AI** distinguishes direct conversation, repository requests,
+  duplicate retrievals, and final solutions without invoking another model.
+- **Retrieval Plan** validates repository names and previews exactly what Brain
+  will inspect; it is deliberately separate from the AI's implementation plan.
 - **Evidence context** provides chunk navigation and one-click clipboard delivery.
+- **M365 Agent setup** creates and previews the permanent Agent Builder package.
 - **Review changes** packages tracked diffs, developer notes, and observed test output; it never runs the command or claims success itself.
 - **Investigation history** reopens ticket, request, context, and feedback artifacts under `.runs/TICKET/`.
 
@@ -218,7 +247,9 @@ CONTEXT_REQUEST:
 One request can trigger dozens of local operations. The returned context includes
 the objective, exact analyzed commit/ref, freshness warnings, structural and
 framework relationships, ranked source evidence, Git history, and an explicit
-unresolved section.
+unresolved section. It also reports unique evidence gained, prior retrieval
+objectives, and no-progress turns. An identical plan against the same pinned
+snapshots is rejected instead of wasting another round.
 
 ## What it can explore
 
@@ -277,8 +308,10 @@ brain trace             Find static callers and likely outbound calls
 brain history           Search Git history
 brain map               Generate Spring/Maven/project facts
 brain start             Start a ticket investigation
-brain preview           Validate and dry-run an AI request
+brain continue          Route a complete AI reply and run only tool requests
+brain preview           Classify an AI reply and dry-run repository requests
 brain ctx               Fulfil a CONTEXT_REQUEST
+brain agent-kit m365    Generate permanent M365 Agent setup files
 brain feedback          Package diffs and observed test output for AI review
 brain ui                Open the token-protected local investigation cockpit
 brain next / prev       Navigate Claude clipboard chunks

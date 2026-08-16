@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "project-brain-context"
-version = "0.4.1"
+version = "0.5.0"
 description = "Give any chat AI read-only, multi-repository codebase exploration"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,4 +30,4 @@ Source = "https://github.com/superorange0707/project-brain"
 brain = "brain.cli:main"
 
 [tool.setuptools.package-data]
-brain = ["prompt.md", "ui.html"]
+brain = ["prompt.md", "ui.html", "m365_agent_instructions.md"]

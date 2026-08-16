@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import __version__
+from .agent import archive_final_solution, create_m365_agent_kit, response_preview
 from .core import (
     BrainError,
     clipboard_read,
@@ -20,7 +21,6 @@ from .core import (
     git_history,
     load_settings,
     move_delivery,
-    request_preview,
     request_repair_prompt,
     search,
     session_state,
@@ -96,11 +96,26 @@ def _parser() -> argparse.ArgumentParser:
     context.add_argument("--include-diff", action="store_true")
     context.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
-    preview = commands.add_parser("preview", help="validate and preview an AI CONTEXT_REQUEST")
+    continue_command = commands.add_parser("continue", help="route a complete AI reply for an existing investigation")
+    continue_command.add_argument("ticket")
+    continue_source = continue_command.add_mutually_exclusive_group()
+    continue_source.add_argument("--file")
+    continue_source.add_argument("--clipboard", action="store_true")
+    continue_command.add_argument("--target", choices=("claude", "m365"), default="claude")
+    continue_command.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
+    continue_command.add_argument("--include-diff", action="store_true")
+    continue_command.add_argument("--json", action="store_true", help="print a stable machine-readable result")
+
+    preview = commands.add_parser("preview", help="classify and preview a complete AI reply")
     preview_source = preview.add_mutually_exclusive_group()
     preview_source.add_argument("--file")
     preview_source.add_argument("--clipboard", action="store_true")
+    preview.add_argument("--ticket", help="existing investigation used for duplicate detection")
     preview.add_argument("--json", action="store_true", help="print the complete machine-readable plan")
+
+    agent_kit = commands.add_parser("agent-kit", help="generate setup files for a persistent chat agent")
+    agent_kit.add_argument("target", choices=("m365",))
+    agent_kit.add_argument("--json", action="store_true", help="print generated paths as JSON")
 
     feedback = commands.add_parser("feedback", help="package implementation diffs and test results for AI review")
     feedback.add_argument("ticket")
@@ -418,6 +433,8 @@ def execute(args: argparse.Namespace) -> int:
             }, indent=2))
         else:
             print(path)
+            if args.target == "m365":
+                print(f"M365 handoff: {parts[0]}")
             print(f"Delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
         return 0
     if args.command == "ctx":
@@ -433,12 +450,47 @@ def execute(args: argparse.Namespace) -> int:
             }, indent=2))
         else:
             print(path)
+            if args.target == "m365":
+                print(f"M365 handoff: {parts[0]}")
+            print(f"Request: {number:03d}; delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
+        return 0
+    if args.command == "continue":
+        text = _request_text(args)
+        preview = response_preview(text, settings, args.ticket)
+        kind = preview["kind"]
+        if kind == "conversation":
+            result = {"ticket": args.ticket, "kind": kind, "message": preview["message"]}
+            print(json.dumps(result, indent=2) if args.json else preview["message"])
+            return 0
+        if kind == "final_solution":
+            path = archive_final_solution(settings, args.ticket, text)
+            if args.target == "m365":
+                deliver(settings, args.ticket, text, args.target, copy=False)
+            result = {"ticket": args.ticket, "kind": kind, "path": str(path)}
+            print(json.dumps(result, indent=2) if args.json else f"Ready to implement: {path}")
+            return 0
+        content, path, number = create_context(settings, args.ticket, text, args.include_diff)
+        copy = args.copy if args.copy is not None else args.target == "claude"
+        parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)
+        result = {
+            "ticket": args.ticket,
+            "kind": kind,
+            "request": number,
+            "path": str(path),
+            "delivery": {"current": current, "total": len(parts), "parts": [str(part) for part in parts], "copied": copy},
+        }
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(path)
+            if args.target == "m365":
+                print(f"M365 handoff: {parts[0]}")
             print(f"Request: {number:03d}; delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
         return 0
     if args.command == "preview":
         text = _request_text(args)
         try:
-            plan = request_preview(text, settings)
+            plan = response_preview(text, settings, args.ticket)
         except BrainError as exc:
             if args.json:
                 print(json.dumps({"valid": False, "error": str(exc), "repair_prompt": request_repair_prompt(str(exc))}, indent=2))
@@ -446,12 +498,25 @@ def execute(args: argparse.Namespace) -> int:
             raise
         if args.json:
             print(json.dumps(plan, indent=2, ensure_ascii=False))
+        elif plan["kind"] == "conversation":
+            print(plan["message"])
+        elif plan["kind"] == "final_solution":
+            print("Ready to implement; no repository retrieval required.")
         else:
             print(f"Valid CONTEXT_REQUEST v{plan['protocol_version']}: {plan['operation_count']} operations")
             print(f"Objective: {plan['objective']}")
             for action in plan["actions"]:
                 scope = ", ".join(action["repos"]) or "all repositories"
                 print(f"- {action['kind']}: {action['value']} ({scope})")
+        return 0
+    if args.command == "agent-kit":
+        kit = create_m365_agent_kit(settings)
+        if args.json:
+            print(json.dumps({key: value for key, value in kit.items() if key.endswith("path") or key == "directory"}, indent=2))
+        else:
+            print(kit["setup_path"])
+            print(kit["instructions_path"])
+            print(kit["knowledge_path"])
         return 0
     if args.command == "feedback":
         notes = _read_optional(args.notes, args.notes_file)
@@ -476,6 +541,8 @@ def execute(args: argparse.Namespace) -> int:
             }, indent=2))
         else:
             print(path)
+            if args.target == "m365":
+                print(f"M365 handoff: {parts[0]}")
             print(f"Feedback: {number:03d}; delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
         return 0
     if args.command == "status":

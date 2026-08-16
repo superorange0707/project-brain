@@ -13,11 +13,13 @@ from pathlib import Path
 from unittest import mock
 
 from brain.cli import main
+from brain.agent import archive_final_solution, create_m365_agent_kit, response_preview
 from brain.core import (
     BrainError,
     chunk_text,
     create_context,
     create_feedback,
+    deliver,
     generate_map,
     load_settings,
     load_index_state,
@@ -334,6 +336,59 @@ else:
         self.assertIn("TradingEligibilityService.java", context)
         self.assertIn("Static execution relationships", context)
         self.assertIn("## Unresolved", context)
+        self.assertIn("## Investigation progress", context)
+        self.assertIn("New unique evidence regions:", context)
+
+    def test_ai_reply_routing_duplicate_detection_and_no_progress(self) -> None:
+        start_session(self.settings, "ABC-ROUTE", "Investigate eligibility.")
+        conversation = response_preview("Which production profile is active?", self.settings, "ABC-ROUTE")
+        self.assertEqual("conversation", conversation["kind"])
+        final = response_preview("FINAL_SOLUTION\nChange the listener.", self.settings, "ABC-ROUTE")
+        self.assertEqual("final_solution", final["kind"])
+        with self.assertRaisesRegex(BrainError, "contains no repository operations"):
+            response_preview(
+                "CONTEXT_REQUEST:\n  objective: Inspect the code.\n  searches: []\n  symbols: []\n  files: []\n  history: []",
+                self.settings,
+                "ABC-ROUTE",
+            )
+
+        create_context(self.settings, "ABC-ROUTE", REQUEST)
+        duplicate = response_preview(REQUEST, self.settings, "ABC-ROUTE")
+        self.assertEqual(1, duplicate["duplicate_of"])
+        with self.assertRaisesRegex(BrainError, "already ran as request 001"):
+            create_context(self.settings, "ABC-ROUTE", REQUEST)
+
+        empty_request = REQUEST.replace("JURISDICTION_CHANGED", "NOT_PRESENT_ANYWHERE").replace(
+            "EligibilityEvaluator", "MissingEvaluator"
+        ).replace("recalculate", "missingMethod")
+        context, _, _ = create_context(self.settings, "ABC-ROUTE", empty_request)
+        self.assertIn("Consecutive requests with no new evidence: 1", context)
+        self.assertIn("Do not repeat open-ended retrieval", context)
+
+        for repo in self.settings.repositories:
+            repo.source_sha = f"new-{repo.name}"
+        start_session(self.settings, "ABC-ROUTE", "Restart against newer snapshots.")
+        refreshed = response_preview(REQUEST, self.settings, "ABC-ROUTE")
+        self.assertIsNone(refreshed["duplicate_of"])
+
+    def test_final_solution_m365_handoff_and_agent_kit(self) -> None:
+        start, _ = start_session(self.settings, "ABC-M365", "Prepare an M365 handoff.")
+        first, _ = deliver(self.settings, "ABC-M365", start, "m365", copy=False)
+        self.assertEqual("current-handoff.md", first[0].name)
+
+        final_text = "FINAL_SOLUTION\n\nChange `CustomerChangedListener.java`."
+        final_path = archive_final_solution(self.settings, "ABC-M365", final_text)
+        second, _ = deliver(self.settings, "ABC-M365", final_text, "m365", copy=False)
+        self.assertEqual(first[0], second[0])
+        self.assertEqual(final_text, second[0].read_text(encoding="utf-8"))
+        self.assertTrue(final_path.is_file())
+        self.assertEqual("ready_to_implement", json.loads((final_path.parent / "session.json").read_text())["status"])
+
+        kit = create_m365_agent_kit(self.settings)
+        self.assertLessEqual(len(kit["instructions"]), 8000)
+        self.assertIn("The user never needs to remind you", kit["instructions"])
+        self.assertIn("customer-service", kit["knowledge"])
+        self.assertTrue(Path(kit["setup_path"]).is_file())
 
     def test_implementation_feedback_packages_observed_results_without_running_them(self) -> None:
         start_session(self.settings, "ABC-2", "Review an implementation.")

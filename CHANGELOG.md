@@ -2,6 +2,35 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.5.0] - 2026-08-16
+
+### Added
+
+- Generate a ready-to-paste Microsoft 365 Copilot Agent kit with permanent
+  Instructions, stable project knowledge, setup guidance, and a UI preview.
+- Add `brain continue` and a unified AI inbox that distinguish repository tool
+  requests, direct AI/user conversation, and `FINAL_SOLUTION` without another
+  model or credential.
+- Maintain one stable `.runs/TICKET/current-handoff.md` for M365 delivery instead
+  of requiring users to create and rename a file for every investigation turn.
+- Track retrieval signatures, unique evidence gained, prior objectives, and
+  consecutive no-progress turns in every ticket session and returned context.
+- Persist `waiting_for_ai`, `ready_to_implement`, and implementation-review states
+  for existing and new investigations.
+
+### Changed
+
+- Make the chat AI the sole user-facing investigator: it asks users directly for
+  business, documentation, runtime, and environment facts and invokes Brain only
+  for local repository evidence.
+- Rename the cockpit's misleading Execution Plan to Retrieval Plan and preserve
+  the active ticket across navigation and UI restarts.
+
+### Fixed
+
+- Detect and reject an identical retrieval plan against the same pinned source
+  snapshots instead of repeatedly returning the same evidence.
+
 ## [0.4.1] - 2026-08-16
 
 ### Fixed
@@ -123,6 +152,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.5.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.0
 [0.4.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.4.1
 [0.4.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.4.0
 [0.3.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.2

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .agent import archive_final_solution, create_m365_agent_kit, response_preview
 from .core import (
     BrainError,
     Settings,
@@ -22,7 +23,6 @@ from .core import (
     generate_map,
     load_index_state,
     load_source_state,
-    request_preview,
     request_repair_prompt,
     session_dir,
     session_state,
@@ -78,6 +78,8 @@ def _sessions(settings: Settings) -> list[dict[str, Any]]:
             "ticket": str(state.get("ticket") or directory.name),
             "requests": int(state.get("requests") or 0),
             "feedbacks": int(state.get("feedbacks") or 0),
+            "status": str(state.get("status") or "investigating"),
+            "no_progress_rounds": int(state.get("no_progress_rounds") or 0),
             "started_at": state.get("started_at"),
             "updated_at": datetime.fromtimestamp(state_path.stat().st_mtime, UTC).isoformat(),
         })
@@ -147,14 +149,14 @@ def _delivery(settings: Settings, ticket: str, part: int | None = None) -> dict[
     delivery = state.get("delivery") or {}
     paths = [Path(value) for value in delivery.get("parts") or []]
     if not paths:
-        return {"current": 0, "total": 0, "content": ""}
+        return {"current": 0, "total": 0, "content": "", "path": None}
     current = part or int(delivery.get("current") or 1)
     current = max(1, min(len(paths), current))
     directory = session_dir(settings, ticket).resolve()
     path = paths[current - 1].resolve()
     if not path.is_relative_to(directory) or not path.is_file():
         raise BrainError("Invalid delivery path in session state")
-    return {"current": current, "total": len(paths), "content": path.read_text(encoding="utf-8")}
+    return {"current": current, "total": len(paths), "content": path.read_text(encoding="utf-8"), "path": str(path)}
 
 
 def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
@@ -168,6 +170,9 @@ def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
         "ticket_text": ticket_path.read_text(encoding="utf-8") if ticket_path.is_file() else "",
         "requests": int(state.get("requests") or 0),
         "feedbacks": int(state.get("feedbacks") or 0),
+        "status": str(state.get("status") or "investigating"),
+        "no_progress_rounds": int(state.get("no_progress_rounds") or 0),
+        "request_history": state.get("request_history") or [],
         "artifacts": _session_artifacts(settings, ticket),
         "delivery": _delivery(settings, ticket),
     }
@@ -281,7 +286,8 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/preview":
                 text = str(body.get("text") or "")
                 try:
-                    data = request_preview(text, self.server.settings)
+                    ticket = str(body.get("ticket") or "").strip() or None
+                    data = response_preview(text, self.server.settings, ticket)
                 except BrainError as exc:
                     self._json({"ok": True, "data": {"valid": False, "error": str(exc), "repair_prompt": request_repair_prompt(str(exc))}})
                 else:
@@ -330,6 +336,44 @@ class _Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "data": {"ticket": ticket, "request": number, "path": artifact.name, "plan": plan, "delivery": _delivery(settings, ticket), "session": _session_detail(settings, ticket)},
             })
+            return
+        if path == "/api/continue":
+            ticket = str(body.get("ticket") or "").strip()
+            text = str(body.get("text") or "")
+            preview = response_preview(text, settings, ticket)
+            if preview["kind"] == "conversation":
+                self._json({"ok": True, "data": {"ticket": ticket, **preview, "session": _session_detail(settings, ticket)}})
+                return
+            if preview["kind"] == "final_solution":
+                artifact = archive_final_solution(settings, ticket, text)
+                if _target(body) == "m365":
+                    deliver(settings, ticket, text, "m365", copy=False)
+                self._json({
+                    "ok": True,
+                    "data": {"ticket": ticket, **preview, "path": artifact.name, "session": _session_detail(settings, ticket)},
+                })
+                return
+            if preview.get("duplicate_of"):
+                raise BrainError(
+                    f"This retrieval plan already ran as request {preview['duplicate_of']:03d}. "
+                    "Return that result to the AI instead of repeating it."
+                )
+            content, artifact, number = create_context(settings, ticket, text, bool(body.get("include_diff")))
+            deliver(settings, ticket, content, _target(body), copy=False)
+            self._json({
+                "ok": True,
+                "data": {
+                    "ticket": ticket,
+                    **preview,
+                    "request": number,
+                    "path": artifact.name,
+                    "delivery": _delivery(settings, ticket),
+                    "session": _session_detail(settings, ticket),
+                },
+            })
+            return
+        if path == "/api/agent-kit":
+            self._json({"ok": True, "data": create_m365_agent_kit(settings)})
             return
         if path == "/api/feedback":
             ticket = str(body.get("ticket") or "").strip()

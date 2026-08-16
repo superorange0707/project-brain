@@ -154,7 +154,7 @@
       .shell { grid-template-columns: 1fr; }
       aside { position: static; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
       .brand { margin-bottom: 16px; }
-      nav { grid-template-columns: repeat(4,1fr); }
+      nav { grid-template-columns: repeat(5,1fr); }
       .nav { text-align: center; font-size: 12px; padding: 9px 4px; }
       .aside-foot { display: none; }
       .card, .two-thirds, .one-third { grid-column: 1 / -1; }
@@ -178,8 +178,9 @@
       <nav>
         <button class="nav active" data-view="overview">Overview</button>
         <button class="nav" data-view="ticket">Start ticket</button>
-        <button class="nav" data-view="request">AI request</button>
+        <button class="nav" data-view="request">Continue with AI</button>
         <button class="nav" data-view="review">Review changes</button>
+        <button class="nav" data-view="agent">M365 agent</button>
       </nav>
       <div class="aside-foot"><span class="lock">● Local only</span><br>No model API · no code execution</div>
     </aside>
@@ -229,9 +230,9 @@
             </div>
           </article>
           <article class="card one-third">
-            <span class="eyebrow">Your role</span><div class="metric">3 steps</div>
-            <p class="help">Paste this context into the AI. Let it decide what evidence is missing. Bring its complete response back to AI Request.</p>
-            <ol class="help" style="padding-left:18px;line-height:2"><li>Copy start context</li><li>Paste into the same AI chat</li><li>Return its CONTEXT_REQUEST</li></ol>
+            <span class="eyebrow">Your role</span><div class="metric">Courier</div>
+            <p class="help">Give this package to the AI. Talk to the AI directly. Return here only when it emits a CONTEXT_REQUEST for local repository evidence.</p>
+            <ol class="help" style="padding-left:18px;line-height:2"><li>Give the package to AI</li><li>Answer AI questions directly</li><li>Bring back tool requests only</li></ol>
           </article>
           <article class="card wide">
             <div class="row"><div class="grow"><h2>Start context</h2></div><button class="button secondary" data-copy-output>Copy for AI</button></div>
@@ -244,8 +245,8 @@
       <section class="view" id="view-request">
         <div class="grid">
           <article class="card two-thirds">
-            <h2>AI Request Inbox</h2>
-            <p class="help">Paste the AI's complete response. Brain extracts and validates CONTEXT_REQUEST without using another model.</p>
+            <h2>Continue with your AI</h2>
+            <p class="help">Paste the AI's complete reply. Brain runs repository requests, recognizes FINAL_SOLUTION, and tells you when the reply belongs in the AI chat instead.</p>
             <div class="row field">
               <div class="grow"><label for="request-ticket">Investigation</label><select id="request-ticket"><option value="">Select a ticket</option></select></div>
               <div><label for="request-target">Delivery</label><select id="request-target"><option value="claude">Clipboard chat</option><option value="m365">M365</option></select></div>
@@ -253,15 +254,15 @@
             <div class="field"><label for="request-text">AI response</label><textarea class="tall" id="request-text" placeholder="Paste everything the AI returned, including the CONTEXT_REQUEST block…"></textarea></div>
             <div class="row">
               <label class="check grow"><input type="checkbox" id="request-diff"> Include tracked working-tree diffs</label>
-              <button class="button" id="preview-request">Preview request</button>
-              <button class="button primary" id="run-request" disabled>Approve and run</button>
+              <button class="button" id="preview-request">Classify reply</button>
+              <button class="button primary" id="run-request" disabled>Run retrieval</button>
             </div>
             <div id="request-message"></div>
           </article>
           <article class="card one-third">
-            <span class="eyebrow">Execution plan</span>
+            <span class="eyebrow">Retrieval plan</span>
             <div class="metric" id="operation-count">0</div>
-            <p class="help" id="request-objective">Validate a request to see exactly what Brain will inspect.</p>
+            <p class="help" id="request-objective">Brain only acts when the AI requests local repository evidence.</p>
             <div class="plan" id="request-plan"></div>
           </article>
           <article class="card wide">
@@ -298,6 +299,26 @@
           </article>
         </div>
       </section>
+
+      <section class="view" id="view-agent">
+        <div class="grid">
+          <article class="card two-thirds">
+            <h2>Microsoft 365 Copilot Agent kit</h2>
+            <p class="help">Generate permanent Instructions and stable project knowledge for a dedicated M365 Agent. Do this once, then start each ticket with Brain's current handoff file.</p>
+            <button class="button primary" id="generate-agent-kit">Generate setup kit</button>
+            <div id="agent-paths" class="success" style="display:none"></div>
+          </article>
+          <article class="card one-third">
+            <span class="eyebrow">Division of work</span>
+            <div class="metric">AI ↔ Brain</div>
+            <p class="help">The M365 Agent talks to you and owns reasoning. Brain only retrieves local evidence. No model credential or connector is installed.</p>
+          </article>
+          <article class="card wide">
+            <div class="row"><div class="grow"><h2>Agent Instructions</h2></div><button class="button secondary" id="copy-agent-instructions">Copy instructions</button></div>
+            <pre class="output" id="agent-instructions">Generate the kit to preview the instructions.</pre>
+          </article>
+        </div>
+      </section>
     </main>
   </div>
   <div id="toast"></div>
@@ -305,7 +326,7 @@
     "use strict";
     var token = new URLSearchParams(location.search).get("token") || "";
     var state = { status: null, preview: null, ticket: "", delivery: { current: 0, total: 0, content: "" } };
-    var titles = { overview: "Project overview", ticket: "Start a ticket", request: "AI Request Inbox", review: "Review implementation" };
+    var titles = { overview: "Project overview", ticket: "Start a ticket", request: "Continue with AI", review: "Review implementation", agent: "M365 Agent setup" };
 
     function esc(value) {
       return String(value == null ? "" : value).replace(/[&<>"']/g, function (char) {
@@ -365,16 +386,20 @@
       document.getElementById("repo-table").innerHTML = rows || '<tr><td colspan="5" class="empty">No repositories configured.</td></tr>';
       ["session-select", "request-ticket", "review-ticket"].forEach(function (id) {
         var select = document.getElementById(id);
-        var selected = select.value;
+        var selected = select.value || state.ticket || (data.sessions[0] && data.sessions[0].ticket) || "";
         var first = id === "session-select" ? "Select an investigation" : "Select a ticket";
         select.innerHTML = '<option value="">' + first + "</option>";
         data.sessions.forEach(function (session) {
           var option = document.createElement("option");
           option.value = session.ticket;
-          option.textContent = session.ticket + " · " + session.requests + " requests";
+          var status = session.status === "ready_to_implement" ? "ready to implement" : session.requests + " retrievals";
+          option.textContent = session.ticket + " · " + status;
           select.appendChild(option);
         });
-        if (data.sessions.some(function (item) { return item.ticket === selected; })) select.value = selected;
+        if (data.sessions.some(function (item) { return item.ticket === selected; })) {
+          select.value = selected;
+          state.ticket = selected;
+        }
       });
       return data;
     }
@@ -382,7 +407,9 @@
       state.delivery = data || {current:0,total:0,content:""};
       document.querySelectorAll("[data-output]").forEach(function (output) { output.textContent = state.delivery.content || "No context available."; });
       document.querySelectorAll("[data-deliverybar]").forEach(function (bar) { bar.classList.toggle("visible", state.delivery.total > 0); });
-      document.querySelectorAll("[data-part]").forEach(function (part) { part.textContent = state.delivery.current + " / " + state.delivery.total; });
+      document.querySelectorAll("[data-part]").forEach(function (part) {
+        part.textContent = state.delivery.current + " / " + state.delivery.total + (state.delivery.path ? " · " + state.delivery.path : "");
+      });
       document.querySelectorAll("[data-prev]").forEach(function (button) { button.disabled = state.delivery.current <= 1; });
       document.querySelectorAll("[data-next]").forEach(function (button) { button.disabled = state.delivery.current >= state.delivery.total; });
     }
@@ -423,15 +450,20 @@
         state.ticket = data.ticket; setDelivery(data.delivery); await loadStatus();
         document.getElementById("request-ticket").value = data.ticket;
         document.getElementById("review-ticket").value = data.ticket;
+        document.getElementById("request-target").value = body.target;
         showToast("Investigation ready — copy the context for your AI");
       } catch (error) { report(error); } finally { busy(button, false); }
     });
 
     function renderPreview(plan) {
       state.preview = plan.valid ? plan : null;
-      document.getElementById("run-request").disabled = !plan.valid;
+      var run = document.getElementById("run-request");
+      var actionable = plan.valid && plan.kind !== "conversation" && !plan.duplicate_of;
+      run.disabled = !actionable;
+      run.textContent = plan.kind === "final_solution" ? "Archive final plan" : "Run retrieval";
+      run.dataset.label = run.textContent;
       document.getElementById("operation-count").textContent = plan.valid ? plan.operation_count : "!";
-      document.getElementById("request-objective").textContent = plan.valid ? plan.objective : plan.error;
+      document.getElementById("request-objective").textContent = plan.valid ? (plan.objective || plan.label) : plan.error;
       var message = document.getElementById("request-message");
       if (!plan.valid) {
         message.innerHTML = '<div class="error">' + esc(plan.error) + '</div><button class="button ghost" id="copy-repair" style="margin-top:10px">Copy repair prompt for AI</button>';
@@ -439,7 +471,15 @@
         document.getElementById("request-plan").innerHTML = "";
         return;
       }
-      message.innerHTML = '<div class="success">Valid Project Brain request. Review the plan, then approve it.</div>';
+      if (plan.kind === "conversation") {
+        message.innerHTML = '<div class="success"><strong>Reply directly in the AI chat.</strong><br>' + esc(plan.message) + '</div>';
+      } else if (plan.kind === "final_solution") {
+        message.innerHTML = '<div class="success"><strong>Ready to implement.</strong><br>' + esc(plan.message) + '</div>';
+      } else if (plan.duplicate_of) {
+        message.innerHTML = '<div class="error">This retrieval already ran as request ' + String(plan.duplicate_of).padStart(3, "0") + '. Return the earlier result to the AI instead of running it again.</div>';
+      } else {
+        message.innerHTML = '<div class="success">Valid repository request. Review exactly what Brain will retrieve, then run it.</div>';
+      }
       document.getElementById("request-plan").innerHTML = plan.actions.map(function (action) {
         var scope = action.repos.length ? action.repos.join(", ") : "all repositories";
         return '<div class="action"><strong>' + esc(action.kind) + '</strong><div>' + esc(action.value) + '<br><span class="help">' + esc(scope) + '</span></div></div>';
@@ -447,13 +487,13 @@
     }
     document.getElementById("preview-request").addEventListener("click", async function () {
       var button = this; busy(button, true, "Validating…");
-      try { renderPreview(await api("/api/preview", {method:"POST",body:JSON.stringify({text:document.getElementById("request-text").value})})); }
+      try { renderPreview(await api("/api/preview", {method:"POST",body:JSON.stringify({ticket:document.getElementById("request-ticket").value,text:document.getElementById("request-text").value})})); }
       catch (error) { report(error); } finally { busy(button, false); }
     });
     document.getElementById("request-text").addEventListener("input", function () { state.preview = null; document.getElementById("run-request").disabled = true; });
     document.getElementById("run-request").addEventListener("click", async function () {
       if (!state.preview) return;
-      var button = this; busy(button, true, "Retrieving…");
+      var button = this; busy(button, true, state.preview.kind === "final_solution" ? "Archiving…" : "Retrieving…");
       try {
         var body = {
           ticket: document.getElementById("request-ticket").value,
@@ -461,9 +501,11 @@
           include_diff: document.getElementById("request-diff").checked,
           target: document.getElementById("request-target").value
         };
-        var data = await api("/api/context", {method:"POST",body:JSON.stringify(body)});
-        state.ticket = data.ticket; setDelivery(data.delivery); await loadStatus();
-        showToast("Evidence ready — copy it back to the same AI chat");
+        var data = await api("/api/continue", {method:"POST",body:JSON.stringify(body)});
+        state.ticket = data.ticket;
+        if (data.delivery) setDelivery(data.delivery);
+        await loadStatus();
+        showToast(data.kind === "final_solution" ? "Final plan archived — ready to implement" : "Evidence ready — return it to the same AI chat");
       } catch (error) { report(error); } finally { busy(button, false); }
     });
 
@@ -507,10 +549,25 @@
     document.getElementById("open-session").addEventListener("click", function () { openSession().catch(report); });
     document.getElementById("session-select").addEventListener("change", function () { if (this.value) openSession().catch(report); });
 
+    document.getElementById("generate-agent-kit").addEventListener("click", async function () {
+      var button = this; busy(button, true, "Generating…");
+      try {
+        var data = await api("/api/agent-kit", {method:"POST",body:"{}"});
+        document.getElementById("agent-instructions").textContent = data.instructions;
+        var paths = document.getElementById("agent-paths");
+        paths.style.display = "block";
+        paths.textContent = "Created " + data.instructions_path + " · " + data.knowledge_path + " · " + data.setup_path;
+        showToast("M365 Agent setup kit generated");
+      } catch (error) { report(error); } finally { busy(button, false); }
+    });
+    document.getElementById("copy-agent-instructions").addEventListener("click", function () {
+      copyText(document.getElementById("agent-instructions").textContent).then(function () { showToast("Agent Instructions copied"); }).catch(report);
+    });
+
     if (!token) {
       document.getElementById("project-name").textContent = "Missing local session token. Reopen the URL printed by brain ui.";
     } else {
-      loadStatus().catch(report);
+      loadStatus().then(function () { if (state.ticket) openSession().catch(report); }).catch(report);
     }
   </script>
 </body>

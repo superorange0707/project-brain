@@ -37,7 +37,7 @@ then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.4.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.0"
 ```
 
 Upgrade later with:
@@ -49,7 +49,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.4.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.0"
 ```
 
 ### From a source checkout
@@ -274,7 +274,44 @@ End-of-day batch processing in batch-service.
 
 Knowledge files are searched alongside code on every relevant request.
 
-## 6. Local investigation cockpit
+## 6. Create a persistent M365 Copilot Agent
+
+Project Brain can generate the permanent Instructions and stable project
+knowledge for Microsoft 365 Copilot Agent Builder:
+
+```bash
+brain agent-kit m365
+```
+
+This creates:
+
+```text
+generated/m365-agent/
+├── INSTRUCTIONS.md
+├── PROJECT_KNOWLEDGE.md
+└── SETUP.md
+```
+
+Paste `INSTRUCTIONS.md` into the Agent Builder **Instructions** field. Add
+`PROJECT_KNOWLEDGE.md` plus approved IPF, architecture, API, deployment, and
+coding-standard documents to **Knowledge**. Keep operational instructions in the
+Instructions field rather than hiding them in a knowledge document.
+
+Recommended settings:
+
+- default response mode: **Think deeper**;
+- enable **Only use specified sources**;
+- disable broad web, email, Teams, and people sources unless the project needs
+  them;
+- enable code interpreter only when document, log, JSON, or spreadsheet analysis
+  is useful.
+
+The M365 Agent remains the user-facing investigator. It asks the developer
+directly for business, document, runtime, and environment facts. It emits a
+`CONTEXT_REQUEST` only when local repository evidence is required. Project Brain
+does not install a connector, request an M365 credential, or call the cloud.
+
+## 7. Local investigation cockpit
 
 Run the editor-independent GUI from a Brain workspace:
 
@@ -286,9 +323,12 @@ The command prints and opens a random-token URL on `127.0.0.1`. The page provide
 
 - repository snapshot, index, and ticket-session health;
 - a ticket form that synchronizes repos and creates the AI start context;
-- an AI Request Inbox that accepts the complete model response;
+- a Continue with AI inbox that distinguishes direct conversation, repository
+  requests, duplicate retrievals, and final solutions;
 - a deterministic request preview before any search or source read;
+- retrieval progress showing unique evidence and no-progress turns;
 - evidence chunk navigation and clipboard delivery;
+- a one-click M365 Agent setup kit;
 - implementation feedback containing tracked diffs and observed test output;
 - access to saved ticket, request, context, and feedback artifacts.
 
@@ -298,7 +338,7 @@ No AI model runs inside the page. It does not execute tests or edit code. Closin
 The remaining sections document the equivalent terminal workflow and are useful
 for automation, M365 file delivery, or troubleshooting.
 
-## 7. Start an investigation
+## 8. Start an investigation
 
 Put the ticket body in a text or Markdown file:
 
@@ -322,9 +362,37 @@ generated facts, and glossary. For Claude, it is copied automatically. Use
 brain start ABC-1234 --ticket-file ticket.md --target m365
 ```
 
-Upload the printed `.runs/ABC-1234/start.md` file.
+Upload the printed `.runs/ABC-1234/current-handoff.md` file to the dedicated M365
+Agent. Brain replaces this same file after every retrieval and implementation
+feedback package, so you never create or rename a Markdown file manually.
 
-## 8. Fulfil a `CONTEXT_REQUEST`
+## 9. Continue an AI investigation
+
+The preferred command accepts the AI's complete reply:
+
+```bash
+brain continue ABC-1234 --clipboard --target claude
+```
+
+It deterministically routes the reply:
+
+- `CONTEXT_REQUEST`: validate, retrieve, and deliver local evidence;
+- normal conversation: tell the developer to answer the AI directly;
+- `FINAL_SOLUTION`: archive the plan and mark the ticket ready to implement.
+
+For M365, use:
+
+```bash
+brain continue ABC-1234 --file ai-response.txt --target m365
+```
+
+Then upload the refreshed `.runs/ABC-1234/current-handoff.md`. Use the same M365
+Agent conversation so it retains earlier documents, human answers, and evidence.
+
+The strict `brain ctx` command remains useful for automation when the input is
+known to contain a `CONTEXT_REQUEST`.
+
+### `CONTEXT_REQUEST` format
 
 The AI should either ask for evidence or return a final solution. A full request:
 
@@ -395,7 +463,13 @@ The preview validates repository names and lists every search, symbol operation,
 file read, and history query. JSON request objects are accepted as well as fenced
 YAML inside a complete chat response.
 
-## 9. Claude chunk navigation
+An identical retrieval plan against the same pinned repository snapshots is
+rejected. Every returned context reports new evidence regions, previously seen
+evidence, recent retrieval objectives, and consecutive no-progress requests. A
+no-progress result tells the AI to ask for a specific external/runtime fact or
+produce `FINAL_SOLUTION`, rather than continuing open-ended repository searches.
+
+## 10. Claude chunk navigation
 
 Large contexts are saved as numbered parts. The first is copied automatically.
 
@@ -415,12 +489,14 @@ All requests and responses remain under `.runs/ABC-1234/`:
 ├── context-001.md
 ├── request-002.yml
 ├── context-002.md
+├── current-handoff.md
+├── final-solution.md
 ├── feedback-001.md
 ├── delivery/
 └── session.json
 ```
 
-## 10. Exploration commands
+## 11. Exploration commands
 
 ### Exact or regular-expression search
 
@@ -492,7 +568,7 @@ brain learn ABC-1234
 Fill in the generated short template under `knowledge/tickets/`. Future searches
 can reuse the root cause, flow, tests, and gotchas.
 
-## 11. Review your implementation
+## 12. Review your implementation
 
 After applying the AI's solution and running tests yourself, package the observed
 result for the same chat:
@@ -509,7 +585,7 @@ For Claude-style delivery the first part is copied automatically. Add
 and test output. Project Brain never runs the command; it labels the output as an
 observed human result and asks the AI to find gaps or request more evidence.
 
-## 12. Security model
+## 13. Security model
 
 Project Brain does not:
 
@@ -536,7 +612,7 @@ It does read source and can place that source on your clipboard or in Markdown.
 Treat context packs with the same confidentiality as the repositories they came
 from. See [SECURITY.md](../SECURITY.md).
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 ### `No brain.toml/config.yml found`
 
@@ -591,7 +667,7 @@ or persist SSH keys itself. Use
 `brain init --no-fetch`, `brain refresh --no-fetch`, or `brain start --no-sync`
 when offline.
 
-## 14. Updating and uninstalling
+## 15. Updating and uninstalling
 
 ```bash
 uv tool upgrade project-brain-context

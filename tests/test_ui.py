@@ -67,6 +67,9 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("Project Brain", html)
         self.assertIn("Branch / status", html)
         self.assertIn('esc(repo.ref || "working tree")', html)
+        self.assertIn("Continue with AI", html)
+        self.assertIn("Retrieval plan", html)
+        self.assertIn("M365 agent", html)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         with self.assertRaises(HTTPError) as caught:
             self.get("/api/status", authorized=False)
@@ -90,9 +93,9 @@ CONTEXT_REQUEST:
   history: []
 ```
 """
-        _, invalid, _ = self.post("/api/preview", {"text": "please inspect HelloService"})
-        self.assertFalse(invalid["data"]["valid"])
-        self.assertIn("repair_prompt", invalid["data"])
+        _, conversation, _ = self.post("/api/preview", {"text": "Which environment is active?"})
+        self.assertTrue(conversation["data"]["valid"])
+        self.assertEqual("conversation", conversation["data"]["kind"])
 
         _, preview, _ = self.post("/api/preview", {"text": request_text})
         self.assertTrue(preview["data"]["valid"])
@@ -106,11 +109,23 @@ CONTEXT_REQUEST:
         self.assertIn("PROJECT BRAIN — START", started["data"]["delivery"]["content"])
 
         _, context, _ = self.post(
-            "/api/context",
+            "/api/continue",
             {"ticket": "UI-1", "text": request_text, "include_diff": False, "target": "claude"},
         )
         self.assertEqual(1, context["data"]["request"])
+        self.assertEqual("context_request", context["data"]["kind"])
         self.assertIn("HelloService.java", context["data"]["delivery"]["content"])
+
+        _, duplicate, _ = self.post("/api/preview", {"ticket": "UI-1", "text": request_text})
+        self.assertEqual(1, duplicate["data"]["duplicate_of"])
+
+        _, final, _ = self.post(
+            "/api/continue",
+            {"ticket": "UI-1", "text": "FINAL_SOLUTION\nChange HelloService.", "target": "m365"},
+        )
+        self.assertEqual("final_solution", final["data"]["kind"])
+        self.assertEqual("ready_to_implement", final["data"]["session"]["status"])
+        self.assertTrue((self.root / ".runs/UI-1/current-handoff.md").is_file())
 
         _, feedback, _ = self.post(
             "/api/feedback",
@@ -132,9 +147,15 @@ CONTEXT_REQUEST:
         self.assertIn("start.md", names)
         self.assertIn("context-001.md", names)
         self.assertIn("feedback-001.md", names)
+        self.assertIn("final-solution.md", names)
+        self.assertIn("current-handoff.md", names)
 
         _, artifact, _ = self.get("/api/artifact?ticket=UI-1&name=context-001.md")
         self.assertIn("HelloService.java", artifact["data"]["content"])
+
+        _, kit, _ = self.post("/api/agent-kit", {})
+        self.assertIn("Project Brain", kit["data"]["instructions"])
+        self.assertTrue(Path(kit["data"]["instructions_path"]).is_file())
 
     def test_artifact_path_traversal_is_rejected(self) -> None:
         self.post("/api/start", {"ticket": "UI-2", "ticket_text": "Test security.", "sync": False})
