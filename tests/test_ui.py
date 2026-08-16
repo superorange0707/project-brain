@@ -5,12 +5,13 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from brain.core import load_settings
-from brain.ui import _Server
+from brain.ui import _Server, serve_ui
 
 
 class LocalUiTest(unittest.TestCase):
@@ -139,6 +140,19 @@ CONTEXT_REQUEST:
             self.get("/api/artifact?ticket=UI-2&name=" + quote("../session.json", safe=""))
         self.assertEqual(400, caught.exception.code)
         caught.exception.close()
+
+
+class UiShutdownTest(unittest.TestCase):
+    @patch("brain.ui._Server")
+    def test_repeated_interrupt_during_shutdown_is_quiet(self, server_type) -> None:
+        server = server_type.return_value
+        server.server_address = ("127.0.0.1", 8765)
+        server.serve_forever.side_effect = KeyboardInterrupt
+        server.server_close.side_effect = KeyboardInterrupt
+
+        serve_ui(object(), port=8765, open_browser=False)
+
+        server.server_close.assert_called_once_with()
 
 
 if __name__ == "__main__":

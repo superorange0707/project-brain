@@ -372,4 +372,8 @@ def serve_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True)
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        try:
+            server.server_close()
+        except KeyboardInterrupt:
+            pass
+        print("\nProject Brain UI stopped.")

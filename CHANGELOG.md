@@ -2,6 +2,13 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.3.1] - 2026-08-16
+
+### Fixed
+
+- Stop the standalone local UI cleanly when a packaged executable receives an
+  interrupt during socket shutdown, without printing a PyInstaller traceback.
+
 ## [0.3.0] - 2026-08-16
 
 ### Added
@@ -78,8 +85,9 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
-[0.2.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.2.1
+[0.3.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.1
 [0.3.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.0
+[0.2.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.2.1
 [0.2.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.2.0
 [0.1.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.1.2
 [0.1.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.1.1
