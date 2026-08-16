@@ -31,7 +31,8 @@ from brain.core import (
     trace_symbol,
 )
 from brain.relations import generate_relationship_map
-from brain.sync import sync_repositories
+from brain import sync as sync_module
+from brain.sync import _ssh_endpoint, sync_repositories
 from brain.graph import graph_symbol_hits, index_graph
 
 
@@ -482,6 +483,48 @@ class GitSyncTest(unittest.TestCase):
             self.assertEqual("new remote\n", (settings.repo("service-a").scan_path / "value.txt").read_text(encoding="utf-8"))
             self.assertEqual("local uncommitted\n", (work / "value.txt").read_text(encoding="utf-8"))
             self.assertEqual("main", self._git(work, "branch", "--show-current"))
+
+    def test_ssh_authentication_failure_is_not_retried_for_every_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = ['[project]\nname="ssh-sync-test"']
+            for name in ("service-a", "service-b", "service-c"):
+                repo = root / name
+                repo.mkdir()
+                self._git(repo, "init", "-b", "main")
+                self._git(repo, "config", "user.name", "Test")
+                self._git(repo, "config", "user.email", "test@example.invalid")
+                (repo / "value.txt").write_text(name + "\n", encoding="utf-8")
+                self._git(repo, "add", "value.txt")
+                self._git(repo, "commit", "-m", "initial")
+                self._git(repo, "remote", "add", "origin", f"git@example.test:team/{name}.git")
+                self._git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+                self._git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+                rows.append(f'[[repositories]]\nname="{name}"\npath="{name}"')
+            config = root / "brain.toml"
+            config.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            settings = load_settings(config)
+            fetch_environments: list[dict[str, str] | None] = []
+            original_git = sync_module._git
+
+            def fake_git(repo, *args, binary=False, extra_env=None):
+                if args and args[0] == "fetch":
+                    fetch_environments.append(extra_env)
+                    return subprocess.CompletedProcess(["git", *args], 128, "", "Permission denied (publickey).")
+                return original_git(repo, *args, binary=binary, extra_env=extra_env)
+
+            with mock.patch("brain.sync._git", side_effect=fake_git):
+                results = sync_repositories(settings)
+
+            self.assertEqual(1, len(fetch_environments))
+            self.assertIn("ControlMaster=auto", fetch_environments[0]["GIT_SSH_COMMAND"])
+            self.assertEqual(2, sum("skipped another password prompt" in (result.warning or "") for result in results))
+
+    def test_ssh_remote_detection(self) -> None:
+        self.assertEqual("git@github.com", _ssh_endpoint("git@github.com:team/project.git"))
+        self.assertEqual("git@example.test:2222", _ssh_endpoint("ssh://git@example.test:2222/team/project.git"))
+        self.assertIsNone(_ssh_endpoint("https://github.com/team/project.git"))
+        self.assertIsNone(_ssh_endpoint("/tmp/origin.git"))
 
 
 class ReleaseSafetyTest(unittest.TestCase):

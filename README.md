@@ -69,7 +69,7 @@ Download the archive for your CPU from the
 extract it, and place both executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.3.1-macos-arm64.tar.gz
+tar -xzf project-brain-v0.3.2-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp ~/.local/bin/
 ```
@@ -80,19 +80,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.2"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.2"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.3.1/project_brain_context-0.3.1-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.3.2/project_brain_context-0.3.2-py3-none-any.whl
 ```
 
 Then verify:
@@ -116,6 +116,12 @@ immutable snapshots of the remote default branches, prepares lazy structural
 indexing, and generates the project relationship map. A fetch failure is reported per repo
 and falls back to the newest locally available commit; it never blocks the other
 repositories.
+
+For SSH remotes, one temporary multiplexed connection is reused per host during
+the sync. An unlocked key therefore prompts at most once per host, not once per
+repository. The socket expires after the sync; Project Brain never reads or stores
+the passphrase. If authentication fails, later repos on that host use their local
+remote refs instead of repeating the prompt.
 
 Open the local investigation cockpit:
 

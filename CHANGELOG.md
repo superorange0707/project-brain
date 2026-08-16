@@ -2,6 +2,15 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.3.2] - 2026-08-16
+
+### Fixed
+
+- Reuse one temporary OpenSSH connection per host during multi-repository sync,
+  avoiding a separate private-key passphrase prompt for every repository.
+- Stop retrying the same SSH host after authentication fails once in a sync,
+  while preserving locally available source snapshots for the remaining repos.
+
 ## [0.3.1] - 2026-08-16
 
 ### Fixed
@@ -85,6 +94,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.3.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.2
 [0.3.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.1
 [0.3.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.0
 [0.2.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.2.1

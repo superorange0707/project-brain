@@ -37,7 +37,7 @@ then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.2"
 ```
 
 Upgrade later with:
@@ -49,7 +49,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.2"
 ```
 
 ### From a source checkout
@@ -131,6 +131,13 @@ It deliberately never runs `pull`, `checkout`, `reset`, `clean`, merge, or rebas
 Your current branch, staged files, and uncommitted edits are unchanged. If a fetch
 fails, that repo uses its newest locally available remote ref and reports the
 failure; other repos continue.
+
+SSH remotes on the same host share a temporary OpenSSH multiplexed connection
+during each sync. The first repository can ask for the key passphrase once; the
+remaining repositories reuse that authenticated connection. The control socket
+is temporary, expires after the operation, and contains no credential. After an
+authentication failure, Project Brain skips further prompts for that host during
+the same sync and falls back to locally available remote refs.
 
 `brain start` performs this sync once at the beginning of a ticket, so every later
 context request in that investigation uses a stable source snapshot. Run
@@ -539,6 +546,12 @@ Run `git fetch origin` in that repository to see Git's full diagnostic. Project
 Brain intentionally stores only the exit code so a credential-bearing remote URL
 cannot leak into state or context. Fix the normal Git/SSH/VPN access, then run
 `brain sync`.
+
+If an SSH key is still locked, load it into your normal agent once with
+`ssh-add` (or use your organization's standard key manager) and rerun
+`brain sync`. Project Brain does not manage or persist SSH keys itself. Use
+`brain init --no-fetch`, `brain refresh --no-fetch`, or `brain start --no-sync`
+when offline.
 
 ## 14. Updating and uninstalling
 
