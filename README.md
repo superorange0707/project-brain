@@ -69,7 +69,7 @@ Download the archive for your CPU from the
 extract it, and place both executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.3.2-macos-arm64.tar.gz
+tar -xzf project-brain-v0.4.0-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp ~/.local/bin/
 ```
@@ -80,19 +80,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.2"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.4.0"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.2"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.4.0"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.3.2/project_brain_context-0.3.2-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.4.0/project_brain_context-0.4.0-py3-none-any.whl
 ```
 
 Then verify:
@@ -112,16 +112,24 @@ brain init --name payments-platform
 ```
 
 That one command discovers every nested Git repo, fetches `origin`, creates
-immutable snapshots of the remote default branches, prepares lazy structural
-indexing, and generates the project relationship map. A fetch failure is reported per repo
-and falls back to the newest locally available commit; it never blocks the other
-repositories.
+immutable snapshots, prepares lazy structural indexing, and generates the project
+relationship map. By default it prefers each repo's fresh `origin/develop` or
+`origin/development`, then falls back to that repo's remote default branch. A
+fetch failure is reported per repo and falls back to the newest locally available
+commit; it never blocks the other repositories.
 
 For SSH remotes, one temporary multiplexed connection is reused per host during
-the sync. An unlocked key therefore prompts at most once per host, not once per
-repository. The socket expires after the sync; Project Brain never reads or stores
-the passphrase. If authentication fails, later repos on that host use their local
-remote refs instead of repeating the prompt.
+the sync. Only the first fetch may interactively request a passphrase; every later
+fetch is forced into non-interactive mode. The socket expires after the sync, and
+macOS Keychain access is explicitly disabled. Project Brain never reads or stores
+the passphrase. When reuse is unavailable, later repos use their local remote refs
+instead of repeating the prompt. A timed-out fetch also terminates its SSH child
+processes, so no abandoned prompt is left running in the terminal.
+
+Private intranet GitLab works without an API integration: Project Brain invokes
+the installed Git against each existing `origin`, inheriting the machine's VPN,
+SSH config, host aliases, and proxy rules. It never sends a remote URL, key, or
+passphrase to a hosted Project Brain service—there is no such service.
 
 Open the local investigation cockpit:
 
@@ -140,7 +148,15 @@ Prefer the terminal? Start a ticket investigation directly:
 brain start ABC-1234 --ticket-file ticket.md --target claude
 ```
 
-Paste the generated start context into the chat. When the AI responds with a
+If one repo already has the ticket branch on `origin`, select it for this session
+without changing any checkout:
+
+```bash
+brain start ABC-1234 --branch payment-service=feature/ABC-1234 --ticket-file ticket.md
+```
+
+All other repositories still use their development/default branches. Paste the
+generated start context into the chat. When the AI responds with a
 `CONTEXT_REQUEST`, copy it and run:
 
 ```bash
@@ -166,7 +182,8 @@ and a realistic eligibility bug. It contains no network remote or credential.
 The GUI is a thin, local layer over the same tested retrieval core as the CLI:
 
 - **Project health** shows snapshot SHAs, fetch state, and structural/lexical index status.
-- **Start ticket** optionally synchronizes every repo and pins the investigation to exact commits.
+- **Start ticket** optionally synchronizes every repo, accepts per-repo feature
+  branches, and pins the investigation to exact commits.
 - **AI Request Inbox** extracts YAML or JSON from the complete chat response, validates repository names, and previews every operation before execution.
 - **Evidence context** provides chunk navigation and one-click clipboard delivery.
 - **Review changes** packages tracked diffs, developer notes, and observed test output; it never runs the command or claims success itself.
@@ -274,11 +291,13 @@ request syntax, troubleshooting, and operational guidance.
 
 ## Privacy and safety
 
-Project Brain invokes `git fetch` using your existing Git configuration and
-credential helper. It never reads, stores, logs, or asks for a token, and never
-puts a remote URL in generated state. It makes no model/API requests. Generated
-context can still contain proprietary source or secrets already present in a repo.
-Review context before pasting or uploading it outside your organization.
+Project Brain invokes `git fetch` using your existing Git configuration and SSH
+environment. For SSH fetches on macOS it explicitly passes `UseKeychain=no`; it
+never reads, stores, logs, or asks for a token, and never puts a remote URL in
+generated state. HTTPS remotes remain under Git's configured credential-helper
+policy. Project Brain makes no model/API requests. Generated context can still
+contain proprietary source or secrets already present in a repo. Review context
+before pasting or uploading it outside your organization.
 
 `brain ui` binds to IPv4 loopback only, uses a random per-process API token,
 rejects non-local Host headers, limits request bodies, sends a restrictive browser

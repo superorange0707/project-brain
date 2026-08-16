@@ -30,7 +30,7 @@ from .core import (
     trace_symbol,
 )
 from .relations import generate_relationship_map
-from .sync import SyncResult, sync_repositories
+from .sync import SyncResult, parse_branch_overrides, sync_repositories
 from .graph import GraphIndexResult, index_graph
 
 
@@ -53,8 +53,10 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("index", help="index current source snapshots")
     sync = commands.add_parser("sync", help="fetch every repo and create read-only remote snapshots")
     sync.add_argument("--no-fetch", action="store_true", help="snapshot locally available commits only")
+    sync.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="override one repository branch")
     refresh = commands.add_parser("refresh", help="sync repositories and regenerate project intelligence")
     refresh.add_argument("--no-fetch", action="store_true", help="refresh from locally available commits")
+    refresh.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="override one repository branch")
     commands.add_parser("map", help="regenerate deterministic project facts")
 
     search_parser = commands.add_parser("search", help="exact/regex search across repositories")
@@ -81,6 +83,7 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--target", choices=("claude", "m365"), default="claude")
     start.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     start.add_argument("--no-sync", action="store_true", help="use the last source snapshots")
+    start.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="analyze a feature branch in one repository")
     start.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
     context = commands.add_parser("ctx", help="fulfil a CONTEXT_REQUEST")
@@ -162,8 +165,13 @@ def _print_graph(results: list[GraphIndexResult]) -> None:
         print(f"graph {result.repo}: {result.status}" + (f" ({result.detail})" if result.detail else ""))
 
 
-def _refresh_all(settings, *, fetch: bool) -> tuple[list[SyncResult], list[GraphIndexResult]]:
-    results = sync_repositories(settings, fetch=fetch)
+def _refresh_all(
+    settings,
+    *,
+    fetch: bool,
+    branch_overrides: dict[str, str] | None = None,
+) -> tuple[list[SyncResult], list[GraphIndexResult]]:
+    results = sync_repositories(settings, fetch=fetch, branch_overrides=branch_overrides)
     snapshot_indexes(settings, changed_only=True)
     generate_map(settings)
     generate_relationship_map(settings)
@@ -203,6 +211,9 @@ def _init(args: argparse.Namespace) -> int:
         "",
         "[graph]",
         'mode = "lazy"',
+        "",
+        "[sources]",
+        'branch_priority = ["develop", "development"]',
         "",
         "[knowledge]",
         'path = "knowledge"',
@@ -328,10 +339,20 @@ def execute(args: argparse.Namespace) -> int:
         _print_graph(index_graph(settings, changed_only=False))
         return 0
     if args.command == "sync":
-        _print_sync(sync_repositories(settings, fetch=not args.no_fetch))
+        _print_sync(
+            sync_repositories(
+                settings,
+                fetch=not args.no_fetch,
+                branch_overrides=parse_branch_overrides(settings, args.branch),
+            )
+        )
         return 0
     if args.command == "refresh":
-        results, graphs = _refresh_all(settings, fetch=not args.no_fetch)
+        results, graphs = _refresh_all(
+            settings,
+            fetch=not args.no_fetch,
+            branch_overrides=parse_branch_overrides(settings, args.branch),
+        )
         _print_sync(results)
         _print_graph(graphs)
         print(f"Generated {settings.generated_dir / 'PROJECT_FACTS.md'}")
@@ -370,8 +391,14 @@ def execute(args: argparse.Namespace) -> int:
     if args.command == "start":
         synced: list[SyncResult] = []
         graphs: list[GraphIndexResult] = []
+        if args.no_sync and args.branch:
+            raise BrainError("--branch requires sync; remove --no-sync")
         if not args.no_sync:
-            synced, graphs = _refresh_all(settings, fetch=True)
+            synced, graphs = _refresh_all(
+                settings,
+                fetch=True,
+                branch_overrides=parse_branch_overrides(settings, args.branch),
+            )
             if not args.json:
                 _print_sync(synced)
                 _print_graph(graphs)

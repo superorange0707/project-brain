@@ -36,10 +36,13 @@ class Repository:
     path: Path
     description: str = ""
     tags: list[str] = field(default_factory=list)
+    branch: str | None = None
     source_path: Path | None = None
     source_ref: str | None = None
     source_sha: str | None = None
     source_status: str = "working tree"
+    source_fetched: bool = False
+    source_warning: str | None = None
 
     @property
     def scan_path(self) -> Path:
@@ -64,6 +67,7 @@ class Settings:
     clipboard_chunk_chars: int = 180_000
     graph_enabled: bool = True
     graph_lazy: bool = True
+    branch_priority: list[str] = field(default_factory=lambda: ["develop", "development"])
 
     def repos(self, names: Iterable[str] | None = None) -> list[Repository]:
         wanted = set(names or [])
@@ -291,12 +295,24 @@ def load_settings(path: str | Path | None = None) -> Settings:
         repo_path = Path(os.path.expandvars(str(value["path"]))).expanduser()
         if not repo_path.is_absolute():
             repo_path = root / repo_path
-        repositories.append(Repository(name, repo_path.resolve(), str(value.get("description") or ""), list(value.get("tags") or [])))
+        repositories.append(
+            Repository(
+                name,
+                repo_path.resolve(),
+                str(value.get("description") or ""),
+                list(value.get("tags") or []),
+                str(value.get("branch") or "").strip() or None,
+            )
+        )
     knowledge = data.get("knowledge") or {}
     context = data.get("context") or {}
     search = data.get("search") or {}
     delivery = data.get("delivery") or {}
     graph = data.get("graph") or {}
+    sources = data.get("sources") or {}
+    branch_priority = sources.get("branch_priority", ["develop", "development"])
+    if not isinstance(branch_priority, list):
+        raise BrainError("sources.branch_priority must be a list")
     graph_mode = str(graph.get("mode") or "lazy")
     if graph_mode not in {"lazy", "eager"}:
         raise BrainError("graph.mode must be lazy or eager")
@@ -321,6 +337,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         clipboard_chunk_chars=int(delivery.get("clipboard_chunk_chars") or 180_000),
         graph_enabled=bool(graph.get("enabled", True)),
         graph_lazy=graph_mode == "lazy",
+        branch_priority=[str(value).strip() for value in branch_priority if str(value).strip()],
     )
     _attach_source_snapshots(settings)
     return settings
@@ -347,6 +364,8 @@ def _attach_source_snapshots(settings: Settings) -> None:
             repo.source_ref = str(item.get("ref") or "") or None
             repo.source_sha = str(item.get("sha") or "") or None
             repo.source_status = str(item.get("status") or "snapshot")
+            repo.source_fetched = bool(item.get("fetched"))
+            repo.source_warning = str(item.get("warning") or "") or None
 
 
 def git_head(repo: Repository) -> str | None:
@@ -593,7 +612,17 @@ def generate_map(settings: Settings) -> str:
     output = ["# Generated Project Facts", "", f"Generated: {datetime.now(UTC).isoformat()}", ""]
     annotation = r"@(RestController|Controller|Service|Repository|FeignClient|KafkaListener|Scheduled|Entity|Table|RequestMapping|GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping)\b"
     for repo in settings.repositories:
-        output.extend([f"## {repo.name}", "", f"Source: `{repo.source_ref or 'working tree'}` at `{(repo.source_sha or git_head(repo) or 'unknown')[:12]}`", ""])
+        output.extend(
+            [
+                f"## {repo.name}",
+                "",
+                f"Source: `{repo.source_ref or 'working tree'}` at "
+                f"`{(repo.source_sha or git_head(repo) or 'unknown')[:12]}` ({repo.source_status})",
+            ]
+        )
+        if repo.source_warning:
+            output.append(f"Freshness warning: {repo.source_warning}")
+        output.append("")
         if repo.description:
             output.extend([repo.description, ""])
         facts = search_repo(repo, annotation, max_results=300) if repo.scan_path.is_dir() else []
@@ -919,16 +948,20 @@ def pack_context(settings: Settings, ticket: str, request_number: int, bundle: C
         "# PROJECT BRAIN CONTEXT", "", f"Ticket: `{ticket}`", f"Request: `{request_number:03d}`", "",
         "## Objective", "", bundle.objective, "", "## Repository state", "",
     ]
+    warnings = list(bundle.warnings)
     for repo in settings.repositories:
         local = git_head(repo)
         source = repo.source_sha or local
         output.append(
             f"- `{repo.name}` — analyzed `{(source or 'not a Git repository')[:12]}` "
-            f"from `{repo.source_ref or 'working tree'}`; local HEAD `{(local or 'n/a')[:12]}`"
+            f"from `{repo.source_ref or 'working tree'}` ({repo.source_status}); "
+            f"local HEAD `{(local or 'n/a')[:12]}`"
         )
-    if bundle.warnings:
+        if repo.source_warning:
+            warnings.append(f"{repo.name}: {repo.source_warning}")
+    if warnings:
         output.extend(["", "## Warnings", ""])
-        output.extend(f"- {warning}" for warning in bundle.warnings)
+        output.extend(f"- {warning}" for warning in warnings)
     if bundle.relationships:
         output.extend(["", "## Static execution relationships", "", "```text", *sorted(set(bundle.relationships)), "```"])
     output.extend(["", "## Source evidence", ""])
@@ -1053,7 +1086,17 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
     ticket_path = directory / "ticket.md"
     ticket_path.write_text(ticket_text.rstrip() + "\n", encoding="utf-8")
     prompt = package_files("brain").joinpath("prompt.md").read_text(encoding="utf-8")
-    sections = ["# PROJECT BRAIN — START", "", f"Project: `{settings.name}`", f"Ticket: `{ticket}`", "", "## Operating protocol", "", prompt, "", "## Ticket", "", ticket_text.strip(), ""]
+    sections = ["# PROJECT BRAIN — START", "", f"Project: `{settings.name}`", f"Ticket: `{ticket}`", ""]
+    sections.extend(["## Repository snapshot manifest", ""])
+    for repo in settings.repositories:
+        source = repo.source_sha or git_head(repo)
+        sections.append(
+            f"- `{repo.name}` — `{repo.source_ref or 'working tree'}` at "
+            f"`{(source or 'unknown')[:12]}` ({repo.source_status})"
+        )
+        if repo.source_warning:
+            sections.append(f"  - Freshness warning: {repo.source_warning}")
+    sections.extend(["", "## Operating protocol", "", prompt, "", "## Ticket", "", ticket_text.strip(), ""])
     for title, path in (
         ("Human project map", settings.knowledge_dir / "PROJECT_MAP.md"),
         ("Generated project facts", settings.generated_dir / "PROJECT_FACTS.md"),
@@ -1078,6 +1121,8 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
                     "ref": repo.source_ref,
                     "sha": repo.source_sha,
                     "status": repo.source_status,
+                    "fetched": repo.source_fetched,
+                    "warning": repo.source_warning,
                 }
                 for repo in settings.repositories
             },
@@ -1101,6 +1146,8 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
             repo.source_ref = str(source.get("ref") or "") or None
             repo.source_sha = str(source.get("sha") or "") or None
             repo.source_status = str(source.get("status") or "session snapshot")
+            repo.source_fetched = bool(source.get("fetched"))
+            repo.source_warning = str(source.get("warning") or "") or None
     number = int(state.get("requests") or 0) + 1
     (directory / f"request-{number:03d}.yml").write_text(request_text.rstrip() + "\n", encoding="utf-8")
     bundle = retrieve_context(settings, request, include_diff=include_diff)

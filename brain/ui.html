@@ -221,6 +221,7 @@
             <p class="help">Project Brain pins current remote snapshots and prepares the operating protocol for your chat AI.</p>
             <div class="field"><label for="ticket-id">Ticket identifier</label><input id="ticket-id" placeholder="ABC-1234" autocomplete="off"></div>
             <div class="field"><label for="ticket-text">Ticket description, acceptance criteria, logs and constraints</label><textarea class="tall" id="ticket-text" placeholder="# Problem&#10;&#10;Describe observed and expected behaviour…"></textarea></div>
+            <div class="field"><label for="ticket-branches">Feature branches (optional, one REPO=BRANCH per line)</label><textarea id="ticket-branches" placeholder="payment-service=feature/ABC-1234"></textarea></div>
             <div class="row">
               <label class="check grow"><input type="checkbox" id="ticket-sync" checked> Fetch and pin latest remote commits</label>
               <select id="ticket-target" style="width:auto"><option value="claude">Clipboard chat</option><option value="m365">M365 file context</option></select>
@@ -414,6 +415,7 @@
         var body = {
           ticket: document.getElementById("ticket-id").value,
           ticket_text: document.getElementById("ticket-text").value,
+          branches: document.getElementById("ticket-branches").value,
           sync: document.getElementById("ticket-sync").checked,
           target: document.getElementById("ticket-target").value
         };

@@ -2,6 +2,28 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.4.0] - 2026-08-16
+
+### Added
+
+- Prefer fresh `origin/develop` or `origin/development` snapshots before a
+  repository's release/default branch, with configurable project priorities.
+- Support per-repository `branch` configuration and temporary
+  `--branch REPO=BRANCH` overrides for ticket feature branches.
+- Include the exact branch, commit, sync status, and freshness warnings in AI
+  start/context packs and cross-repository relationship maps.
+
+### Fixed
+
+- Enforce a hard limit of one interactive SSH fetch per endpoint: every later
+  repository uses `BatchMode` and cannot request another passphrase.
+- Explicitly disable macOS `UseKeychain` during Project Brain fetches and retain
+  compatible company `core.sshCommand` options when adding safe SSH controls.
+- Kill the complete Git/SSH process group when a fetch times out, preventing an
+  orphaned SSH process from continuing to request a passphrase.
+- Allow non-interactive fetches up to five minutes for slower company networks
+  while keeping the single interactive attempt bounded.
+
 ## [0.3.2] - 2026-08-16
 
 ### Fixed
@@ -94,6 +116,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.4.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.4.0
 [0.3.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.2
 [0.3.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.1
 [0.3.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.0

@@ -302,9 +302,17 @@ def generate_relationship_map(settings: Settings) -> str:
         "",
         "Every edge below comes from exact static evidence. Runtime configuration, reflection, and dynamic topic/URL construction still require logs or tests.",
         "",
-        "## Runtime workflows",
+        "## Snapshot inputs",
         "",
     ]
+    for repo in settings.repositories:
+        output.append(
+            f"- `{repo.name}` — `{repo.source_ref or 'working tree'}` at "
+            f"`{(repo.source_sha or 'unknown')[:12]}` ({repo.source_status})"
+        )
+        if repo.source_warning:
+            output.append(f"  - Freshness warning: {repo.source_warning}")
+    output.extend(["", "## Runtime workflows", ""])
     output.extend(f"- `{workflow}`" for workflow in workflows) if workflows else output.append("- None detected")
     output.extend(["", "## Relationship edges", ""])
     if relationships:

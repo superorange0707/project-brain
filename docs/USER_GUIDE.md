@@ -37,7 +37,7 @@ then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.2"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.4.0"
 ```
 
 Upgrade later with:
@@ -49,7 +49,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.2"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.4.0"
 ```
 
 ### From a source checkout
@@ -123,9 +123,11 @@ detailed health report.
 
 ### What “latest” means
 
-Project Brain runs `git fetch --prune --quiet origin` for each repo. It then finds
-`origin/HEAD` (falling back to the configured upstream, `origin/main`, or
-`origin/master`) and exports that exact commit with `git archive` below `state/`.
+Project Brain runs `git fetch --prune --quiet origin` for each repo. It then picks
+the first available remote development branch from `[sources].branch_priority`
+(`origin/develop`, then `origin/development` by default). If neither exists, it
+uses `origin/HEAD`, `origin/main`, `origin/master`, or finally the configured
+upstream. It exports that exact commit with `git archive` below `state/`.
 
 It deliberately never runs `pull`, `checkout`, `reset`, `clean`, merge, or rebase.
 Your current branch, staged files, and uncommitted edits are unchanged. If a fetch
@@ -133,16 +135,35 @@ fails, that repo uses its newest locally available remote ref and reports the
 failure; other repos continue.
 
 SSH remotes on the same host share a temporary OpenSSH multiplexed connection
-during each sync. The first repository can ask for the key passphrase once; the
-remaining repositories reuse that authenticated connection. The control socket
-is temporary, expires after the operation, and contains no credential. After an
-authentication failure, Project Brain skips further prompts for that host during
-the same sync and falls back to locally available remote refs.
+during each sync. The first repository can ask for the key passphrase once; all
+later fetches are forced into OpenSSH `BatchMode` and cannot prompt. The control
+socket is temporary, expires after the operation, and contains no credential.
+On macOS, Project Brain also passes `UseKeychain=no`, overriding any inherited
+Keychain lookup for its fetches. If connection reuse is unavailable, later repos
+fall back to locally available remote refs. When a fetch reaches its timeout,
+Project Brain terminates both Git and its SSH child processes so an abandoned
+prompt cannot continue in the terminal.
 
 `brain start` performs this sync once at the beginning of a ticket, so every later
 context request in that investigation uses a stable source snapshot. Run
 `brain refresh` to move all snapshots to newer remote commits, or use
 `brain start --no-sync` when offline.
+
+For a ticket branch that already exists on one remote, override only that repo:
+
+```bash
+brain start ABC-1234 \
+  --branch payment-service=feature/ABC-1234 \
+  --ticket-file ticket.md
+```
+
+The override does not checkout the branch. Other repos keep using the automatic
+development/default policy. The selected ref, SHA, fetch result, and any stale
+fallback are recorded in the start pack and every later context pack. To make a
+long-lived exception, add `branch = "main"` to that repo's `[[repositories]]`
+entry. A branch available only locally can be analyzed, but is explicitly marked
+as having unverified remote freshness. The local cockpit exposes the same option
+as the **Feature branches** field, one `REPO=BRANCH` entry per line.
 
 ## 4. Configuration
 
@@ -170,6 +191,9 @@ clipboard_chunk_chars = 180000
 [graph]
 mode = "lazy"
 
+[sources]
+branch_priority = ["develop", "development"]
+
 [knowledge]
 path = "knowledge"
 
@@ -178,6 +202,7 @@ name = "trading-service"
 path = "../trading-service"
 description = "Owns trading eligibility and permissions."
 tags = ["trading", "eligibility"]
+# branch = "main" # optional permanent override for this repo
 ```
 
 Use `-c /path/to/brain.toml` when running a command outside the workspace.
@@ -196,6 +221,14 @@ Project Brain also accepts legacy `config.yml` and `config.yaml` files.
 ### Delivery settings
 
 - `clipboard_chunk_chars`: maximum size of each Claude clipboard part.
+
+### Source branch settings
+
+- `branch_priority`: remote branches preferred for normal cross-repo analysis,
+  in order. Repos without one of these branches use their own remote default.
+- `repositories.branch`: optional permanent override for a special repo.
+- `--branch REPO=BRANCH`: temporary override accepted by `brain sync`,
+  `brain refresh`, and `brain start`; useful for a ticket's feature branch.
 
 ## 5. Teach the Brain your domain
 
@@ -487,8 +520,11 @@ Project Brain does not:
 - upload generated context.
 
 Its only normal network activity is `git fetch origin`, performed by the user's
-installed Git and existing credential helper. Project Brain never reads or stores
-those credentials or remote URLs.
+installed Git. Private intranet GitLab needs no GitLab API or Project Brain
+account: the existing VPN, proxy, SSH config, host alias, and `core.sshCommand`
+remain in control. For SSH on macOS, Project Brain adds `UseKeychain=no`; HTTPS
+remotes remain subject to Git's configured credential-helper policy. Project
+Brain never stores credentials or remote URLs.
 
 The local cockpit binds only to IPv4 loopback, requires a random per-process token
 for every API call, rejects non-local Host headers, limits request bodies, and
@@ -547,9 +583,11 @@ Brain intentionally stores only the exit code so a credential-bearing remote URL
 cannot leak into state or context. Fix the normal Git/SSH/VPN access, then run
 `brain sync`.
 
-If an SSH key is still locked, load it into your normal agent once with
-`ssh-add` (or use your organization's standard key manager) and rerun
-`brain sync`. Project Brain does not manage or persist SSH keys itself. Use
+If an SSH key is still locked, you may load the exact company key into a
+memory-only agent with `ssh-add /path/to/company_private_key` (without Apple's
+`--apple-use-keychain` option), or use your organization's approved key manager,
+then rerun `brain sync`. Project Brain does not start an agent, access Keychain,
+or persist SSH keys itself. Use
 `brain init --no-fetch`, `brain refresh --no-fetch`, or `brain start --no-sync`
 when offline.
 

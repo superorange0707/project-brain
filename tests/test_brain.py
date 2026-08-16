@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -447,7 +448,7 @@ class GitSyncTest(unittest.TestCase):
         result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=True)
         return result.stdout.strip()
 
-    def test_sync_reads_latest_remote_commit_without_touching_local_changes(self) -> None:
+    def test_sync_prefers_develop_and_allows_feature_override_without_touching_local_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             origin = root / "origin.git"
@@ -467,10 +468,16 @@ class GitSyncTest(unittest.TestCase):
             self._git(root, "clone", str(origin), str(work))
 
             (work / "value.txt").write_text("local uncommitted\n", encoding="utf-8")
-            (seed / "value.txt").write_text("new remote\n", encoding="utf-8")
+            self._git(seed, "checkout", "-b", "develop")
+            (seed / "value.txt").write_text("develop remote\n", encoding="utf-8")
             self._git(seed, "add", "value.txt")
-            self._git(seed, "commit", "-m", "remote update")
-            self._git(seed, "push", "origin", "main")
+            self._git(seed, "commit", "-m", "develop update")
+            self._git(seed, "push", "-u", "origin", "develop")
+            self._git(seed, "checkout", "-b", "feature/ABC-123")
+            (seed / "value.txt").write_text("feature remote\n", encoding="utf-8")
+            self._git(seed, "add", "value.txt")
+            self._git(seed, "commit", "-m", "feature update")
+            self._git(seed, "push", "-u", "origin", "feature/ABC-123")
 
             config = root / "brain.toml"
             config.write_text(
@@ -480,7 +487,18 @@ class GitSyncTest(unittest.TestCase):
             settings = load_settings(config)
             results = sync_repositories(settings)
             self.assertEqual("current", results[0].status)
-            self.assertEqual("new remote\n", (settings.repo("service-a").scan_path / "value.txt").read_text(encoding="utf-8"))
+            self.assertEqual("origin/develop", results[0].ref)
+            self.assertEqual("develop remote\n", (settings.repo("service-a").scan_path / "value.txt").read_text(encoding="utf-8"))
+
+            self._git(work, "update-ref", "-d", "refs/remotes/origin/feature/ABC-123")
+            results = sync_repositories(settings, branch_overrides={"service-a": "feature/ABC-123"})
+            self.assertEqual("origin/feature/ABC-123", results[0].ref)
+            self.assertEqual("feature remote\n", (settings.repo("service-a").scan_path / "value.txt").read_text(encoding="utf-8"))
+
+            settings.repo("service-a").branch = "main"
+            results = sync_repositories(settings)
+            self.assertEqual("origin/main", results[0].ref)
+            self.assertEqual("old remote\n", (settings.repo("service-a").scan_path / "value.txt").read_text(encoding="utf-8"))
             self.assertEqual("local uncommitted\n", (work / "value.txt").read_text(encoding="utf-8"))
             self.assertEqual("main", self._git(work, "branch", "--show-current"))
 
@@ -507,18 +525,51 @@ class GitSyncTest(unittest.TestCase):
             fetch_environments: list[dict[str, str] | None] = []
             original_git = sync_module._git
 
-            def fake_git(repo, *args, binary=False, extra_env=None):
+            def fake_git(repo, *args, binary=False, extra_env=None, timeout=120):
                 if args and args[0] == "fetch":
                     fetch_environments.append(extra_env)
                     return subprocess.CompletedProcess(["git", *args], 128, "", "Permission denied (publickey).")
-                return original_git(repo, *args, binary=binary, extra_env=extra_env)
+                return original_git(repo, *args, binary=binary, extra_env=extra_env, timeout=timeout)
 
             with mock.patch("brain.sync._git", side_effect=fake_git):
                 results = sync_repositories(settings)
 
             self.assertEqual(1, len(fetch_environments))
             self.assertIn("ControlMaster=auto", fetch_environments[0]["GIT_SSH_COMMAND"])
-            self.assertEqual(2, sum("skipped another password prompt" in (result.warning or "") for result in results))
+            self.assertEqual(2, sum("skipped another interactive attempt" in (result.warning or "") for result in results))
+            self.assertTrue(all("example.test" not in (result.warning or "") for result in results))
+
+            fetch_environments.clear()
+            for repo in settings.repositories:
+                self._git(repo.path, "config", "core.sshCommand", "ssh -F ~/.ssh/company-config")
+
+            def successful_git(repo, *args, binary=False, extra_env=None, timeout=120):
+                if args and args[0] == "fetch":
+                    fetch_environments.append(extra_env)
+                    return subprocess.CompletedProcess(["git", *args], 0, "", "")
+                return original_git(repo, *args, binary=binary, extra_env=extra_env, timeout=timeout)
+
+            with mock.patch("brain.sync.sys.platform", "darwin"):
+                with mock.patch("brain.sync._git", side_effect=successful_git):
+                    sync_repositories(settings)
+
+            commands = [environment["GIT_SSH_COMMAND"] for environment in fetch_environments]
+            self.assertEqual(3, len(commands))
+            self.assertEqual(1, sum("BatchMode=yes" not in command for command in commands))
+            self.assertEqual(2, sum("BatchMode=yes" in command for command in commands))
+            self.assertTrue(all("UseKeychain=no" in command for command in commands))
+            self.assertTrue(all("ssh -F ~/.ssh/company-config" in command for command in commands))
+
+            started = time.monotonic()
+            timed_out = original_git(
+                settings.repositories[0],
+                "-c",
+                "alias.wait=!sleep 5",
+                "wait",
+                timeout=0.05,
+            )
+            self.assertEqual(124, timed_out.returncode)
+            self.assertLess(time.monotonic() - started, 1)
 
     def test_ssh_remote_detection(self) -> None:
         self.assertEqual("git@github.com", _ssh_endpoint("git@github.com:team/project.git"))

@@ -31,7 +31,7 @@ from .core import (
 )
 from .graph import index_graph
 from .relations import generate_relationship_map
-from .sync import sync_repositories
+from .sync import parse_branch_overrides, sync_repositories
 
 
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
@@ -128,8 +128,13 @@ def project_status(settings: Settings) -> dict[str, Any]:
     }
 
 
-def _refresh(settings: Settings, *, fetch: bool = True) -> dict[str, Any]:
-    synced = sync_repositories(settings, fetch=fetch)
+def _refresh(
+    settings: Settings,
+    *,
+    fetch: bool = True,
+    branch_overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    synced = sync_repositories(settings, fetch=fetch, branch_overrides=branch_overrides)
     snapshot_indexes(settings, changed_only=True)
     generate_map(settings)
     generate_relationship_map(settings)
@@ -298,7 +303,15 @@ class _Handler(BaseHTTPRequestHandler):
             ticket_text = str(body.get("ticket_text") or "").strip()
             if not ticket or not ticket_text:
                 raise BrainError("Ticket identifier and description are required")
-            refresh = _refresh(settings, fetch=True) if body.get("sync", True) else {"sync": [], "graph": []}
+            branch_lines = [line.strip() for line in str(body.get("branches") or "").splitlines() if line.strip()]
+            if branch_lines and not body.get("sync", True):
+                raise BrainError("Feature branch overrides require repository sync")
+            overrides = parse_branch_overrides(settings, branch_lines)
+            refresh = (
+                _refresh(settings, fetch=True, branch_overrides=overrides)
+                if body.get("sync", True)
+                else {"sync": [], "graph": []}
+            )
             content, artifact = start_session(settings, ticket, ticket_text)
             target = _target(body)
             deliver(settings, ticket, content, target, copy=False)
