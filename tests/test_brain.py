@@ -245,7 +245,7 @@ import json, sys
 if "--version" in sys.argv:
     print("codebase-memory-mcp 0.10.5")
 else:
-    print(json.dumps({"columns": ["qn", "label", "file", "lines", "in", "out"], "groups": [{"rows": [["demo.EligibilityEvaluator", "Interface", "src/main/java/demo/EligibilityEvaluator.java", "2-2", 0, 1]]}]}))
+    print(json.dumps({"cols": ["qn", "label", "file", "lines", "in", "out"], "rows": [["demo.EligibilityEvaluator", "Interface", "src/main/java/demo/EligibilityEvaluator.java", "2-2", 0, 1]]}))
 ''',
             encoding="utf-8",
         )
@@ -298,7 +298,8 @@ class InitTest(unittest.TestCase):
             previous = Path.cwd()
             try:
                 os.chdir(root)
-                code = main(["init", "--name", "auto-demo"])
+                with mock.patch("brain.graph.find_backend", return_value=None):
+                    code = main(["init", "--name", "auto-demo"])
             finally:
                 os.chdir(previous)
             config = (root / "brain.toml").read_text(encoding="utf-8")
@@ -318,7 +319,8 @@ class InitTest(unittest.TestCase):
             try:
                 os.chdir(root)
                 with redirect_stdout(output):
-                    code = main(["init", str(repo), "--name", "portable-demo", "--no-fetch"])
+                    with mock.patch("brain.graph.find_backend", return_value=None):
+                        code = main(["init", str(repo), "--name", "portable-demo", "--no-fetch"])
             finally:
                 os.chdir(previous)
             self.assertEqual(0, code)

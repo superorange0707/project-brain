@@ -37,7 +37,7 @@ then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.1"
 ```
 
 Upgrade later with:
@@ -49,7 +49,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.1"
 ```
 
 ### From a source checkout

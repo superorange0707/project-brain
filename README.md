@@ -68,7 +68,7 @@ Download the archive for your CPU from the
 extract it, and place both executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.2.0-macos-arm64.tar.gz
+tar -xzf project-brain-v0.2.1-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp ~/.local/bin/
 ```
@@ -79,19 +79,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.1"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.1"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.2.0/project_brain_context-0.2.0-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.2.1/project_brain_context-0.2.1-py3-none-any.whl
 ```
 
 Then verify:

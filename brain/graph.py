@@ -66,8 +66,9 @@ def _invoke(settings: Settings, tool: str, arguments: dict[str, Any], *, timeout
     environment["CBM_CACHE_DIR"] = str(cache)
     try:
         result = subprocess.run(
-            [str(binary), "cli", "--json", tool, json.dumps(arguments)],
+            [str(binary), "cli", "--json", tool],
             env=environment,
+            input=json.dumps(arguments),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -130,6 +131,15 @@ def index_graph(settings: Settings, *, changed_only: bool = True) -> list[GraphI
     return results
 
 
+def _graph_state(settings: Settings) -> dict[str, Any]:
+    path = settings.state_dir / "graphs.json"
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def _objects(value: Any) -> Iterable[dict[str, Any]]:
     if isinstance(value, dict):
         yield value
@@ -147,7 +157,7 @@ def _objects(value: Any) -> Iterable[dict[str, Any]]:
 
 def _table_objects(value: Any, columns: list[str] | None = None) -> Iterable[dict[str, Any]]:
     if isinstance(value, dict):
-        own_columns = value.get("columns")
+        own_columns = value.get("columns") or value.get("cols")
         active = [str(item) for item in own_columns] if isinstance(own_columns, list) else columns
         for child in value.values():
             yield from _table_objects(child, active)
@@ -193,12 +203,16 @@ def _hits(settings: Settings, repo_name: str, payload: Any, kind: str) -> list[S
 def graph_symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
     if not find_backend():
         return []
+    state = _graph_state(settings)
     hits: list[SearchHit] = []
     for repo in settings.repos(repos):
+        indexed = state.get(repo.name) or {}
+        if not indexed or indexed.get("sha") != (repo.source_sha or "working-tree"):
+            continue
         payload, error = _invoke(
             settings,
             "search_graph",
-            {"project": _project(settings, repo.name), "query": query, "format": "json", "limit": settings.max_results},
+            {"project": indexed.get("project") or _project(settings, repo.name), "query": query, "format": "json", "limit": settings.max_results},
             timeout=60,
         )
         if not error:
@@ -209,14 +223,18 @@ def graph_symbol_hits(settings: Settings, query: str, repos: Iterable[str] | Non
 def graph_trace(settings: Settings, query: str, repos: Iterable[str] | None = None) -> tuple[list[SearchHit], list[str]]:
     if not find_backend():
         return [], []
+    state = _graph_state(settings)
     hits: list[SearchHit] = []
     relationships: list[str] = []
     for repo in settings.repos(repos):
+        indexed = state.get(repo.name) or {}
+        if not indexed or indexed.get("sha") != (repo.source_sha or "working-tree"):
+            continue
         payload, error = _invoke(
             settings,
             "trace_path",
             {
-                "project": _project(settings, repo.name),
+                "project": indexed.get("project") or _project(settings, repo.name),
                 "function_name": query,
                 "direction": "both",
                 "depth": 4,
