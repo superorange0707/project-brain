@@ -6,20 +6,38 @@ ticket investigations, configuration, command reference, and troubleshooting.
 
 ## 1. Requirements
 
-- Python 3.11 or newer
+- Homebrew/standalone installs: no Python or Xcode requirement
+- Python installs: Python 3.11 or newer
 - `git` recommended for repository state and history
 - `rg` (ripgrep) recommended for fast search
 - macOS, Linux, or Windows
 
-There are no Python runtime dependencies. When `rg` is unavailable, Project Brain
-uses its built-in scanner. Non-Git directories can still be searched.
+There are no Python package runtime dependencies. The prebuilt package includes
+the tested structural engine. When that engine or `rg` is unavailable, Project
+Brain uses its built-in scanner. Non-Git directories can still be searched.
 
 ## 2. Installation
+
+### Homebrew (recommended on macOS)
+
+```bash
+brew install superorange0707/tap/project-brain
+```
+
+This installs prebuilt executables and does not compile against the local Xcode
+toolchain. Homebrew maps `superorange0707/tap` to the separate
+[`homebrew-tap`](https://github.com/superorange0707/homebrew-tap) formula index.
+
+### Standalone macOS/Linux archive
+
+Download the matching archive from the
+[latest release](https://github.com/superorange0707/project-brain/releases/latest),
+then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
 
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.2"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.0"
 ```
 
 Upgrade later with:
@@ -31,18 +49,8 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.2"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.0"
 ```
-
-### Homebrew
-
-```bash
-brew install superorange0707/tap/project-brain
-```
-
-Homebrew maps `superorange0707/tap` to the separate
-[`homebrew-tap`](https://github.com/superorange0707/homebrew-tap) formula index.
-Project Brain's application source remains in the main repository.
 
 ### From a source checkout
 
@@ -96,12 +104,26 @@ payments-platform/
 
 Explicit repository paths remain available when you want a narrower scope.
 
-Run diagnostics and generate deterministic facts:
+Initialization is the full setup: it discovers all repos, fetches their `origin`
+refs, exports immutable source snapshots, indexes changed snapshots, and generates
+project facts and relationships. Run `brain doctor` only when you want the
+detailed health report.
 
-```bash
-brain doctor
-brain refresh
-```
+### What “latest” means
+
+Project Brain runs `git fetch --prune --quiet origin` for each repo. It then finds
+`origin/HEAD` (falling back to the configured upstream, `origin/main`, or
+`origin/master`) and exports that exact commit with `git archive` below `state/`.
+
+It deliberately never runs `pull`, `checkout`, `reset`, `clean`, merge, or rebase.
+Your current branch, staged files, and uncommitted edits are unchanged. If a fetch
+fails, that repo uses its newest locally available remote ref and reports the
+failure; other repos continue.
+
+`brain start` performs this sync once at the beginning of a ticket, so every later
+context request in that investigation uses a stable source snapshot. Run
+`brain refresh` to move all snapshots to newer remote commits, or use
+`brain start --no-sync` when offline.
 
 ## 4. Configuration
 
@@ -347,8 +369,24 @@ brain map
 brain refresh
 ```
 
-`map` scans framework markers and Maven dependencies. `refresh` also records
-repository commit snapshots so stale state is visible in later context packs.
+`map` writes both `generated/PROJECT_FACTS.md` and
+`generated/PROJECT_RELATIONSHIPS.md`. The relationship map matches exact Maven
+coordinates, Kafka topics, Spring routes, and Feign clients, and derives multi-hop
+runtime workflows with source and target file/line evidence. `refresh` first
+fetches and snapshots all repositories, then rebuilds both maps and the structural
+index.
+
+### Structural backend
+
+Homebrew and standalone packages include the tested `codebase-memory-mcp` v0.10.5
+binary. Project Brain calls its local JSON CLI for structural symbol and call-path
+queries and stores its cache under Brain's ignored `state/` directory. It never
+runs the backend installer or changes Claude, Codex, or other agent configuration.
+
+Python-only installs can add that executable to `PATH` or set
+`PROJECT_BRAIN_GRAPH_BIN=/absolute/path/to/codebase-memory-mcp`. `brain doctor`
+shows which backend is active. If it is missing or fails, exact search and lexical
+analysis continue automatically.
 
 ### Solved-ticket memory
 
@@ -363,12 +401,15 @@ can reuse the root cause, flow, tests, and gotchas.
 
 Project Brain does not:
 
-- make network requests;
 - ask for AI, GitHub, Jira, or cloud credentials;
 - edit target repositories;
 - execute repository code or tests;
 - run checkout/reset/clean;
 - upload generated context.
+
+Its only normal network activity is `git fetch origin`, performed by the user's
+installed Git and existing credential helper. Project Brain never reads or stores
+those credentials or remote URLs.
 
 It does read source and can place that source on your clipboard or in Markdown.
 Treat context packs with the same confidentiality as the repositories they came
@@ -405,6 +446,13 @@ warns at the soft target but never silently removes evidence.
 
 The built-in scanner remains functional. Install ripgrep for much faster searches
 on large repositories.
+
+### A repository says `fetch-failed`
+
+Run `git fetch origin` in that repository to see Git's full diagnostic. Project
+Brain intentionally stores only the exit code so a credential-bearing remote URL
+cannot leak into state or context. Fix the normal Git/SSH/VPN access, then run
+`brain sync`.
 
 ## 12. Updating and uninstalling
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -24,6 +25,9 @@ from .core import (
     symbol_hits,
     trace_symbol,
 )
+from .relations import generate_relationship_map
+from .sync import SyncResult, sync_repositories
+from .graph import GraphIndexResult, index_graph
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -33,13 +37,17 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     init = commands.add_parser("init", help="create a portable Project Brain workspace")
-    init.add_argument("repos", nargs="*", help="repository paths (defaults to current repo or child repos)")
+    init.add_argument("repos", nargs="*", help="project roots to scan (defaults to the current folder)")
     init.add_argument("--name", help="project name")
     init.add_argument("--force", action="store_true", help="replace an existing config")
+    init.add_argument("--no-fetch", action="store_true", help="initialize from locally available commits")
 
     commands.add_parser("doctor", help="check configuration and local capabilities")
-    commands.add_parser("index", help="record repository HEAD snapshots")
-    commands.add_parser("refresh", help="snapshot changed repositories and regenerate facts")
+    commands.add_parser("index", help="index current source snapshots")
+    sync = commands.add_parser("sync", help="fetch every repo and create read-only remote snapshots")
+    sync.add_argument("--no-fetch", action="store_true", help="snapshot locally available commits only")
+    refresh = commands.add_parser("refresh", help="sync repositories and regenerate project intelligence")
+    refresh.add_argument("--no-fetch", action="store_true", help="refresh from locally available commits")
     commands.add_parser("map", help="regenerate deterministic project facts")
 
     search_parser = commands.add_parser("search", help="exact/regex search across repositories")
@@ -65,6 +73,7 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--text")
     start.add_argument("--target", choices=("claude", "m365"), default="claude")
     start.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
+    start.add_argument("--no-sync", action="store_true", help="use the last source snapshots")
 
     context = commands.add_parser("ctx", help="fulfil a CONTEXT_REQUEST")
     context.add_argument("ticket")
@@ -86,28 +95,58 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _discover_repos(values: list[str]) -> list[Path]:
-    if values:
-        paths = [Path(value).expanduser().resolve() for value in values]
-    else:
-        current = Path.cwd().resolve()
-        if (current / ".git").exists():
-            paths = [current]
-        else:
-            paths = sorted({path.parent for path in current.rglob(".git")})
-    invalid = [path for path in paths if not path.is_dir()]
+    roots = [Path(value).expanduser().resolve() for value in values] if values else [Path.cwd().resolve()]
+    invalid = [path for path in roots if not path.is_dir()]
     if invalid:
         raise BrainError("Repository paths do not exist: " + ", ".join(map(str, invalid)))
+    paths: set[Path] = set()
+    ignored = {".git", ".runs", "state", "generated", "node_modules", "target", "build", ".venv"}
+    for root in roots:
+        for directory, dirs, files in os.walk(root):
+            dirs[:] = [name for name in dirs if name not in ignored]
+            if ".git" in dirs or ".git" in files or (Path(directory) / ".git").exists():
+                paths.add(Path(directory).resolve())
+        if (root / ".git").exists():
+            paths.add(root)
+    if not paths and len(roots) == 1:
+        paths.add(roots[0])
     if not paths:
         raise BrainError("No repositories found; pass one or more repository paths")
-    return paths
+    return sorted(paths)
+
+
+def _print_sync(results: list[SyncResult]) -> None:
+    for result in results:
+        source = f"{result.ref or 'working tree'}@{(result.sha or 'unknown')[:12]}"
+        suffix = f" — {result.warning}" if result.warning else ""
+        print(f"{result.repo}: {result.status} ({source}){suffix}")
+
+
+def _print_graph(results: list[GraphIndexResult]) -> None:
+    for result in results:
+        print(f"graph {result.repo}: {result.status}" + (f" ({result.detail})" if result.detail else ""))
+
+
+def _refresh_all(settings, *, fetch: bool) -> tuple[list[SyncResult], list[GraphIndexResult]]:
+    results = sync_repositories(settings, fetch=fetch)
+    snapshot_indexes(settings, changed_only=True)
+    generate_map(settings)
+    generate_relationship_map(settings)
+    return results, index_graph(settings)
 
 
 def _init(args: argparse.Namespace) -> int:
-    config = Path(args.config).expanduser().resolve() if args.config else Path.cwd() / "brain.toml"
+    if args.config:
+        config = Path(args.config).expanduser().resolve()
+    elif len(args.repos) == 1:
+        config = Path(args.repos[0]).expanduser().resolve() / "brain.toml"
+    else:
+        config = Path.cwd() / "brain.toml"
     if config.exists() and not args.force:
         raise BrainError(f"Config already exists: {config} (use --force to replace it)")
     root = config.parent
     repos = _discover_repos(args.repos)
+    basenames = [path.name for path in repos]
     names: set[str] = set()
     rows = [
         "[project]",
@@ -132,8 +171,16 @@ def _init(args: argparse.Namespace) -> int:
     ]
     for path in repos:
         name = path.name
-        if name in names:
-            raise BrainError(f"Repository names collide: {name}")
+        if basenames.count(name) > 1:
+            try:
+                name = "-".join(path.relative_to(root).parts)
+            except ValueError:
+                name = f"{path.parent.name}-{path.name}"
+        candidate = name
+        counter = 2
+        while name in names:
+            name = f"{candidate}-{counter}"
+            counter += 1
         names.add(name)
         try:
             configured_path = str(path.relative_to(root))
@@ -159,7 +206,12 @@ def _init(args: argparse.Namespace) -> int:
         if not path.exists():
             path.write_text(content, encoding="utf-8")
     print(f"Created {config}")
-    print(f"Configured {len(repos)} repositories. Next: brain doctor && brain refresh")
+    settings = load_settings(config)
+    results, graphs = _refresh_all(settings, fetch=not args.no_fetch)
+    print(f"Configured {len(repos)} repositories and built project intelligence.")
+    _print_sync(results)
+    _print_graph(graphs)
+    print("Ready. Start a ticket with: brain start TICKET --ticket-file ticket.md")
     return 0
 
 
@@ -210,17 +262,23 @@ def execute(args: argparse.Namespace) -> int:
     if args.command == "index":
         _, updated = snapshot_indexes(settings)
         print("Snapshot updated: " + ", ".join(updated))
+        _print_graph(index_graph(settings, changed_only=False))
+        return 0
+    if args.command == "sync":
+        _print_sync(sync_repositories(settings, fetch=not args.no_fetch))
         return 0
     if args.command == "refresh":
-        _, updated = snapshot_indexes(settings, changed_only=True)
-        path = settings.generated_dir / "PROJECT_FACTS.md"
-        generate_map(settings)
-        print("Changed repositories: " + (", ".join(updated) if updated else "none"))
-        print(f"Generated {path}")
+        results, graphs = _refresh_all(settings, fetch=not args.no_fetch)
+        _print_sync(results)
+        _print_graph(graphs)
+        print(f"Generated {settings.generated_dir / 'PROJECT_FACTS.md'}")
+        print(f"Generated {settings.generated_dir / 'PROJECT_RELATIONSHIPS.md'}")
         return 0
     if args.command == "map":
         generate_map(settings)
+        generate_relationship_map(settings)
         print(settings.generated_dir / "PROJECT_FACTS.md")
+        print(settings.generated_dir / "PROJECT_RELATIONSHIPS.md")
         return 0
     if args.command == "search":
         _print_hits(search(settings, args.query, args.repo, fixed=args.fixed))
@@ -247,8 +305,13 @@ def execute(args: argparse.Namespace) -> int:
             print("No matching history.")
         return 0
     if args.command == "start":
-        if not (settings.generated_dir / "PROJECT_FACTS.md").exists():
+        if not args.no_sync:
+            synced, graphs = _refresh_all(settings, fetch=True)
+            _print_sync(synced)
+            _print_graph(graphs)
+        elif not (settings.generated_dir / "PROJECT_FACTS.md").exists():
             generate_map(settings)
+            generate_relationship_map(settings)
         content, path = start_session(settings, args.ticket, _ticket_text(args))
         copy = args.copy if args.copy is not None else args.target == "claude"
         parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)

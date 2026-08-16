@@ -2,6 +2,28 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.2.0] - 2026-08-16
+
+### Added
+
+- Safe multi-repository synchronization: fetch `origin` without pulling,
+  checking out, resetting, cleaning, or changing a working branch.
+- Immutable snapshots of the latest locally available remote default branch, so
+  stale clones can be analyzed while uncommitted work remains untouched.
+- One-command initialization that discovers, syncs, indexes, maps, and checks
+  every nested Git repository below a project root.
+- Evidence-backed Maven, Kafka, Spring REST, and Feign relationships plus derived
+  cross-repository runtime workflows.
+- Optional `codebase-memory-mcp` v0.10.5 structural graph integration with a
+  deterministic lexical fallback.
+- Prebuilt macOS and Linux release archives containing `brain` and the pinned
+  structural backend; no local Python or Xcode compilation is required.
+
+### Fixed
+
+- Give each repository its own search result budget so an early noisy repository
+  cannot hide evidence from later repositories.
+
 ## [0.1.2] - 2026-08-15
 
 ### Added
@@ -30,6 +52,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.2.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.2.0
 [0.1.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.1.2
 [0.1.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.1.1
 [0.1.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.1.0

@@ -7,7 +7,8 @@ recent minor release.
 
 | Version | Supported |
 |---|---|
-| 0.1.x | Yes |
+| 0.2.x | Yes |
+| 0.1.x | No |
 | Older | No |
 
 ## Reporting a vulnerability
@@ -25,7 +26,8 @@ days.
 Project Brain is designed as a local, read-only retrieval tool:
 
 - It never asks for API keys or account credentials.
-- It makes no network requests.
+- Its only normal network operation is `git fetch origin`, delegated to the
+  user's installed Git and credential helper.
 - It does not execute code from target repositories.
 - It does not edit, clean, reset, checkout, build, or commit target repositories.
 - Subprocesses use argument arrays rather than a shell.
@@ -33,8 +35,14 @@ Project Brain is designed as a local, read-only retrieval tool:
 - Generated context, local configs, knowledge, state, `.env`, keys, and certificate
   formats are ignored by the default `.gitignore`.
 
-Project Brain does invoke locally installed `git`, `rg`, and operating-system
-clipboard commands. It trusts the executables resolved from the user's `PATH`.
+Project Brain does not inspect or persist Git credentials and does not record
+remote URLs. Fetch errors are sanitized to an exit status. It invokes locally
+installed `git`, `rg`, the optional structural backend, and operating-system
+clipboard commands. It trusts executables resolved from the user's `PATH`.
+
+Remote commits are exported with `git archive` into the ignored Brain state
+directory. Archive extraction rejects absolute paths, parent traversal, links,
+and device entries. Target working trees are never checked out or modified.
 
 ## Source disclosure risk
 

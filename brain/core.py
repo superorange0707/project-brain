@@ -35,6 +35,15 @@ class Repository:
     path: Path
     description: str = ""
     tags: list[str] = field(default_factory=list)
+    source_path: Path | None = None
+    source_ref: str | None = None
+    source_sha: str | None = None
+    source_status: str = "working tree"
+
+    @property
+    def scan_path(self) -> Path:
+        """The immutable snapshot used for evidence, or the working tree fallback."""
+        return self.source_path if self.source_path and self.source_path.is_dir() else self.path
 
 
 @dataclass
@@ -289,7 +298,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         candidate = Path(value).expanduser()
         return (candidate if candidate.is_absolute() else root / candidate).resolve()
 
-    return Settings(
+    settings = Settings(
         name=str(project.get("name") or root.name),
         root=root,
         config_path=config_path,
@@ -304,6 +313,31 @@ def load_settings(path: str | Path | None = None) -> Settings:
         soft_target_chars=int(context.get("soft_target_chars") or 500_000),
         clipboard_chunk_chars=int(delivery.get("clipboard_chunk_chars") or 180_000),
     )
+    _attach_source_snapshots(settings)
+    return settings
+
+
+def load_source_state(settings: Settings) -> dict[str, Any]:
+    path = settings.state_dir / "sources.json"
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _attach_source_snapshots(settings: Settings) -> None:
+    state = load_source_state(settings)
+    for repo in settings.repositories:
+        item = state.get(repo.name) or {}
+        snapshot = Path(str(item.get("snapshot") or ""))
+        if snapshot.is_dir() and snapshot.is_relative_to(settings.state_dir):
+            repo.source_path = snapshot
+            repo.source_ref = str(item.get("ref") or "") or None
+            repo.source_sha = str(item.get("sha") or "") or None
+            repo.source_status = str(item.get("status") or "snapshot")
 
 
 def git_head(repo: Repository) -> str | None:
@@ -327,13 +361,14 @@ def _python_search(repo: Repository, pattern: str, fixed: bool, max_results: int
     except re.error as exc:
         raise BrainError(f"Invalid search regex: {exc}") from exc
     hits: list[SearchHit] = []
-    for path in _walk_files(repo.path):
+    root = repo.scan_path
+    for path in _walk_files(root):
         try:
             if path.stat().st_size > 3_000_000:
                 continue
             for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                 if regex.search(line):
-                    hits.append(SearchHit(repo.name, str(path.relative_to(repo.path)), number, line, score=95, found_by=["python exact search"]))
+                    hits.append(SearchHit(repo.name, str(path.relative_to(root)), number, line, score=95, found_by=["python exact search"]))
                     if len(hits) >= max_results:
                         return hits
         except OSError:
@@ -342,14 +377,15 @@ def _python_search(repo: Repository, pattern: str, fixed: bool, max_results: int
 
 
 def search_repo(repo: Repository, pattern: str, *, fixed: bool = False, max_results: int = 100) -> list[SearchHit]:
-    if not repo.path.is_dir():
+    root = repo.scan_path
+    if not root.is_dir():
         return []
     if not shutil.which("rg"):
         return _python_search(repo, pattern, fixed, max_results)
     args = ["rg", "--json", "--line-number", "--color", "never"]
     if fixed:
         args.append("--fixed-strings")
-    args.extend(["-e", pattern, str(repo.path)])
+    args.extend(["-e", pattern, str(root)])
     result = run(args)
     if result.returncode not in {0, 1}:
         raise BrainError(f"rg failed in {repo.name}: {result.stderr.strip()}")
@@ -364,7 +400,7 @@ def search_repo(repo: Repository, pattern: str, *, fixed: bool = False, max_resu
         data = event["data"]
         absolute = Path(data["path"]["text"])
         try:
-            relative = absolute.relative_to(repo.path)
+            relative = absolute.relative_to(root)
         except ValueError:
             relative = absolute
         hits.append(SearchHit(
@@ -381,16 +417,17 @@ def search_repo(repo: Repository, pattern: str, *, fixed: bool = False, max_resu
 
 
 def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None, *, fixed: bool = False) -> list[SearchHit]:
+    selected = settings.repos(repos)
     hits: list[SearchHit] = []
-    for repo in settings.repos(repos):
-        remaining = max(0, settings.max_results - len(hits))
-        if not remaining:
-            break
-        hits.extend(search_repo(repo, pattern, fixed=fixed, max_results=remaining))
-    return hits
+    for repo in selected:
+        # A busy first repository must not hide evidence in later repositories.
+        hits.extend(search_repo(repo, pattern, fixed=fixed, max_results=settings.max_results))
+    return hits[: settings.max_results * max(1, len(selected))]
 
 
 def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
+    from .graph import graph_symbol_hits
+
     name = query.rsplit(".", 1)[-1]
     escaped = re.escape(name)
     declaration = (
@@ -398,13 +435,15 @@ def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = No
         rf"|\b{escaped}\s*[:=]\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)"
         rf"|\b(?:public|protected|private|static|final|abstract|synchronized|native\s+)*[A-Za-z_$][\w$<>, ?\[\].]*\s+{escaped}\s*\("
     )
+    graph_hits = graph_symbol_hits(settings, query, repos)
     hits = search(settings, declaration, repos)
     for hit in hits:
         hit.kind = "definition"
         hit.score = 100
         hit.found_by.append("symbol declaration")
-    if hits:
-        return hits
+    if graph_hits or hits:
+        combined = graph_hits + hits
+        return list({(hit.repo, hit.path, hit.line): hit for hit in combined}.values())
     fallback = search(settings, rf"\b{escaped}\b", repos)
     for hit in fallback:
         hit.kind = "symbol reference"
@@ -436,8 +475,9 @@ def test_hits(settings: Settings, name: str, repos: Iterable[str] | None = None)
 
 def read_source(settings: Settings, hit: SearchHit, *, full: bool = False, lines: tuple[int, int] | None = None) -> Evidence:
     repo = settings.repo(hit.repo)
-    path = (repo.path / hit.path).resolve()
-    if not path.is_relative_to(repo.path) or not path.is_file():
+    root = repo.scan_path.resolve()
+    path = (root / hit.path).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
         raise BrainError(f"Unsafe or missing file: {hit.repo}:{hit.path}")
     content = path.read_text(encoding="utf-8", errors="replace").splitlines()
     if lines:
@@ -451,6 +491,9 @@ def read_source(settings: Settings, hit: SearchHit, *, full: bool = False, lines
 
 
 def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = None) -> tuple[list[SearchHit], list[str]]:
+    from .graph import graph_trace
+
+    graph_hits, graph_relationships = graph_trace(settings, query, repos)
     name = query.rsplit(".", 1)[-1]
     uses = search(settings, rf"\b{re.escape(name)}\s*\(", repos)
     inbound: list[SearchHit] = []
@@ -465,7 +508,7 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
             hit.kind = "caller"
             hit.score = 90
             inbound.append(hit)
-    relationships = [f"{hit.repo}:{hit.path}:{hit.line}  CALLS  {query}" for hit in inbound]
+    relationships = graph_relationships + [f"{hit.repo}:{hit.path}:{hit.line}  CALLS  {query}" for hit in inbound]
     call_names: set[str] = set()
     ignored = {"if", "for", "while", "switch", "catch", "return", "new", "throw", "super", "this", name}
     for definition in definitions[:5]:
@@ -475,17 +518,19 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
             if called.rsplit(".", 1)[-1] not in ignored:
                 call_names.add(called)
     relationships.extend(f"{query}  CALLS  {called}" for called in sorted(call_names)[:80])
-    return definitions + inbound, relationships
+    combined = graph_hits + definitions + inbound
+    return list({(hit.repo, hit.path, hit.line, hit.kind): hit for hit in combined}.values()), relationships
 
 
 def git_history(repo: Repository, query: str, limit: int = 20) -> str:
     if not (repo.path / ".git").exists():
         return ""
     fmt = "%h %ad %s"
-    result = run(["git", "log", f"-n{limit}", "--date=short", f"--pretty=format:{fmt}", "-S", query], cwd=repo.path)
+    revision = repo.source_ref or "HEAD"
+    result = run(["git", "log", revision, f"-n{limit}", "--date=short", f"--pretty=format:{fmt}", "-S", query], cwd=repo.path)
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
-    result = run(["git", "log", f"-n{limit}", "--date=short", f"--pretty=format:{fmt}", "-G", re.escape(query)], cwd=repo.path)
+    result = run(["git", "log", revision, f"-n{limit}", "--date=short", f"--pretty=format:{fmt}", "-G", re.escape(query)], cwd=repo.path)
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
@@ -527,10 +572,10 @@ def generate_map(settings: Settings) -> str:
     output = ["# Generated Project Facts", "", f"Generated: {datetime.now(UTC).isoformat()}", ""]
     annotation = r"@(RestController|Controller|Service|Repository|FeignClient|KafkaListener|Scheduled|Entity|Table|RequestMapping|GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping)\b"
     for repo in settings.repositories:
-        output.extend([f"## {repo.name}", "", f"Path: `{repo.path}`", ""])
+        output.extend([f"## {repo.name}", "", f"Source: `{repo.source_ref or 'working tree'}` at `{(repo.source_sha or git_head(repo) or 'unknown')[:12]}`", ""])
         if repo.description:
             output.extend([repo.description, ""])
-        facts = search_repo(repo, annotation, max_results=300) if repo.path.is_dir() else []
+        facts = search_repo(repo, annotation, max_results=300) if repo.scan_path.is_dir() else []
         output.append("### Framework facts")
         output.append("")
         if facts:
@@ -538,7 +583,7 @@ def generate_map(settings: Settings) -> str:
         else:
             output.append("- None detected")
         dependencies: list[str] = []
-        for pom in repo.path.rglob("pom.xml") if repo.path.is_dir() else []:
+        for pom in repo.scan_path.rglob("pom.xml") if repo.scan_path.is_dir() else []:
             if not any(part in IGNORED_DIRS for part in pom.parts):
                 dependencies.extend(_pom_dependencies(pom))
         output.extend(["", "### Maven dependencies", ""])
@@ -613,8 +658,9 @@ def _requested_repos(item: dict[str, Any]) -> list[str]:
 def _direct_file(settings: Settings, item: dict[str, Any]) -> Evidence:
     repo = settings.repo(str(item["repo"]))
     relative = str(item["path"])
-    path = (repo.path / relative).resolve()
-    if not path.is_relative_to(repo.path) or not path.is_file():
+    root = repo.scan_path.resolve()
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
         raise BrainError(f"Unsafe or missing file: {repo.name}:{relative}")
     requested = item.get("lines")
     line_range: tuple[int, int] | None = None
@@ -623,7 +669,7 @@ def _direct_file(settings: Settings, item: dict[str, Any]) -> Evidence:
         if not match:
             raise BrainError(f"Invalid line range `{requested}`; use 10-40")
         line_range = int(match.group(1)), int(match.group(2))
-    hit = SearchHit(repo.name, str(path.relative_to(repo.path)), line_range[0] if line_range else 1, "", "requested file", 100, ["direct file request"])
+    hit = SearchHit(repo.name, str(path.relative_to(root)), line_range[0] if line_range else 1, "", "requested file", 100, ["direct file request"])
     return read_source(settings, hit, full=line_range is None, lines=line_range)
 
 
@@ -717,10 +763,10 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
     bundle.evidence = _deduplicate(bundle.evidence)
     state = load_index_state(settings)
     for repo in settings.repositories:
-        current = git_head(repo)
+        current = repo.source_sha or git_head(repo)
         indexed = (state.get(repo.name) or {}).get("sha")
         if indexed and current and indexed != current:
-            bundle.warnings.append(f"Index snapshot for {repo.name} is stale: snapshot {indexed[:12]}, HEAD {current[:12]}. Live filesystem evidence is current.")
+            bundle.warnings.append(f"Index for {repo.name} is stale: indexed {indexed[:12]}, source {current[:12]}.")
     return bundle
 
 
@@ -740,8 +786,12 @@ def pack_context(settings: Settings, ticket: str, request_number: int, bundle: C
         "## Objective", "", bundle.objective, "", "## Repository state", "",
     ]
     for repo in settings.repositories:
-        head = git_head(repo)
-        output.append(f"- `{repo.name}` — HEAD `{head[:12] if head else 'not a Git repository'}` — `{repo.path}`")
+        local = git_head(repo)
+        source = repo.source_sha or local
+        output.append(
+            f"- `{repo.name}` — analyzed `{(source or 'not a Git repository')[:12]}` "
+            f"from `{repo.source_ref or 'working tree'}`; local HEAD `{(local or 'n/a')[:12]}`"
+        )
     if bundle.warnings:
         output.extend(["", "## Warnings", ""])
         output.extend(f"- {warning}" for warning in bundle.warnings)
@@ -783,16 +833,23 @@ def snapshot_indexes(settings: Settings, changed_only: bool = False) -> tuple[di
     state = load_index_state(settings)
     updated: list[str] = []
     for repo in settings.repositories:
-        sha = git_head(repo)
+        sha = repo.source_sha or git_head(repo)
         previous = (state.get(repo.name) or {}).get("sha")
         if not changed_only or repo.name not in state or sha != previous:
-            state[repo.name] = {"sha": sha, "indexed_at": datetime.now(UTC).isoformat(), "backend": "live deterministic scanner"}
+            state[repo.name] = {
+                "sha": sha,
+                "ref": repo.source_ref,
+                "indexed_at": datetime.now(UTC).isoformat(),
+                "backend": "deterministic multi-repo scanner",
+            }
             updated.append(repo.name)
     (settings.state_dir / "indexes.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     return state, updated
 
 
 def doctor(settings: Settings) -> tuple[str, bool]:
+    from .graph import TESTED_BACKEND_VERSION, backend_version
+
     output = ["PROJECT BRAIN", "", "Dependencies", ""]
     ok = True
     for command, required in (("python", True), ("git", False), ("rg", False)):
@@ -811,11 +868,21 @@ def doctor(settings: Settings) -> tuple[str, bool]:
     state = load_index_state(settings)
     output.extend(["", "Freshness snapshots", ""])
     for repo in settings.repositories:
-        current = git_head(repo)
+        current = repo.source_sha or git_head(repo)
         indexed = (state.get(repo.name) or {}).get("sha")
         status = "NOT SNAPSHOTTED" if repo.name not in state else ("CURRENT" if current == indexed else "STALE")
         output.append(f"{repo.name:<24}{status}")
-    output.extend(["", f"Config: {settings.config_path}", "Structural backend: live deterministic scanner (no service required)"])
+    output.extend(["", "Source snapshots", ""])
+    source_state = load_source_state(settings)
+    for repo in settings.repositories:
+        item = source_state.get(repo.name) or {}
+        source = (repo.source_sha or git_head(repo) or "")[:12]
+        output.append(f"{repo.name:<24}{item.get('status', repo.source_status).upper()}  {source or 'unknown'}")
+    version = backend_version()
+    graph_status = f"codebase-memory-mcp {version}" if version else "OPTIONAL MISSING — lexical fallback active"
+    if version and version != TESTED_BACKEND_VERSION:
+        graph_status += f" (tested with {TESTED_BACKEND_VERSION})"
+    output.extend(["", f"Config: {settings.config_path}", f"Structural backend: {graph_status}"])
     return "\n".join(output) + "\n", ok
 
 
@@ -852,6 +919,7 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
     for title, path in (
         ("Human project map", settings.knowledge_dir / "PROJECT_MAP.md"),
         ("Generated project facts", settings.generated_dir / "PROJECT_FACTS.md"),
+        ("Generated cross-repository relationships", settings.generated_dir / "PROJECT_RELATIONSHIPS.md"),
         ("Glossary", settings.knowledge_dir / "glossary.md"),
     ):
         if path.is_file():
@@ -860,7 +928,22 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
     start_path = directory / "start.md"
     start_path.write_text(content, encoding="utf-8")
     state = session_state(settings, ticket)
-    state.update({"ticket": ticket, "started_at": datetime.now(UTC).isoformat(), "requests": state.get("requests", 0)})
+    state.update(
+        {
+            "ticket": ticket,
+            "started_at": datetime.now(UTC).isoformat(),
+            "requests": state.get("requests", 0),
+            "sources": {
+                repo.name: {
+                    "snapshot": str(repo.source_path) if repo.source_path else None,
+                    "ref": repo.source_ref,
+                    "sha": repo.source_sha,
+                    "status": repo.source_status,
+                }
+                for repo in settings.repositories
+            },
+        }
+    )
     save_session(settings, ticket, state)
     return content, start_path
 
@@ -871,6 +954,14 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
         raise BrainError(f"Session {ticket} does not exist. Run `brain start {ticket}` first.")
     request = parse_context_request(request_text)
     state = session_state(settings, ticket)
+    for repo in settings.repositories:
+        source = (state.get("sources") or {}).get(repo.name) or {}
+        snapshot = Path(str(source.get("snapshot") or ""))
+        if snapshot.is_dir() and snapshot.is_relative_to(settings.state_dir):
+            repo.source_path = snapshot
+            repo.source_ref = str(source.get("ref") or "") or None
+            repo.source_sha = str(source.get("sha") or "") or None
+            repo.source_status = str(source.get("status") or "session snapshot")
     number = int(state.get("requests") or 0) + 1
     (directory / f"request-{number:03d}.yml").write_text(request_text.rstrip() + "\n", encoding="utf-8")
     bundle = retrieve_context(settings, request, include_diff=include_diff)

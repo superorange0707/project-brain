@@ -4,8 +4,8 @@
 
 **Give any chat AI the codebase exploration loop of a coding agent.**
 
-Turn a ticket into verified, multi-repository source context—without cloud
-indexing, API keys, or giving an agent permission to edit your code.
+Turn a ticket into verified, up-to-date multi-repository source context—without
+cloud indexing, API keys, or giving an agent permission to edit your code.
 
 [![CI](https://github.com/superorange0707/project-brain/actions/workflows/ci.yml/badge.svg)](https://github.com/superorange0707/project-brain/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -38,46 +38,61 @@ configured repositories. You apply the final solution in your IDE.
 
 | | Project Brain |
 |---|---|
-| 🔒 **Local and read-only** | Never edits, builds, commits, or uploads a repository |
-| 🧭 **Multi-repository** | Every result includes repository, path, and line evidence |
+| 🔒 **Safe source snapshots** | Fetches remote refs, but never pulls, checks out, resets, cleans, or edits a repository |
+| 🧭 **Multi-repository workflows** | Connects Maven, Kafka, Spring REST, and Feign evidence across repos |
 | 🤖 **Model-independent** | Works with Claude, ChatGPT, M365 Copilot, or any text model |
 | 📚 **Evidence-complete** | Retrieves production source, tests, config, relationships, and history |
-| 🪶 **Tiny footprint** | Python standard library only; `rg` and `git` are optional accelerators |
+| 🧠 **Structural + exact** | Pinned code graph when bundled; deterministic exact/lexical fallback everywhere |
 | 🔍 **Honest uncertainty** | Missing evidence and static-analysis limits are reported, never hidden |
 
-No embeddings. No vector database. No background daemon. No API key.
+No vector database, hosted indexing service, or model/API credential.
 
 ## Install
 
-Project Brain requires Python 3.11 or newer.
-
-### uv tool (recommended)
-
-```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.2"
-```
-
-### pipx
-
-```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.1.2"
-```
-
-### pip / release wheel
-
-```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.1.2/project_brain_context-0.1.2-py3-none-any.whl
-```
-
-### Homebrew
+### Homebrew — recommended on macOS
 
 ```bash
 brew install superorange0707/tap/project-brain
 ```
 
-The small, separate [Homebrew tap](https://github.com/superorange0707/homebrew-tap)
-is Homebrew's standard index for third-party formulae; the application source
-and releases remain in this repository.
+The Homebrew package uses a prebuilt release: it does not compile Python or
+require Xcode. It also includes the tested structural backend. The small,
+separate [Homebrew tap](https://github.com/superorange0707/homebrew-tap) is
+Homebrew's standard index for third-party formulae; the application source stays
+in this repository.
+
+### Standalone archive — macOS or Linux
+
+Download the archive for your CPU from the
+[latest release](https://github.com/superorange0707/project-brain/releases/latest),
+extract it, and place both executables on `PATH`:
+
+```bash
+tar -xzf project-brain-v0.2.0-macos-arm64.tar.gz
+mkdir -p ~/.local/bin
+install brain codebase-memory-mcp ~/.local/bin/
+```
+
+The Python installs below require Python 3.11+ and use the exact/lexical fallback
+unless `codebase-memory-mcp` is also present on `PATH`.
+
+### uv tool (recommended)
+
+```bash
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.0"
+```
+
+### pipx
+
+```bash
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.0"
+```
+
+### pip / release wheel
+
+```bash
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.2.0/project_brain_context-0.2.0-py3-none-any.whl
+```
 
 Then verify:
 
@@ -93,12 +108,13 @@ discovers nested Git repositories, so you do not need to list them:
 ```bash
 cd ~/code/payments-platform
 brain init --name payments-platform
-
-brain doctor
-brain refresh
 ```
 
-Pass repository paths explicitly only when you want to restrict the scope.
+That one command discovers every nested Git repo, fetches `origin`, creates
+immutable snapshots of the remote default branches, builds the structural index,
+and generates the project relationship map. A fetch failure is reported per repo
+and falls back to the newest locally available commit; it never blocks the other
+repositories.
 
 Start a ticket investigation:
 
@@ -140,11 +156,13 @@ CONTEXT_REQUEST:
 ```
 
 One request can trigger dozens of local operations. The returned context includes
-the objective, repository HEADs, freshness warnings, static relationships, ranked
-source evidence, Git history, and an explicit unresolved section.
+the objective, exact analyzed commit/ref, freshness warnings, structural and
+framework relationships, ranked source evidence, Git history, and an explicit
+unresolved section.
 
 ## What it can explore
 
+- Safe fetch plus exact, immutable remote-commit snapshots
 - Cross-repository literal and regular-expression search
 - Classes, interfaces, methods, functions, and lexical symbol fallback
 - Interface implementations and inheritance
@@ -153,8 +171,8 @@ source evidence, Git history, and an explicit unresolved section.
 - Direct file and line-range retrieval
 - Git pickaxe/history and optional working-tree diffs
 - Human project maps, glossaries, flows, and solved-ticket memory
-- Spring controllers/services/repositories, routes, Feign clients, Kafka listeners,
-  scheduled jobs, entities, tables, and Maven dependencies
+- Evidence-linked Spring REST ↔ Feign, Kafka producer ↔ consumer, and Maven
+  producer ↔ consumer relationships with multi-hop workflow summaries
 - Java, Kotlin, Python, JavaScript/TypeScript, Go, Rust, Ruby, C/C++, C#, Swift,
   PHP, shell, SQL, XML, YAML, TOML, properties, and other text through `rg`
 
@@ -177,16 +195,19 @@ source evidence, Git history, and an explicit unresolved section.
                            verified evidence
 ```
 
-`rg` is used when available and a standard-library scanner takes over when it is
-not. Structural relationships use deterministic lexical heuristics: useful static
-evidence, not a claim to compiler-perfect call graphs.
+The bundled release uses `codebase-memory-mcp` for tree-sitter/Hybrid-LSP
+structural queries and Project Brain's deterministic scanners for cross-repo
+framework wiring. If the backend is absent or fails, `rg` or the standard-library
+scanner remains available. Every heuristic is labelled; this is useful static
+evidence, not a claim to compiler-perfect runtime behavior.
 
 ## Commands
 
 ```text
-brain init              Create a portable Brain workspace
+brain init              Discover, sync, index, and map a project root
+brain sync              Safely fetch all repos and rebuild remote snapshots
 brain doctor            Check config, repositories, git, rg, and freshness
-brain refresh           Snapshot changed repositories and regenerate facts
+brain refresh           Sync and regenerate all project intelligence
 brain search            Search all configured repositories
 brain symbol            Resolve symbol definitions with lexical fallback
 brain trace             Find static callers and likely outbound calls
@@ -204,15 +225,19 @@ request syntax, troubleshooting, and operational guidance.
 
 ## Privacy and safety
 
-Project Brain itself makes no network requests and accepts no model/API
-credentials. It only reads configured repositories. However, generated context can
-contain proprietary source or secrets that already exist in those repositories.
+Project Brain invokes `git fetch` using your existing Git configuration and
+credential helper. It never reads, stores, logs, or asks for a token, and never
+puts a remote URL in generated state. It makes no model/API requests. Generated
+context can still contain proprietary source or secrets already present in a repo.
 Review context before pasting or uploading it outside your organization.
 
 Generated source evidence, local repository paths, configs, keys, `.env` files,
 knowledge, and ticket runs are ignored by the tool repository's default
 `.gitignore`. Releases use GitHub/PyPI short-lived OIDC credentials—no publishing
 token belongs in this repository.
+
+The prebuilt archive includes the pinned open-source structural backend; see
+[third-party notices](THIRD_PARTY.md).
 
 Read [SECURITY.md](SECURITY.md) before using Project Brain with private code.
 

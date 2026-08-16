@@ -3,10 +3,12 @@ from __future__ import annotations
 import io
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from brain.cli import main
 from brain.core import (
@@ -23,6 +25,9 @@ from brain.core import (
     symbol_hits,
     trace_symbol,
 )
+from brain.relations import generate_relationship_map
+from brain.sync import sync_repositories
+from brain.graph import graph_symbol_hits, index_graph
 
 
 REQUEST = """
@@ -53,15 +58,26 @@ class BrainTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         customer = self.root / "customer-service"
         trading = self.root / "trading-service"
+        risk = self.root / "risk-service"
+        batch = self.root / "batch-service"
         (customer / "src/main/java/demo").mkdir(parents=True)
         (trading / "src/main/java/demo").mkdir(parents=True)
         (trading / "src/test/java/demo").mkdir(parents=True)
+        (risk / "src/main/java/demo").mkdir(parents=True)
+        (batch / "src/main/java/demo").mkdir(parents=True)
         (customer / "src/main/java/demo/CustomerEvent.java").write_text(
             """package demo;
 public record CustomerEvent(Type type) {
     enum Type { ADDRESS_CHANGED, JURISDICTION_CHANGED }
 }
 """,
+            encoding="utf-8",
+        )
+        (customer / "src/main/java/demo/CustomerPublisher.java").write_text(
+            '''class CustomerPublisher {
+    void publish(CustomerEvent event) { kafkaTemplate.send("customer.updated", event); }
+}
+''',
             encoding="utf-8",
         )
         (trading / "src/main/java/demo/EligibilityEvaluator.java").write_text(
@@ -88,13 +104,39 @@ public class TradingEligibilityService implements EligibilityEvaluator {
             """package demo;
 public class CustomerChangedListener {
     private final TradingEligibilityService service;
-    @KafkaListener(topics = "customer.updated")
+    @KafkaListener(topics = "${topics.customer}")
     public void handle(CustomerEvent event) {
         if (event.type() == ADDRESS_CHANGED) service.recalculate("id");
         // bug: JURISDICTION_CHANGED is ignored
     }
 }
 """,
+            encoding="utf-8",
+        )
+        (trading / "src/main/java/demo/RiskClient.java").write_text(
+            '''@FeignClient(name = "${services.risk}", path = "/risk")
+interface RiskClient {
+    @GetMapping("/restrictions/{id}") Object getRestrictions(String id);
+}
+''',
+            encoding="utf-8",
+        )
+        (trading / "src/main/resources").mkdir(parents=True)
+        (trading / "src/main/resources/application.properties").write_text(
+            "topics.customer=customer.updated\nservices.risk=risk-service\n",
+            encoding="utf-8",
+        )
+        (risk / "src/main/java/demo/RiskController.java").write_text(
+            '''@RestController
+@RequestMapping("/risk")
+class RiskController {
+    @GetMapping("/restrictions/{customerId}") Object restrictions(String customerId) { return null; }
+}
+''',
+            encoding="utf-8",
+        )
+        (batch / "src/main/java/demo/NightlyJob.java").write_text(
+            "@Scheduled(cron = \"0 0 0 * * *\") class NightlyJob {}\n",
             encoding="utf-8",
         )
         (trading / "src/test/java/demo/CustomerChangedListenerTest.java").write_text(
@@ -105,8 +147,12 @@ public class CustomerChangedListener {
             encoding="utf-8",
         )
         (trading / "pom.xml").write_text(
-            """<project xmlns="http://maven.apache.org/POM/4.0.0"><dependencies><dependency>
+            """<project xmlns="http://maven.apache.org/POM/4.0.0"><groupId>demo</groupId><artifactId>trading-service</artifactId><dependencies><dependency>
 <groupId>demo</groupId><artifactId>risk-client</artifactId></dependency></dependencies></project>""",
+            encoding="utf-8",
+        )
+        (risk / "pom.xml").write_text(
+            '<project xmlns="http://maven.apache.org/POM/4.0.0"><groupId>demo</groupId><artifactId>risk-client</artifactId></project>',
             encoding="utf-8",
         )
         (self.root / "knowledge").mkdir()
@@ -136,6 +182,12 @@ path = "customer-service"
 [[repositories]]
 name = "trading-service"
 path = "trading-service"
+[[repositories]]
+name = "risk-service"
+path = "risk-service"
+[[repositories]]
+name = "batch-service"
+path = "batch-service"
 """,
             encoding="utf-8",
         )
@@ -172,10 +224,43 @@ path = "trading-service"
         self.assertIn("demo:risk-client", facts)
         self.assertTrue((self.root / "generated/PROJECT_FACTS.md").is_file())
 
+    def test_relationship_map_builds_cross_repo_runtime_workflow(self) -> None:
+        relationships = generate_relationship_map(self.settings)
+        self.assertIn("customer-service → trading-service", relationships)
+        self.assertIn("trading-service → risk-service", relationships)
+        self.assertIn("`KAFKA` `customer.updated`", relationships)
+        self.assertIn("`HTTP` `GET /risk/restrictions/{}`", relationships)
+        self.assertIn("customer-service --KAFKA:customer.updated--> trading-service --HTTP:GET /risk/restrictions/{}--> risk-service", relationships)
+
+    def test_each_repo_gets_its_own_search_result_budget(self) -> None:
+        self.settings.max_results = 1
+        hits = search(self.settings, "class", fixed=True)
+        self.assertEqual({"customer-service", "trading-service", "risk-service", "batch-service"}, {hit.repo for hit in hits})
+
+    def test_structural_backend_json_is_used_when_available(self) -> None:
+        backend = self.root / "fake-backend"
+        backend.write_text(
+            '''#!/usr/bin/env python3
+import json, sys
+if "--version" in sys.argv:
+    print("codebase-memory-mcp 0.10.5")
+else:
+    print(json.dumps({"columns": ["qn", "label", "file", "lines", "in", "out"], "groups": [{"rows": [["demo.EligibilityEvaluator", "Interface", "src/main/java/demo/EligibilityEvaluator.java", "2-2", 0, 1]]}]}))
+''',
+            encoding="utf-8",
+        )
+        backend.chmod(0o755)
+        with mock.patch.dict(os.environ, {"PROJECT_BRAIN_GRAPH_BIN": str(backend)}):
+            indexed = index_graph(self.settings, changed_only=False)
+            hits = graph_symbol_hits(self.settings, "EligibilityEvaluator", ["trading-service"])
+        self.assertTrue(all(item.status == "indexed" for item in indexed))
+        self.assertEqual("EligibilityEvaluator.java", Path(hits[0].path).name)
+        self.assertIn("structural graph", hits[0].found_by[0])
+
     def test_first_refresh_snapshots_even_uncommitted_repositories(self) -> None:
         _, updated = snapshot_indexes(self.settings, changed_only=True)
-        self.assertEqual({"customer-service", "trading-service"}, set(updated))
-        self.assertEqual({"customer-service", "trading-service"}, set(load_index_state(self.settings)))
+        self.assertEqual({"customer-service", "trading-service", "risk-service", "batch-service"}, set(updated))
+        self.assertEqual({"customer-service", "trading-service", "risk-service", "batch-service"}, set(load_index_state(self.settings)))
 
     def test_context_end_to_end_contains_source_tests_and_unresolved(self) -> None:
         start_session(self.settings, "ABC-1", "Jurisdiction changes should recalculate eligibility immediately.")
@@ -233,13 +318,56 @@ class InitTest(unittest.TestCase):
             try:
                 os.chdir(root)
                 with redirect_stdout(output):
-                    code = main(["init", str(repo), "--name", "portable-demo"])
+                    code = main(["init", str(repo), "--name", "portable-demo", "--no-fetch"])
             finally:
                 os.chdir(previous)
             self.assertEqual(0, code)
-            self.assertTrue((root / "brain.toml").is_file())
-            self.assertTrue((root / "knowledge/PROJECT_MAP.md").is_file())
-            self.assertIn('path = "repo-a"', (root / "brain.toml").read_text(encoding="utf-8"))
+            self.assertTrue((repo / "brain.toml").is_file())
+            self.assertTrue((repo / "knowledge/PROJECT_MAP.md").is_file())
+            self.assertIn('path = "."', (repo / "brain.toml").read_text(encoding="utf-8"))
+
+
+class GitSyncTest(unittest.TestCase):
+    def _git(self, cwd: Path, *args: str) -> str:
+        result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=True)
+        return result.stdout.strip()
+
+    def test_sync_reads_latest_remote_commit_without_touching_local_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            origin = root / "origin.git"
+            seed = root / "seed"
+            work = root / "service-a"
+            self._git(root, "init", "--bare", str(origin))
+            seed.mkdir()
+            self._git(seed, "init", "-b", "main")
+            self._git(seed, "config", "user.name", "Test")
+            self._git(seed, "config", "user.email", "test@example.invalid")
+            (seed / "value.txt").write_text("old remote\n", encoding="utf-8")
+            self._git(seed, "add", "value.txt")
+            self._git(seed, "commit", "-m", "initial")
+            self._git(seed, "remote", "add", "origin", str(origin))
+            self._git(seed, "push", "-u", "origin", "main")
+            self._git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+            self._git(root, "clone", str(origin), str(work))
+
+            (work / "value.txt").write_text("local uncommitted\n", encoding="utf-8")
+            (seed / "value.txt").write_text("new remote\n", encoding="utf-8")
+            self._git(seed, "add", "value.txt")
+            self._git(seed, "commit", "-m", "remote update")
+            self._git(seed, "push", "origin", "main")
+
+            config = root / "brain.toml"
+            config.write_text(
+                '[project]\nname="sync-test"\n[[repositories]]\nname="service-a"\npath="service-a"\n',
+                encoding="utf-8",
+            )
+            settings = load_settings(config)
+            results = sync_repositories(settings)
+            self.assertEqual("current", results[0].status)
+            self.assertEqual("new remote\n", (settings.repo("service-a").scan_path / "value.txt").read_text(encoding="utf-8"))
+            self.assertEqual("local uncommitted\n", (work / "value.txt").read_text(encoding="utf-8"))
+            self.assertEqual("main", self._git(work, "branch", "--show-current"))
 
 
 class ReleaseSafetyTest(unittest.TestCase):

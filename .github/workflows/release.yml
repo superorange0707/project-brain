@@ -29,17 +29,77 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  standalone:
+    name: Standalone ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macos-arm64
+            cbm_asset: codebase-memory-mcp-darwin-arm64.tar.gz
+            cbm_sha256: 9ca1d4fc3288e32bd32ef9a6d7f8db854e0f3dbc02ce9f1c3dd1333bf0f77c1c
+          - os: macos-15-intel
+            platform: macos-amd64
+            cbm_asset: codebase-memory-mcp-darwin-amd64.tar.gz
+            cbm_sha256: 4dec436e25de1699ee21a4c6177a7f3e430256476f13f511123d3f049843fd0d
+          - os: ubuntu-latest
+            platform: linux-amd64
+            cbm_asset: codebase-memory-mcp-linux-amd64-portable.tar.gz
+            cbm_sha256: 0546a9bf527ca2bbf766a352249f3d207e3e3ca0fb1eb27c8092767b5e0243b9
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            cbm_asset: codebase-memory-mcp-linux-arm64-portable.tar.gz
+            cbm_sha256: 3a3f14b24f9bbca0e2322eed2837a9a36da9ad3958063509db446fa1e3fce835
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Build standalone Project Brain
+        run: |
+          python -m pip install . pyinstaller
+          pyinstaller --clean --onefile --name brain --collect-data brain brain/standalone.py
+          dist/brain --version
+      - name: Download pinned structural backend
+        env:
+          CBM_ASSET: ${{ matrix.cbm_asset }}
+          CBM_SHA256: ${{ matrix.cbm_sha256 }}
+        run: |
+          curl --fail --location --output "$CBM_ASSET" "https://github.com/DeusData/codebase-memory-mcp/releases/download/v0.10.5/$CBM_ASSET"
+          echo "$CBM_SHA256  $CBM_ASSET" | shasum -a 256 --check
+          mkdir cbm
+          tar -xzf "$CBM_ASSET" -C cbm codebase-memory-mcp LICENSE THIRD_PARTY_NOTICES.md
+      - name: Package standalone tools
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir package
+          cp dist/brain cbm/codebase-memory-mcp package/
+          cp LICENSE package/PROJECT_BRAIN_LICENSE
+          cp cbm/LICENSE package/CODEBASE_MEMORY_LICENSE
+          cp cbm/THIRD_PARTY_NOTICES.md package/CODEBASE_MEMORY_THIRD_PARTY_NOTICES.md
+          tar -czf "project-brain-${GITHUB_REF_NAME}-${PLATFORM}.tar.gz" -C package .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: standalone-${{ matrix.platform }}
+          path: project-brain-*.tar.gz
+          if-no-files-found: error
+
   github-release:
     name: Publish GitHub release
-    needs: build
+    needs: [build, standalone]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: python-package-distributions
           path: dist/
+          merge-multiple: true
       - name: Create checksums
         run: sha256sum dist/*.whl dist/*.tar.gz > dist/SHA256SUMS.txt
       - name: Create release
