@@ -2,6 +2,25 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.3.0] - 2026-08-16
+
+### Added
+
+- A token-protected, loopback-only `brain ui` investigation cockpit for project
+  health, ticket startup, AI request preview, evidence delivery, session history,
+  and implementation/test feedback.
+- Versioned `CONTEXT_REQUEST` protocol with whole-response YAML extraction, JSON
+  input, deterministic dry-run plans, repository validation, and copyable repair
+  prompts when a chat model breaks the schema.
+- Stable JSON output for ticket startup, context fulfilment, project status,
+  request preview, and implementation feedback commands.
+- `brain feedback` packages tracked diffs and human-observed test output for an
+  AI review without running commands or editing code.
+- `brain demo` creates a self-contained four-repository Java/Spring/Kafka/Feign
+  investigation that new users can explore immediately.
+- Loopback API authentication, strict browser security headers, request-size
+  limits, and artifact traversal protection.
+
 ## [0.2.1] - 2026-08-16
 
 ### Fixed
@@ -60,6 +79,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - CI, release packaging, security policy, user guide, and contribution guide.
 
 [0.2.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.2.1
+[0.3.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.3.0
 [0.2.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.2.0
 [0.1.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.1.2
 [0.1.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.1.1

@@ -17,6 +17,7 @@ from typing import Any, Iterable
 
 
 IGNORED_DIRS = {".git", ".idea", ".venv", "node_modules", "target", "build", "dist"}
+PROTOCOL_VERSION = 1
 CODE_SUFFIXES = {
     ".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js",
     ".jsx", ".kt", ".kts", ".php", ".py", ".rb", ".rs", ".scala",
@@ -61,6 +62,8 @@ class Settings:
     full_file_lines: int = 350
     soft_target_chars: int = 500_000
     clipboard_chunk_chars: int = 180_000
+    graph_enabled: bool = True
+    graph_lazy: bool = True
 
     def repos(self, names: Iterable[str] | None = None) -> list[Repository]:
         wanted = set(names or [])
@@ -293,6 +296,10 @@ def load_settings(path: str | Path | None = None) -> Settings:
     context = data.get("context") or {}
     search = data.get("search") or {}
     delivery = data.get("delivery") or {}
+    graph = data.get("graph") or {}
+    graph_mode = str(graph.get("mode") or "lazy")
+    if graph_mode not in {"lazy", "eager"}:
+        raise BrainError("graph.mode must be lazy or eager")
 
     def local(value: str) -> Path:
         candidate = Path(value).expanduser()
@@ -312,6 +319,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
         full_file_lines=int(context.get("full_file_lines") or 350),
         soft_target_chars=int(context.get("soft_target_chars") or 500_000),
         clipboard_chunk_chars=int(delivery.get("clipboard_chunk_chars") or 180_000),
+        graph_enabled=bool(graph.get("enabled", True)),
+        graph_lazy=graph_mode == "lazy",
     )
     _attach_source_snapshots(settings)
     return settings
@@ -428,6 +437,7 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
 def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
     from .graph import graph_symbol_hits
 
+    scope = list(repos or [])
     name = query.rsplit(".", 1)[-1]
     escaped = re.escape(name)
     declaration = (
@@ -435,16 +445,25 @@ def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = No
         rf"|\b{escaped}\s*[:=]\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)"
         rf"|\b(?:public|protected|private|static|final|abstract|synchronized|native\s+)*[A-Za-z_$][\w$<>, ?\[\].]*\s+{escaped}\s*\("
     )
-    graph_hits = graph_symbol_hits(settings, query, repos)
-    hits = search(settings, declaration, repos)
+    hits = search(settings, declaration, scope)
     for hit in hits:
         hit.kind = "definition"
         hit.score = 100
         hit.found_by.append("symbol declaration")
+    graph_scope = scope or sorted({hit.repo for hit in hits})
+    graph_hits = graph_symbol_hits(settings, query, graph_scope)
     if graph_hits or hits:
-        combined = graph_hits + hits
-        return list({(hit.repo, hit.path, hit.line): hit for hit in combined}.values())
-    fallback = search(settings, rf"\b{escaped}\b", repos)
+        merged: dict[tuple[str, str, int], SearchHit] = {}
+        for hit in graph_hits + hits:
+            key = hit.repo, hit.path, hit.line
+            existing = merged.get(key)
+            if existing:
+                existing.score = max(existing.score, hit.score)
+                existing.found_by = sorted(set(existing.found_by + hit.found_by))
+            else:
+                merged[key] = hit
+        return list(merged.values())
+    fallback = search(settings, rf"\b{escaped}\b", scope)
     for hit in fallback:
         hit.kind = "symbol reference"
         hit.score = 60
@@ -493,9 +512,9 @@ def read_source(settings: Settings, hit: SearchHit, *, full: bool = False, lines
 def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = None) -> tuple[list[SearchHit], list[str]]:
     from .graph import graph_trace
 
-    graph_hits, graph_relationships = graph_trace(settings, query, repos)
+    scope = list(repos or [])
     name = query.rsplit(".", 1)[-1]
-    uses = search(settings, rf"\b{re.escape(name)}\s*\(", repos)
+    uses = search(settings, rf"\b{re.escape(name)}\s*\(", scope)
     inbound: list[SearchHit] = []
     definitions: list[SearchHit] = []
     declaration = re.compile(rf"\b(?:def|fn|func|function|fun|[A-Za-z_$][\w$<>, ?\[\]]+)\s+{re.escape(name)}\s*\(")
@@ -508,6 +527,8 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
             hit.kind = "caller"
             hit.score = 90
             inbound.append(hit)
+    graph_scope = scope or sorted({hit.repo for hit in definitions + inbound})
+    graph_hits, graph_relationships = graph_trace(settings, query, graph_scope)
     relationships = graph_relationships + [f"{hit.repo}:{hit.path}:{hit.line}  CALLS  {query}" for hit in inbound]
     call_names: set[str] = set()
     ignored = {"if", "for", "while", "switch", "catch", "return", "new", "throw", "super", "this", name}
@@ -596,25 +617,48 @@ def generate_map(settings: Settings) -> str:
 
 
 def _request_body(text: str) -> dict[str, Any]:
-    marker = text.find("CONTEXT_REQUEST:")
-    if marker < 0:
-        raise BrainError("Input does not contain CONTEXT_REQUEST:")
-    payload = text[marker:]
-    closing_fence = payload.find("\n```")
-    if closing_fence >= 0:
-        payload = payload[:closing_fence]
-    try:
-        import yaml  # type: ignore[import-not-found]
-    except ImportError:
-        loaded = simple_yaml_load(payload)
-    else:
+    """Extract a versioned request from a whole chat response or request file."""
+    stripped = text.strip()
+    if not stripped:
+        raise BrainError("The AI response is empty")
+
+    loaded: Any = None
+    if stripped.startswith("{"):
         try:
-            loaded = yaml.safe_load(payload)
-        except Exception as exc:
-            raise BrainError(f"Invalid CONTEXT_REQUEST YAML: {exc}") from exc
+            loaded = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise BrainError(f"Invalid CONTEXT_REQUEST JSON: line {exc.lineno}, column {exc.colno}: {exc.msg}") from exc
+
+    if loaded is None:
+        marker = text.find("CONTEXT_REQUEST:")
+        if marker < 0:
+            raise BrainError(
+                "Input does not contain CONTEXT_REQUEST:. Copy the AI's complete response, "
+                "or ask it to return a Project Brain CONTEXT_REQUEST YAML block."
+            )
+        payload = text[marker:]
+        closing_fence = payload.find("\n```")
+        if closing_fence >= 0:
+            payload = payload[:closing_fence]
+        try:
+            import yaml  # type: ignore[import-not-found]
+        except ImportError:
+            loaded = simple_yaml_load(payload)
+        else:
+            try:
+                loaded = yaml.safe_load(payload)
+            except Exception as exc:
+                raise BrainError(f"Invalid CONTEXT_REQUEST YAML: {exc}") from exc
+
+    if isinstance(loaded, dict) and "CONTEXT_REQUEST" not in loaded and "objective" in loaded:
+        loaded = {"CONTEXT_REQUEST": loaded}
     if not isinstance(loaded, dict) or not isinstance(loaded.get("CONTEXT_REQUEST"), dict):
-        raise BrainError("CONTEXT_REQUEST must be a mapping")
+        raise BrainError("CONTEXT_REQUEST must be a YAML mapping or JSON object")
     request = loaded["CONTEXT_REQUEST"]
+    version = request.get("version", loaded.get("version", PROTOCOL_VERSION))
+    if version != PROTOCOL_VERSION:
+        raise BrainError(f"Unsupported CONTEXT_REQUEST version {version!r}; this build supports version {PROTOCOL_VERSION}")
+    request["version"] = PROTOCOL_VERSION
     for key in ("searches", "symbols", "files", "history"):
         value = request.get(key, [])
         if value is None:
@@ -631,6 +675,7 @@ def parse_context_request(text: str) -> dict[str, Any]:
     for index, item in enumerate(request["searches"]):
         if not isinstance(item, dict) or not str(item.get("query") or "").strip():
             raise BrainError(f"searches[{index}].query is required")
+        _requested_repos(item)
     allowed = {"definition", "callers", "callees", "implementations", "tests"}
     for index, item in enumerate(request["symbols"]):
         if not isinstance(item, dict) or not str(item.get("name") or "").strip():
@@ -642,10 +687,79 @@ def parse_context_request(text: str) -> dict[str, Any]:
         if unknown:
             raise BrainError(f"symbols[{index}].include has unknown values: {', '.join(sorted(unknown))}")
         item["include"] = include
+        _requested_repos(item)
     for index, item in enumerate(request["files"]):
         if not isinstance(item, dict) or not item.get("repo") or not item.get("path"):
             raise BrainError(f"files[{index}] requires repo and path")
+        if item.get("lines") and not re.fullmatch(r"\s*\d+\s*[-:]\s*\d+\s*", str(item["lines"])):
+            raise BrainError(f"files[{index}].lines must look like 10-40")
+    for index, item in enumerate(request["history"]):
+        if not isinstance(item, dict) or not str(item.get("query") or "").strip():
+            raise BrainError(f"history[{index}].query is required")
+        _requested_repos(item)
     return request
+
+
+def request_preview(text: str, settings: Settings | None = None) -> dict[str, Any]:
+    """Return the deterministic execution plan without touching repositories."""
+    request = parse_context_request(text)
+    actions: list[dict[str, Any]] = []
+
+    def repos_for(item: dict[str, Any]) -> list[str]:
+        repos = _requested_repos(item)
+        if settings:
+            settings.repos(repos)
+        return repos
+
+    for item in request["searches"]:
+        actions.append({"kind": "search", "value": str(item["query"]), "repos": repos_for(item)})
+    for item in request["symbols"]:
+        repos = repos_for(item)
+        for operation in item["include"]:
+            actions.append({"kind": str(operation), "value": str(item["name"]), "repos": repos})
+    for item in request["files"]:
+        if settings:
+            settings.repo(str(item["repo"]))
+        value = f"{item['repo']}:{item['path']}"
+        if item.get("lines"):
+            value += f":{item['lines']}"
+        actions.append({"kind": "file", "value": value, "repos": [str(item["repo"]) ]})
+    for item in request["history"]:
+        actions.append({"kind": "history", "value": str(item["query"]), "repos": repos_for(item)})
+
+    return {
+        "valid": True,
+        "protocol_version": PROTOCOL_VERSION,
+        "objective": str(request["objective"]).strip(),
+        "request": request,
+        "actions": actions,
+        "operation_count": len(actions),
+        "counts": {
+            "searches": len(request["searches"]),
+            "symbols": len(request["symbols"]),
+            "files": len(request["files"]),
+            "history": len(request["history"]),
+        },
+        "normalized_json": json.dumps({"CONTEXT_REQUEST": request}, indent=2, ensure_ascii=False) + "\n",
+    }
+
+
+def request_repair_prompt(error: str) -> str:
+    """Build a safe prompt the user can copy back when the model broke protocol."""
+    return (
+        "Your previous response could not be executed by Project Brain.\n\n"
+        f"Validation error: {error}\n\n"
+        "Return only one fenced YAML block using this exact schema. Do not invent repository names.\n\n"
+        "```yaml\n"
+        "CONTEXT_REQUEST:\n"
+        f"  version: {PROTOCOL_VERSION}\n"
+        "  objective: Explain the next fact that must be established.\n"
+        "  searches: []\n"
+        "  symbols: []\n"
+        "  files: []\n"
+        "  history: []\n"
+        "```\n"
+    )
 
 
 def _requested_repos(item: dict[str, Any]) -> list[str]:
@@ -686,6 +800,31 @@ def _deduplicate(evidence: list[Evidence]) -> list[Evidence]:
         else:
             merged[key] = item
     return sorted(merged.values(), key=lambda item: (-item.score, item.repo, item.path, item.line_start))
+
+
+def working_tree_diffs(settings: Settings, repos: Iterable[str] | None = None) -> list[Evidence]:
+    """Read tracked working-tree diffs without modifying or staging anything."""
+    evidence: list[Evidence] = []
+    for repo in settings.repos(repos):
+        if not (repo.path / ".git").exists():
+            continue
+        unstaged = run(["git", "diff", "--no-ext-diff"], cwd=repo.path)
+        staged = run(["git", "diff", "--cached", "--no-ext-diff"], cwd=repo.path)
+        content = "\n".join(part for part in [unstaged.stdout.strip(), staged.stdout.strip()] if part)
+        if content:
+            evidence.append(
+                Evidence(
+                    repo.name,
+                    "(working tree diff)",
+                    1,
+                    content.count("\n") + 1,
+                    content,
+                    "local diff",
+                    100,
+                    ["working tree review"],
+                )
+            )
+    return evidence
 
 
 def retrieve_context(settings: Settings, request: dict[str, Any], *, include_diff: bool = False) -> ContextBundle:
@@ -753,12 +892,7 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
             bundle.unresolved.append(f"No Git history found for `{query}`")
 
     if include_diff:
-        for repo in settings.repositories:
-            unstaged = run(["git", "diff", "--no-ext-diff"], cwd=repo.path)
-            staged = run(["git", "diff", "--cached", "--no-ext-diff"], cwd=repo.path)
-            content = "\n".join(part for part in [unstaged.stdout.strip(), staged.stdout.strip()] if part)
-            if content:
-                bundle.evidence.append(Evidence(repo.name, "(working tree diff)", 1, content.count("\n") + 1, content, "local diff", 100, ["--include-diff"]))
+        bundle.evidence.extend(working_tree_diffs(settings))
 
     bundle.evidence = _deduplicate(bundle.evidence)
     state = load_index_state(settings)
@@ -878,10 +1012,14 @@ def doctor(settings: Settings) -> tuple[str, bool]:
         item = source_state.get(repo.name) or {}
         source = (repo.source_sha or git_head(repo) or "")[:12]
         output.append(f"{repo.name:<24}{item.get('status', repo.source_status).upper()}  {source or 'unknown'}")
-    version = backend_version()
-    graph_status = f"codebase-memory-mcp {version}" if version else "OPTIONAL MISSING — lexical fallback active"
-    if version and version != TESTED_BACKEND_VERSION:
+    version = backend_version() if settings.graph_enabled else None
+    graph_status = "DISABLED — lexical analysis active" if not settings.graph_enabled else (
+        f"codebase-memory-mcp {version}" if version else "OPTIONAL MISSING — lexical fallback active"
+    )
+    if settings.graph_enabled and version and version != TESTED_BACKEND_VERSION:
         graph_status += f" (tested with {TESTED_BACKEND_VERSION})"
+    if settings.graph_enabled and settings.graph_lazy:
+        graph_status += " — lazy per relevant repository"
     output.extend(["", f"Config: {settings.config_path}", f"Structural backend: {graph_status}"])
     return "\n".join(output) + "\n", ok
 
@@ -896,7 +1034,7 @@ def session_dir(settings: Settings, ticket: str) -> Path:
 def session_state(settings: Settings, ticket: str) -> dict[str, Any]:
     path = session_dir(settings, ticket) / "session.json"
     if not path.is_file():
-        return {"ticket": ticket, "requests": 0, "delivery": {}}
+        return {"ticket": ticket, "requests": 0, "feedbacks": 0, "delivery": {}}
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -933,6 +1071,7 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
             "ticket": ticket,
             "started_at": datetime.now(UTC).isoformat(),
             "requests": state.get("requests", 0),
+            "feedbacks": state.get("feedbacks", 0),
             "sources": {
                 repo.name: {
                     "snapshot": str(repo.source_path) if repo.source_path else None,
@@ -969,6 +1108,67 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
     path = directory / f"context-{number:03d}.md"
     path.write_text(content, encoding="utf-8")
     state["requests"] = number
+    save_session(settings, ticket, state)
+    return content, path, number
+
+
+def create_feedback(
+    settings: Settings,
+    ticket: str,
+    *,
+    notes: str = "",
+    test_command: str = "",
+    test_output: str = "",
+    repos: Iterable[str] | None = None,
+    include_diff: bool = True,
+) -> tuple[str, Path, int]:
+    """Package human implementation and test results for a chat AI review."""
+    directory = session_dir(settings, ticket)
+    if not directory.is_dir():
+        raise BrainError(f"Session {ticket} does not exist. Run `brain start {ticket}` first.")
+    selected = settings.repos(repos)
+    state = session_state(settings, ticket)
+    number = int(state.get("feedbacks") or 0) + 1
+    sections = [
+        "# PROJECT BRAIN — IMPLEMENTATION FEEDBACK",
+        "",
+        f"Ticket: `{ticket}`",
+        f"Feedback: `{number:03d}`",
+        "",
+        "Review the developer's implementation against the ticket, prior evidence, and proposed solution. "
+        "Identify correctness gaps, missed callers, compatibility risks, and missing tests. Do not invent "
+        "runtime results. If more source evidence is required, return a new CONTEXT_REQUEST.",
+        "",
+        "## Repository state",
+        "",
+    ]
+    for repo in selected:
+        source = (state.get("sources") or {}).get(repo.name) or {}
+        sections.append(
+            f"- `{repo.name}` — investigation source `{str(source.get('sha') or 'unknown')[:12]}`; "
+            f"current local HEAD `{(git_head(repo) or 'unknown')[:12]}`"
+        )
+    sections.extend(["", "## Developer notes", "", notes.strip() or "No notes supplied.", ""])
+    sections.extend(["## Test execution", ""])
+    if test_command.strip():
+        sections.extend(["Command:", "", "```text", test_command.strip(), "```", ""])
+    if test_output.strip():
+        sections.extend(["Observed output:", "", "```text", test_output.rstrip(), "```", ""])
+    if not test_command.strip() and not test_output.strip():
+        sections.extend(["No test result supplied.", ""])
+    sections.extend(["## Working-tree changes", ""])
+    diffs = working_tree_diffs(settings, [repo.name for repo in selected]) if include_diff else []
+    if not include_diff:
+        sections.extend(["Diff inclusion was disabled.", ""])
+    elif not diffs:
+        sections.extend(["No tracked staged or unstaged changes were found in the selected repositories.", ""])
+    else:
+        for item in diffs:
+            sections.extend([f"### {item.repo}", "", "```diff", item.content, "```", ""])
+    content = "\n".join(sections).rstrip() + "\n"
+    path = directory / f"feedback-{number:03d}.md"
+    path.write_text(content, encoding="utf-8")
+    state["feedbacks"] = number
     save_session(settings, ticket, state)
     return content, path, number
 

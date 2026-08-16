@@ -12,7 +12,7 @@ cloud indexing, API keys, or giving an agent permission to edit your code.
 [![Zero runtime dependencies](https://img.shields.io/badge/runtime_dependencies-0-2ea44f)](pyproject.toml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [User guide](docs/USER_GUIDE.md) · [Security](SECURITY.md)
+[Quick start](#quick-start) · [Local cockpit](#local-investigation-cockpit) · [How it works](#how-it-works) · [User guide](docs/USER_GUIDE.md) · [Security](SECURITY.md)
 
 </div>
 
@@ -40,7 +40,8 @@ configured repositories. You apply the final solution in your IDE.
 |---|---|
 | 🔒 **Safe source snapshots** | Fetches remote refs, but never pulls, checks out, resets, cleans, or edits a repository |
 | 🧭 **Multi-repository workflows** | Connects Maven, Kafka, Spring REST, and Feign evidence across repos |
-| 🤖 **Model-independent** | Works with Claude, ChatGPT, M365 Copilot, or any text model |
+| 🤖 **Model-independent** | Works with Claude, ChatGPT, M365 Copilot, or any text model—no MCP required |
+| 🖥️ **Local investigation cockpit** | Paste tickets and AI replies, preview every operation, inspect evidence, and copy results |
 | 📚 **Evidence-complete** | Retrieves production source, tests, config, relationships, and history |
 | 🧠 **Structural + exact** | Pinned code graph when bundled; deterministic exact/lexical fallback everywhere |
 | 🔍 **Honest uncertainty** | Missing evidence and static-analysis limits are reported, never hidden |
@@ -68,7 +69,7 @@ Download the archive for your CPU from the
 extract it, and place both executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.2.1-macos-arm64.tar.gz
+tar -xzf project-brain-v0.3.0-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp ~/.local/bin/
 ```
@@ -79,19 +80,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.0"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.2.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.3.0"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.2.1/project_brain_context-0.2.1-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.3.0/project_brain_context-0.3.0-py3-none-any.whl
 ```
 
 Then verify:
@@ -111,12 +112,23 @@ brain init --name payments-platform
 ```
 
 That one command discovers every nested Git repo, fetches `origin`, creates
-immutable snapshots of the remote default branches, builds the structural index,
-and generates the project relationship map. A fetch failure is reported per repo
+immutable snapshots of the remote default branches, prepares lazy structural
+indexing, and generates the project relationship map. A fetch failure is reported per repo
 and falls back to the newest locally available commit; it never blocks the other
 repositories.
 
-Start a ticket investigation:
+Open the local investigation cockpit:
+
+```bash
+brain ui
+```
+
+The browser page is served only on `127.0.0.1` and protected by a random session
+token. Paste a ticket, click **Start investigation**, and copy the generated
+context to your chat AI. Paste the AI's complete reply into **AI Request**, review
+the exact local operations, and click **Approve and run**.
+
+Prefer the terminal? Start a ticket investigation directly:
 
 ```bash
 brain start ABC-1234 --ticket-file ticket.md --target claude
@@ -132,10 +144,35 @@ brain ctx ABC-1234 --clipboard --target claude
 Paste the result back. Repeat until the AI returns `FINAL_SOLUTION`. For M365
 Copilot, use `--target m365` and upload the printed Markdown path instead.
 
+### Try the complete workflow without your own repositories
+
+```bash
+brain demo
+cd project-brain-demo
+brain ui
+```
+
+The demo creates four local Git repositories with Spring, Kafka, Feign, tests,
+and a realistic eligibility bug. It contains no network remote or credential.
+
+## Local investigation cockpit
+
+The GUI is a thin, local layer over the same tested retrieval core as the CLI:
+
+- **Project health** shows snapshot SHAs, fetch state, and structural/lexical index status.
+- **Start ticket** optionally synchronizes every repo and pins the investigation to exact commits.
+- **AI Request Inbox** extracts YAML or JSON from the complete chat response, validates repository names, and previews every operation before execution.
+- **Evidence context** provides chunk navigation and one-click clipboard delivery.
+- **Review changes** packages tracked diffs, developer notes, and observed test output; it never runs the command or claims success itself.
+- **Investigation history** reopens ticket, request, context, and feedback artifacts under `.runs/TICKET/`.
+
+There is no embedded model, MCP client, hosted service, or automatic code editor.
+
 ## A context request
 
 ```yaml
 CONTEXT_REQUEST:
+  version: 1
   objective: >
     Determine how jurisdiction changes reach trading eligibility recalculation.
 
@@ -196,7 +233,8 @@ unresolved section.
 ```
 
 The bundled release uses `codebase-memory-mcp` for tree-sitter/Hybrid-LSP
-structural queries and Project Brain's deterministic scanners for cross-repo
+structural queries, indexed lazily only for repositories implicated by a symbol
+request, and Project Brain's deterministic scanners for cross-repo
 framework wiring. If the backend is absent or fails, `rg` or the standard-library
 scanner remains available. Every heuristic is labelled; this is useful static
 evidence, not a claim to compiler-perfect runtime behavior.
@@ -205,8 +243,10 @@ evidence, not a claim to compiler-perfect runtime behavior.
 
 ```text
 brain init              Discover, sync, index, and map a project root
+brain demo              Create a safe four-repository example investigation
 brain sync              Safely fetch all repos and rebuild remote snapshots
 brain doctor            Check config, repositories, git, rg, and freshness
+brain status            Show project health and ticket sessions (optionally JSON)
 brain refresh           Sync and regenerate all project intelligence
 brain search            Search all configured repositories
 brain symbol            Resolve symbol definitions with lexical fallback
@@ -214,7 +254,10 @@ brain trace             Find static callers and likely outbound calls
 brain history           Search Git history
 brain map               Generate Spring/Maven/project facts
 brain start             Start a ticket investigation
+brain preview           Validate and dry-run an AI request
 brain ctx               Fulfil a CONTEXT_REQUEST
+brain feedback          Package diffs and observed test output for AI review
+brain ui                Open the token-protected local investigation cockpit
 brain next / prev       Navigate Claude clipboard chunks
 brain delivery-status   Show the current chunk
 brain learn             Create a solved-ticket memory template
@@ -230,6 +273,11 @@ credential helper. It never reads, stores, logs, or asks for a token, and never
 puts a remote URL in generated state. It makes no model/API requests. Generated
 context can still contain proprietary source or secrets already present in a repo.
 Review context before pasting or uploading it outside your organization.
+
+`brain ui` binds to IPv4 loopback only, uses a random per-process API token,
+rejects non-local Host headers, limits request bodies, sends a restrictive browser
+security policy, and serves no repository file directly. Closing the process
+invalidates the URL immediately.
 
 Generated source evidence, local repository paths, configs, keys, `.env` files,
 knowledge, and ticket runs are ignored by the tool repository's default

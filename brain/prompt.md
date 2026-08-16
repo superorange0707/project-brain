@@ -14,6 +14,7 @@ Do not stop after locating a likely file. If evidence is insufficient, respond o
 with a request in this form:
 
 CONTEXT_REQUEST:
+  version: 1
   objective: Explain what must be established next.
   searches:
     - query: exact text, regex, business term, event, route, or config key
@@ -26,7 +27,8 @@ CONTEXT_REQUEST:
   history: []
 
 Keep requests focused, but request all evidence that can usefully be gathered in
-one pass. Continue requesting context until you can tell the developer what to
+one pass. Put the request in one fenced YAML block and do not put prose inside the
+block. Continue requesting context until you can tell the developer what to
 change without delegating architecture or core implementation decisions back.
 
 Only then return `FINAL_SOLUTION` with: ticket interpretation, current behaviour,

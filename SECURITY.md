@@ -7,7 +7,8 @@ recent minor release.
 
 | Version | Supported |
 |---|---|
-| 0.2.x | Yes |
+| 0.3.x | Yes |
+| 0.2.x | No |
 | 0.1.x | No |
 | Older | No |
 
@@ -32,6 +33,12 @@ Project Brain is designed as a local, read-only retrieval tool:
 - It does not edit, clean, reset, checkout, build, or commit target repositories.
 - Subprocesses use argument arrays rather than a shell.
 - Direct file requests are constrained to configured repository roots.
+- The GUI listens on IPv4 loopback only and every API call requires a random,
+  per-process bearer token.
+- The GUI rejects non-local Host headers, caps JSON requests at 4 MiB, disables
+  caching/framing/referrers, and restricts page connections to itself.
+- GUI artifact reads use a generated session allowlist; path traversal and
+  `session.json` access through that endpoint are rejected.
 - Generated context, local configs, knowledge, state, `.env`, keys, and certificate
   formats are ignored by the default `.gitignore`.
 
@@ -43,6 +50,11 @@ clipboard commands. It trusts executables resolved from the user's `PATH`.
 Remote commits are exported with `git archive` into the ignored Brain state
 directory. Archive extraction rejects absolute paths, parent traversal, links,
 and device entries. Target working trees are never checked out or modified.
+
+The `brain ui` URL contains its ephemeral token. Treat it as local session data,
+do not paste it into chat, and stop the process when finished. The token becomes
+invalid when the process exits. Project Brain never binds this UI to a LAN or
+public interface.
 
 ## Source disclosure risk
 

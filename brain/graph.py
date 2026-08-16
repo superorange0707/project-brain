@@ -92,16 +92,27 @@ def _invoke(settings: Settings, tool: str, arguments: dict[str, Any], *, timeout
     return None, "no JSON response"
 
 
-def index_graph(settings: Settings, *, changed_only: bool = True) -> list[GraphIndexResult]:
+def index_graph(
+    settings: Settings,
+    *,
+    changed_only: bool = True,
+    repositories: Iterable[str] | None = None,
+    defer_lazy: bool = False,
+) -> list[GraphIndexResult]:
+    if not settings.graph_enabled:
+        return [GraphIndexResult("all", "fallback", "structural graph disabled by config; lexical analysis remains active")]
     if not find_backend():
         return [GraphIndexResult("all", "fallback", f"{BACKEND_NAME} not installed; lexical analysis remains active")]
+    selected_names = list(repositories or [])
+    if defer_lazy and settings.graph_lazy and not selected_names:
+        return [GraphIndexResult("all", "deferred", "structural repositories are indexed on first relevant symbol request")]
     state_path = settings.state_dir / "graphs.json"
     try:
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
     except (OSError, json.JSONDecodeError):
         state = {}
     results: list[GraphIndexResult] = []
-    for repo in settings.repositories:
+    for repo in settings.repos(selected_names):
         sha = repo.source_sha or "working-tree"
         if changed_only and (state.get(repo.name) or {}).get("sha") == sha:
             results.append(GraphIndexResult(repo.name, "current", sha[:12]))
@@ -201,11 +212,14 @@ def _hits(settings: Settings, repo_name: str, payload: Any, kind: str) -> list[S
 
 
 def graph_symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
-    if not find_backend():
+    if not settings.graph_enabled or not find_backend():
         return []
+    selected_names = list(repos or [])
+    if settings.graph_lazy and selected_names:
+        index_graph(settings, changed_only=True, repositories=selected_names)
     state = _graph_state(settings)
     hits: list[SearchHit] = []
-    for repo in settings.repos(repos):
+    for repo in settings.repos(selected_names):
         indexed = state.get(repo.name) or {}
         if not indexed or indexed.get("sha") != (repo.source_sha or "working-tree"):
             continue
@@ -221,12 +235,15 @@ def graph_symbol_hits(settings: Settings, query: str, repos: Iterable[str] | Non
 
 
 def graph_trace(settings: Settings, query: str, repos: Iterable[str] | None = None) -> tuple[list[SearchHit], list[str]]:
-    if not find_backend():
+    if not settings.graph_enabled or not find_backend():
         return [], []
+    selected_names = list(repos or [])
+    if settings.graph_lazy and selected_names:
+        index_graph(settings, changed_only=True, repositories=selected_names)
     state = _graph_state(settings)
     hits: list[SearchHit] = []
     relationships: list[str] = []
-    for repo in settings.repos(repos):
+    for repo in settings.repos(selected_names):
         indexed = state.get(repo.name) or {}
         if not indexed or indexed.get("sha") != (repo.source_sha or "working-tree"):
             continue

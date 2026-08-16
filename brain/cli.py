@@ -4,12 +4,14 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from . import __version__
 from .core import (
     BrainError,
     clipboard_read,
+    create_feedback,
     create_context,
     create_learning_template,
     deliver,
@@ -18,6 +20,8 @@ from .core import (
     git_history,
     load_settings,
     move_delivery,
+    request_preview,
+    request_repair_prompt,
     search,
     session_state,
     snapshot_indexes,
@@ -41,6 +45,9 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--name", help="project name")
     init.add_argument("--force", action="store_true", help="replace an existing config")
     init.add_argument("--no-fetch", action="store_true", help="initialize from locally available commits")
+
+    demo = commands.add_parser("demo", help="create a safe four-repository example project")
+    demo.add_argument("path", nargs="?", default="project-brain-demo", help="new or empty target directory")
 
     commands.add_parser("doctor", help="check configuration and local capabilities")
     commands.add_parser("index", help="index current source snapshots")
@@ -74,6 +81,7 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--target", choices=("claude", "m365"), default="claude")
     start.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     start.add_argument("--no-sync", action="store_true", help="use the last source snapshots")
+    start.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
     context = commands.add_parser("ctx", help="fulfil a CONTEXT_REQUEST")
     context.add_argument("ticket")
@@ -83,6 +91,33 @@ def _parser() -> argparse.ArgumentParser:
     context.add_argument("--target", choices=("claude", "m365"), default="claude")
     context.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     context.add_argument("--include-diff", action="store_true")
+    context.add_argument("--json", action="store_true", help="print a stable machine-readable result")
+
+    preview = commands.add_parser("preview", help="validate and preview an AI CONTEXT_REQUEST")
+    preview_source = preview.add_mutually_exclusive_group()
+    preview_source.add_argument("--file")
+    preview_source.add_argument("--clipboard", action="store_true")
+    preview.add_argument("--json", action="store_true", help="print the complete machine-readable plan")
+
+    feedback = commands.add_parser("feedback", help="package implementation diffs and test results for AI review")
+    feedback.add_argument("ticket")
+    feedback.add_argument("--repo", action="append", default=[])
+    notes = feedback.add_mutually_exclusive_group()
+    notes.add_argument("--notes")
+    notes.add_argument("--notes-file")
+    feedback.add_argument("--test-command", default="")
+    feedback.add_argument("--test-output-file")
+    feedback.add_argument("--no-diff", action="store_true")
+    feedback.add_argument("--target", choices=("claude", "m365"), default="claude")
+    feedback.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
+    feedback.add_argument("--json", action="store_true", help="print a stable machine-readable result")
+
+    status_command = commands.add_parser("status", help="show project health and investigation sessions")
+    status_command.add_argument("--json", action="store_true", help="print machine-readable project status")
+
+    ui = commands.add_parser("ui", help="open the local Project Brain investigation cockpit")
+    ui.add_argument("--port", type=int, default=8765, help="loopback port; use 0 for any free port")
+    ui.add_argument("--no-open", action="store_true", help="do not open the browser automatically")
 
     for name, help_text in (("next", "copy the next Claude chunk"), ("prev", "copy the previous Claude chunk")):
         command = commands.add_parser(name, help=help_text)
@@ -132,7 +167,7 @@ def _refresh_all(settings, *, fetch: bool) -> tuple[list[SyncResult], list[Graph
     snapshot_indexes(settings, changed_only=True)
     generate_map(settings)
     generate_relationship_map(settings)
-    return results, index_graph(settings)
+    return results, index_graph(settings, defer_lazy=True)
 
 
 def _init(args: argparse.Namespace) -> int:
@@ -165,6 +200,9 @@ def _init(args: argparse.Namespace) -> int:
         "",
         "[delivery]",
         "clipboard_chunk_chars = 180000",
+        "",
+        "[graph]",
+        'mode = "lazy"',
         "",
         "[knowledge]",
         'path = "knowledge"',
@@ -227,6 +265,23 @@ def _ticket_text(args: argparse.Namespace) -> str:
     return f"# {args.ticket}\n\nPaste the ticket description here before sending this context to the AI."
 
 
+def _demo(args: argparse.Namespace) -> int:
+    from .demo import create_demo
+
+    config = create_demo(Path(args.path))
+    settings = load_settings(config)
+    results, graphs = _refresh_all(settings, fetch=False)
+    print(f"Created Project Brain demo at {settings.root}")
+    _print_sync(results)
+    _print_graph(graphs)
+    print("\nTry it:")
+    print(f"  cd {settings.root}")
+    print("  brain ui")
+    print("\nOr use the CLI:")
+    print("  brain start DEMO-101 --ticket-file ticket.md")
+    return 0
+
+
 def _request_text(args: argparse.Namespace) -> str:
     if args.file:
         return Path(args.file).expanduser().read_text(encoding="utf-8")
@@ -237,6 +292,12 @@ def _request_text(args: argparse.Namespace) -> str:
         if value.strip():
             return value
     raise BrainError("Provide a request using --file, --clipboard, or stdin")
+
+
+def _read_optional(value: str | None, path: str | None) -> str:
+    if path:
+        return Path(path).expanduser().read_text(encoding="utf-8")
+    return value or ""
 
 
 def _print_hits(hits: list, empty: str = "No matches.") -> None:
@@ -254,6 +315,8 @@ def _print_hits(hits: list, empty: str = "No matches.") -> None:
 def execute(args: argparse.Namespace) -> int:
     if args.command == "init":
         return _init(args)
+    if args.command == "demo":
+        return _demo(args)
     settings = load_settings(args.config)
     if args.command == "doctor":
         report, ok = doctor(settings)
@@ -305,25 +368,107 @@ def execute(args: argparse.Namespace) -> int:
             print("No matching history.")
         return 0
     if args.command == "start":
+        synced: list[SyncResult] = []
+        graphs: list[GraphIndexResult] = []
         if not args.no_sync:
             synced, graphs = _refresh_all(settings, fetch=True)
-            _print_sync(synced)
-            _print_graph(graphs)
+            if not args.json:
+                _print_sync(synced)
+                _print_graph(graphs)
         elif not (settings.generated_dir / "PROJECT_FACTS.md").exists():
             generate_map(settings)
             generate_relationship_map(settings)
         content, path = start_session(settings, args.ticket, _ticket_text(args))
         copy = args.copy if args.copy is not None else args.target == "claude"
         parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)
-        print(path)
-        print(f"Delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
+        if args.json:
+            print(json.dumps({
+                "ticket": args.ticket,
+                "path": str(path),
+                "delivery": {"current": current, "total": len(parts), "parts": [str(part) for part in parts], "copied": copy},
+                "sync": [asdict(item) for item in synced],
+                "graph": [asdict(item) for item in graphs],
+            }, indent=2))
+        else:
+            print(path)
+            print(f"Delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
         return 0
     if args.command == "ctx":
         content, path, number = create_context(settings, args.ticket, _request_text(args), args.include_diff)
         copy = args.copy if args.copy is not None else args.target == "claude"
         parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)
-        print(path)
-        print(f"Request: {number:03d}; delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
+        if args.json:
+            print(json.dumps({
+                "ticket": args.ticket,
+                "request": number,
+                "path": str(path),
+                "delivery": {"current": current, "total": len(parts), "parts": [str(part) for part in parts], "copied": copy},
+            }, indent=2))
+        else:
+            print(path)
+            print(f"Request: {number:03d}; delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
+        return 0
+    if args.command == "preview":
+        text = _request_text(args)
+        try:
+            plan = request_preview(text, settings)
+        except BrainError as exc:
+            if args.json:
+                print(json.dumps({"valid": False, "error": str(exc), "repair_prompt": request_repair_prompt(str(exc))}, indent=2))
+                return 2
+            raise
+        if args.json:
+            print(json.dumps(plan, indent=2, ensure_ascii=False))
+        else:
+            print(f"Valid CONTEXT_REQUEST v{plan['protocol_version']}: {plan['operation_count']} operations")
+            print(f"Objective: {plan['objective']}")
+            for action in plan["actions"]:
+                scope = ", ".join(action["repos"]) or "all repositories"
+                print(f"- {action['kind']}: {action['value']} ({scope})")
+        return 0
+    if args.command == "feedback":
+        notes = _read_optional(args.notes, args.notes_file)
+        test_output = _read_optional(None, args.test_output_file)
+        content, path, number = create_feedback(
+            settings,
+            args.ticket,
+            notes=notes,
+            test_command=args.test_command,
+            test_output=test_output,
+            repos=args.repo,
+            include_diff=not args.no_diff,
+        )
+        copy = args.copy if args.copy is not None else args.target == "claude"
+        parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)
+        if args.json:
+            print(json.dumps({
+                "ticket": args.ticket,
+                "feedback": number,
+                "path": str(path),
+                "delivery": {"current": current, "total": len(parts), "parts": [str(part) for part in parts], "copied": copy},
+            }, indent=2))
+        else:
+            print(path)
+            print(f"Feedback: {number:03d}; delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
+        return 0
+    if args.command == "status":
+        from .ui import project_status
+
+        status = project_status(settings)
+        if args.json:
+            print(json.dumps(status, indent=2, ensure_ascii=False))
+        else:
+            print(f"{status['project']['name']}: {status['summary']['current']}/{status['summary']['repositories']} repositories current")
+            for repo in status["repositories"]:
+                print(f"- {repo['name']}: {repo['status']} {repo['sha'] or 'unknown'}")
+            print(f"Investigations: {len(status['sessions'])}")
+        return 0
+    if args.command == "ui":
+        if not 0 <= args.port <= 65535:
+            raise BrainError("--port must be between 0 and 65535")
+        from .ui import serve_ui
+
+        serve_ui(settings, port=args.port, open_browser=not args.no_open)
         return 0
     if args.command in {"next", "prev"}:
         path, current, total = move_delivery(settings, args.ticket, 1 if args.command == "next" else -1)

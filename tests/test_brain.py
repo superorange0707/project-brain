@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import subprocess
@@ -12,12 +13,16 @@ from unittest import mock
 
 from brain.cli import main
 from brain.core import (
+    BrainError,
     chunk_text,
     create_context,
+    create_feedback,
     generate_map,
     load_settings,
     load_index_state,
     parse_context_request,
+    request_preview,
+    request_repair_prompt,
     search,
     simple_yaml_load,
     start_session,
@@ -174,6 +179,8 @@ full_file_lines = 100
 soft_target_chars = 100000
 [delivery]
 clipboard_chunk_chars = 1000
+[graph]
+enabled = false
 [knowledge]
 path = "knowledge"
 [[repositories]]
@@ -205,8 +212,38 @@ path = "batch-service"
 
     def test_request_validation_handles_markdown_fence(self) -> None:
         request = parse_context_request(REQUEST)
+        self.assertEqual(1, request["version"])
         self.assertEqual(1, len(request["searches"]))
         self.assertEqual(2, len(request["symbols"]))
+
+    def test_json_request_and_dry_run_plan(self) -> None:
+        payload = json.dumps({
+            "version": 1,
+            "CONTEXT_REQUEST": {
+                "objective": "Locate the eligibility implementation and tests.",
+                "searches": [],
+                "symbols": [{
+                    "name": "EligibilityEvaluator",
+                    "repos": ["trading-service"],
+                    "include": ["definition", "implementations", "tests"],
+                }],
+                "files": [],
+                "history": [],
+            },
+        })
+        plan = request_preview(payload, self.settings)
+        self.assertTrue(plan["valid"])
+        self.assertEqual(3, plan["operation_count"])
+        self.assertEqual({"definition", "implementations", "tests"}, {item["kind"] for item in plan["actions"]})
+        self.assertIn('"version": 1', plan["normalized_json"])
+
+    def test_request_preview_rejects_unknown_repositories_and_builds_repair_prompt(self) -> None:
+        invalid = REQUEST.replace("trading-service", "invented-service")
+        with self.assertRaisesRegex(BrainError, "Unknown repositories") as caught:
+            request_preview(invalid, self.settings)
+        repair = request_repair_prompt(str(caught.exception))
+        self.assertIn("Validation error", repair)
+        self.assertIn("version: 1", repair)
 
     def test_cross_repo_search_symbol_and_trace(self) -> None:
         hits = search(self.settings, "JURISDICTION_CHANGED", fixed=True)
@@ -250,12 +287,35 @@ else:
             encoding="utf-8",
         )
         backend.chmod(0o755)
+        self.settings.graph_enabled = True
         with mock.patch.dict(os.environ, {"PROJECT_BRAIN_GRAPH_BIN": str(backend)}):
             indexed = index_graph(self.settings, changed_only=False)
             hits = graph_symbol_hits(self.settings, "EligibilityEvaluator", ["trading-service"])
         self.assertTrue(all(item.status == "indexed" for item in indexed))
         self.assertEqual("EligibilityEvaluator.java", Path(hits[0].path).name)
         self.assertIn("structural graph", hits[0].found_by[0])
+
+    def test_structural_index_is_deferred_then_built_for_the_relevant_repo(self) -> None:
+        backend = self.root / "lazy-backend"
+        backend.write_text(
+            '''#!/usr/bin/env python3
+import json, sys
+if "--version" in sys.argv:
+    print("codebase-memory-mcp 0.10.5")
+else:
+    print(json.dumps({"cols": ["qn", "label", "file", "lines"], "rows": [["demo.EligibilityEvaluator", "Interface", "src/main/java/demo/EligibilityEvaluator.java", "2-2"]]}))
+''',
+            encoding="utf-8",
+        )
+        backend.chmod(0o755)
+        self.settings.graph_enabled = True
+        with mock.patch.dict(os.environ, {"PROJECT_BRAIN_GRAPH_BIN": str(backend)}):
+            deferred = index_graph(self.settings, defer_lazy=True)
+            self.assertEqual("deferred", deferred[0].status)
+            self.assertFalse((self.settings.state_dir / "graphs.json").exists())
+            hits = symbol_hits(self.settings, "EligibilityEvaluator", ["trading-service"])
+        self.assertTrue((self.settings.state_dir / "graphs.json").is_file())
+        self.assertTrue(any("structural graph" in " ".join(hit.found_by) for hit in hits))
 
     def test_first_refresh_snapshots_even_uncommitted_repositories(self) -> None:
         _, updated = snapshot_indexes(self.settings, changed_only=True)
@@ -273,6 +333,22 @@ else:
         self.assertIn("Static execution relationships", context)
         self.assertIn("## Unresolved", context)
 
+    def test_implementation_feedback_packages_observed_results_without_running_them(self) -> None:
+        start_session(self.settings, "ABC-2", "Review an implementation.")
+        content, path, number = create_feedback(
+            self.settings,
+            "ABC-2",
+            notes="Added the jurisdiction branch.",
+            test_command="mvn test",
+            test_output="Tests run: 4, Failures: 0",
+        )
+        self.assertEqual(1, number)
+        self.assertTrue(path.is_file())
+        self.assertIn("Added the jurisdiction branch", content)
+        self.assertIn("Tests run: 4, Failures: 0", content)
+        self.assertIn("No tracked staged or unstaged changes", content)
+        self.assertEqual(1, json.loads((path.parent / "session.json").read_text())["feedbacks"])
+
     def test_chunks_round_trip(self) -> None:
         text = "line\n" * 100
         chunks = chunk_text(text, 73)
@@ -288,8 +364,44 @@ else:
         self.assertIn("[customer-service]", output.getvalue())
         self.assertIn("[trading-service]", output.getvalue())
 
+    def test_cli_preview_and_status_json(self) -> None:
+        request_path = self.root / "request.yml"
+        request_path.write_text(REQUEST, encoding="utf-8")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["-c", str(self.config), "preview", "--file", str(request_path), "--json"])
+        self.assertEqual(0, code)
+        plan = json.loads(output.getvalue())
+        self.assertTrue(plan["valid"])
+        self.assertGreater(plan["operation_count"], 1)
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["-c", str(self.config), "status", "--json"])
+        self.assertEqual(0, code)
+        status = json.loads(output.getvalue())
+        self.assertEqual("demo", status["project"]["name"])
+        self.assertEqual(4, status["summary"]["repositories"])
+
 
 class InitTest(unittest.TestCase):
+    def test_demo_creates_a_complete_four_repo_investigation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "project-brain-demo"
+            output = io.StringIO()
+            with redirect_stdout(output):
+                with mock.patch("brain.graph.find_backend", return_value=None):
+                    code = main(["demo", str(target)])
+            self.assertEqual(0, code)
+            self.assertTrue((target / "brain.toml").is_file())
+            self.assertTrue((target / "ticket.md").is_file())
+            self.assertTrue((target / "trading-service/src/main/java/demo/CustomerChangedListener.java").is_file())
+            relationships = (target / "generated/PROJECT_RELATIONSHIPS.md").read_text(encoding="utf-8")
+            self.assertIn("customer-service → trading-service", relationships)
+            self.assertIn("trading-service → risk-service", relationships)
+            self.assertIn("brain ui", output.getvalue())
+            self.assertFalse(load_settings(target / "brain.toml").graph_enabled)
+
     def test_init_discovers_all_nested_git_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
