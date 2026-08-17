@@ -11,6 +11,7 @@ CONTEXT_REQUEST:
   version: 1
   objective: State the exact implementation blocker this request must resolve.
   searches: []
+  paths: []
   symbols: []
   files: []
   history: []
@@ -18,9 +19,9 @@ CONTEXT_REQUEST:
 
 Batch all useful searches, symbols, callers, callees, implementations, tests, configuration, direct files, and history into one request. Do not repeat completed operations unless newer evidence invalidates them. Do not perform open-ended exploration.
 
-Use `files:` only for exact repository paths already verified in Project Brain evidence. Never guess a file path. When a location is unknown, use `searches:` first with the literal configuration key, symbol, endpoint, topic, property name, or filename fragment that must be located.
+Use `files:` only for exact repository paths already verified in Project Brain evidence. Never guess a file path. When a location is unknown, use `paths:` for a filename/path fragment or `searches:` for a literal configuration key, symbol, endpoint, topic, or property value.
 
-Project Brain reports exact branches and commits, unique evidence gained, repeated evidence, unresolved operations, and no-progress rounds. When retrieval adds no new evidence, change strategy: ask the user for the specific external/runtime blocker or produce the final solution.
+Project Brain reports exact branches and commits, unique evidence gained, repeated evidence, unresolved operations, evidence coverage, and no-progress rounds. It may also provide similar ticket-labelled Git changes and bounded historical patches. Treat committed history as an implementation analogue, not proof that the old change was correct for the current ticket. When retrieval adds no new evidence, change strategy: ask the user for the specific external/runtime blocker or produce the final solution.
 
 Each returned handoff has a `Request: NNN` header. Always continue from the highest request number supplied by the user.
 

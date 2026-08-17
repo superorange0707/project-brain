@@ -16,6 +16,7 @@ from brain.cli import main
 from brain.agent import archive_final_solution, create_m365_agent_kit, response_preview
 from brain.core import (
     BrainError,
+    add_external_evidence,
     chunk_text,
     create_context,
     create_feedback,
@@ -24,6 +25,7 @@ from brain.core import (
     generate_map,
     load_settings,
     load_index_state,
+    path_hits,
     parse_context_request,
     request_preview,
     request_repair_prompt,
@@ -38,6 +40,7 @@ from brain.relations import generate_relationship_map
 from brain import sync as sync_module
 from brain.sync import _ssh_endpoint, sync_repositories
 from brain.graph import graph_symbol_hits, index_graph
+from brain.experience import build_experience_index, evaluate_sessions, render_similar_cases, similar_cases
 
 
 REQUEST = """
@@ -135,6 +138,10 @@ interface RiskClient {
         (trading / "src/main/resources/application.properties").write_text(
             "topics.customer=customer.updated\nservices.risk=risk-service\n",
             encoding="utf-8",
+        )
+        (trading / "deploy/templates").mkdir(parents=True)
+        (trading / "deploy/templates/configmap.tpl").write_text(
+            "transaction-cache-ttl: {{ .Values.cacheTtl }}\n", encoding="utf-8"
         )
         (risk / "src/main/java/demo/RiskController.java").write_text(
             '''@RestController
@@ -273,6 +280,8 @@ path = "batch-service"
         self.assertIn("`KAFKA` `customer.updated`", relationships)
         self.assertIn("`HTTP` `GET /risk/restrictions/{}`", relationships)
         self.assertIn("customer-service --KAFKA:customer.updated--> trading-service --HTTP:GET /risk/restrictions/{}--> risk-service", relationships)
+        cached = json.loads((self.root / "state/relationships.json").read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(cached["relationships"]), 3)
 
     def test_each_repo_gets_its_own_search_result_budget(self) -> None:
         self.settings.max_results = 1
@@ -445,7 +454,7 @@ else:
         self.assertLessEqual(len(kit["instructions"]), 8000)
         self.assertIn("The user never needs to remind you", kit["instructions"])
         self.assertIn("Never guess a file path", kit["instructions"])
-        self.assertIn("use `searches:` first", kit["instructions"])
+        self.assertIn("use `paths:` for a filename/path fragment", kit["instructions"])
         self.assertIn("customer-service", kit["knowledge"])
         self.assertIn("Investigate a ticket", kit["suggested_prompts"])
         self.assertTrue(Path(kit["suggested_prompts_path"]).is_file())
@@ -467,6 +476,32 @@ else:
         self.assertIn("No tracked staged or unstaged changes", content)
         self.assertEqual(1, json.loads((path.parent / "session.json").read_text())["feedbacks"])
 
+    def test_external_ticket_evidence_is_local_explicit_and_reused(self) -> None:
+        start_session(self.settings, "ABC-DOC", "Use an internal cache standard.")
+        document = self.root / "cache-standard.md"
+        document.write_text("Transaction cache TTL must be at least 45 seconds.\n", encoding="utf-8")
+        content, artifact, number, stored = add_external_evidence(
+            self.settings,
+            "ABC-DOC",
+            document,
+            kind="document",
+        )
+        self.assertEqual(1, number)
+        self.assertTrue(artifact.is_file())
+        self.assertTrue(stored.is_file())
+        self.assertIn("explicitly supplied by the user", content)
+        handoff, _ = deliver(self.settings, "ABC-DOC", content, "m365", copy=False)
+        self.assertEqual("ABC-DOC-evidence-001.md", handoff[0].name)
+
+        context, _, _ = create_context(self.settings, "ABC-DOC", REQUEST)
+        self.assertIn("Transaction cache TTL must be at least 45 seconds", context)
+        self.assertIn("user-supplied external evidence", context)
+
+        symlink = self.root / "cache-standard-link.md"
+        symlink.symlink_to(document)
+        with self.assertRaisesRegex(BrainError, "must not be a symlink"):
+            add_external_evidence(self.settings, "ABC-DOC", symlink)
+
     def test_chunks_round_trip(self) -> None:
         text = "line\n" * 100
         chunks = chunk_text(text, 73)
@@ -481,6 +516,30 @@ else:
         self.assertEqual(0, code)
         self.assertIn("[customer-service]", output.getvalue())
         self.assertIn("[trading-service]", output.getvalue())
+
+    def test_verified_path_search_and_request(self) -> None:
+        hits = path_hits(self.settings, "application.properties", ["trading-service"])
+        self.assertEqual(["src/main/resources/application.properties"], [item.path for item in hits])
+        self.assertEqual(
+            ["deploy/templates/configmap.tpl"],
+            [item.path for item in path_hits(self.settings, "configmap.tpl", ["trading-service"])],
+        )
+        start_session(self.settings, "ABC-PATH", "Locate the customer topic configuration.")
+        request = """CONTEXT_REQUEST:
+  version: 1
+  objective: Locate the exact customer topic configuration path.
+  searches: []
+  paths:
+    - query: application.properties
+      repos: [trading-service]
+  symbols: []
+  files: []
+  history: []
+"""
+        context, _, _ = create_context(self.settings, "ABC-PATH", request)
+        self.assertIn("src/main/resources/application.properties", context)
+        self.assertIn("repository path index", context)
+        self.assertIn("## Implementation readiness", context)
 
     def test_cli_preview_and_status_json(self) -> None:
         request_path = self.root / "request.yml"
@@ -500,6 +559,156 @@ else:
         status = json.loads(output.getvalue())
         self.assertEqual("demo", status["project"]["name"])
         self.assertEqual(4, status["summary"]["repositories"])
+
+
+class ExperienceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        for name in ("cache-api", "cache-worker"):
+            repo = self.root / name
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "brain@example.invalid"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Project Brain Test"], cwd=repo, check=True)
+
+        api = self.root / "cache-api"
+        (api / "src/main/java/demo").mkdir(parents=True)
+        (api / "src/test/java/demo").mkdir(parents=True)
+        (api / "src/main/java/demo/CachePolicy.java").write_text(
+            "final class CachePolicy { int transactionTtlSeconds() { return 30; } }\n", encoding="utf-8"
+        )
+        (api / "src/test/java/demo/CachePolicyTest.java").write_text(
+            "class CachePolicyTest { void transactionExpiryIsConfigured() {} }\n", encoding="utf-8"
+        )
+        worker = self.root / "cache-worker"
+        (worker / "src/main/resources").mkdir(parents=True)
+        (worker / "src/main/resources/application.properties").write_text(
+            "transaction.cache.ttl=30\nauthorization=Bearer do-not-leak-bearer-value\n", encoding="utf-8"
+        )
+        (worker / "src/main/resources/credentials.properties").write_text(
+            "client.secret=do-not-leak-this-value\n", encoding="utf-8"
+        )
+        for repo in (api, worker):
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "IPF-101 Extend transaction cache expiry"],
+                cwd=repo,
+                check=True,
+            )
+
+        self.config = self.root / "brain.toml"
+        self.config.write_text(
+            """[project]
+name = "experience-demo"
+[graph]
+enabled = false
+[experience]
+enabled = true
+commit_limit = 100
+similar_cases = 3
+patch_chars = 20000
+[[repositories]]
+name = "cache-api"
+path = "cache-api"
+[[repositories]]
+name = "cache-worker"
+path = "cache-worker"
+""",
+            encoding="utf-8",
+        )
+        self.settings = load_settings(self.config)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_git_ticket_experience_improves_new_ticket_and_evaluates_retrieval(self) -> None:
+        index = build_experience_index(self.settings, changed_only=False)
+        self.assertEqual(1, len(index["cases"]))
+        case = index["cases"][0]
+        self.assertEqual("IPF-101", case["ticket"])
+        self.assertEqual({"cache-api", "cache-worker"}, set(case["repos"]))
+        self.assertIn("cache-api:src/test/java/demo/CachePolicyTest.java", case["test_paths"])
+        self.assertIn("cache-worker:src/main/resources/application.properties", case["config_paths"])
+
+        matches = similar_cases(self.settings, "Increase transaction cache duration")
+        self.assertEqual("IPF-101", matches[0]["ticket"])
+        self.assertIn("cache", matches[0]["matched_terms"])
+
+        start, _ = start_session(self.settings, "IPF-999", "Increase the transaction cache duration safely.")
+        self.assertIn("## Similar ticket history", start)
+        self.assertIn("## Historical patch evidence — IPF-101", start)
+        self.assertIn("transaction.cache.ttl", start)
+        self.assertNotIn("do-not-leak-this-value", start)
+        self.assertNotIn("do-not-leak-bearer-value", start)
+
+        self.settings.experience_patch_chars = 0
+        safe_start, _ = start_session(self.settings, "IPF-998", "Increase transaction cache duration safely.")
+        self.assertIn("## Similar ticket history", safe_start)
+        self.assertNotIn("## Historical patch evidence", safe_start)
+
+        start_session(
+            self.settings,
+            "IPF-101",
+            "Reconstruct the completed cache change for the regulatory retention horizon.",
+        )
+        index = build_experience_index(self.settings, changed_only=True)
+        enriched = similar_cases(self.settings, "regulatory retention horizon")
+        self.assertEqual("IPF-101", enriched[0]["ticket"])
+        self.assertIn("regulatory retention horizon", enriched[0]["ticket_excerpt"])
+        (self.root / "knowledge/tickets").mkdir(parents=True)
+        (self.root / "knowledge/tickets/IPF-101.md").write_text(
+            "Root cause involved a quorum watermark strategy.\n", encoding="utf-8"
+        )
+        index = build_experience_index(self.settings, changed_only=True)
+        self.assertEqual("IPF-101", similar_cases(self.settings, "quorum watermark")[0]["ticket"])
+        request = """CONTEXT_REQUEST:
+  version: 1
+  objective: Locate cache policy, tests, and configuration.
+  searches: []
+  paths:
+    - query: CachePolicy
+      repos: [cache-api]
+    - query: application.properties
+      repos: [cache-worker]
+    - query: credentials.properties
+      repos: [cache-worker]
+  symbols: []
+  files: []
+  history: []
+"""
+        context, _, _ = create_context(self.settings, "IPF-101", request)
+        self.assertIn("CachePolicyTest.java", context)
+        report = evaluate_sessions(self.settings, index)
+        evaluation = next(item for item in report["evaluations"] if item["ticket"] == "IPF-101")
+        self.assertEqual(1.0, evaluation["repo_recall"])
+        self.assertEqual(1.0, evaluation["file_recall"])
+        self.assertEqual(1.0, evaluation["test_recall"])
+        self.assertEqual(1.0, report["summary"]["file_recall"])
+        self.assertTrue((self.root / "generated/EXPERIENCE_REPORT.md").is_file())
+
+    def test_ticket_label_on_merge_commit_uses_first_parent_changes(self) -> None:
+        repo = self.root / "cache-api"
+        base_branch = subprocess.run(
+            ["git", "branch", "--show-current"], cwd=repo, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        subprocess.run(["git", "checkout", "-q", "-b", "feature/cache"], cwd=repo, check=True)
+        source = repo / "src/main/java/demo/MergeOnlyPolicy.java"
+        source.write_text("final class MergeOnlyPolicy {}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "Implement merge-only policy"], cwd=repo, check=True)
+        subprocess.run(["git", "checkout", "-q", base_branch], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "merge", "-q", "--no-ff", "feature/cache", "-m", "Merge feature IPF-202 cache policy"],
+            cwd=repo,
+            check=True,
+        )
+
+        index = build_experience_index(self.settings, changed_only=False)
+        case = next(item for item in index["cases"] if item["ticket"] == "IPF-202")
+        self.assertIn("cache-api:src/main/java/demo/MergeOnlyPolicy.java", case["paths"])
+        rendered = render_similar_cases(self.settings, "IPF-202", include_patches=True)
+        self.assertIn("+final class MergeOnlyPolicy", rendered)
 
 
 class InitTest(unittest.TestCase):
@@ -610,7 +819,11 @@ class InitTest(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertTrue((repo / "brain.toml").is_file())
             self.assertTrue((repo / "knowledge/PROJECT_MAP.md").is_file())
-            self.assertIn('path = "."', (repo / "brain.toml").read_text(encoding="utf-8"))
+            config = (repo / "brain.toml").read_text(encoding="utf-8")
+            self.assertIn('path = "."', config)
+            self.assertIn("[experience]", config)
+            self.assertIn("patch_chars = 0", config)
+            self.assertEqual(0, load_settings(repo / "brain.toml").experience_patch_chars)
 
 
 class GitSyncTest(unittest.TestCase):

@@ -21,10 +21,12 @@ IGNORED_DIRS = {".git", ".idea", ".venv", "node_modules", "target", "build", "di
 DISCOVERY_IGNORED_DIRS = IGNORED_DIRS | {".runs", ".codex", ".agents", "state", "generated", "knowledge"}
 PROTOCOL_VERSION = 1
 CODE_SUFFIXES = {
-    ".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js",
-    ".jsx", ".kt", ".kts", ".php", ".py", ".rb", ".rs", ".scala",
-    ".sh", ".sql", ".swift", ".ts", ".tsx", ".vue", ".xml", ".yml",
-    ".yaml", ".toml", ".properties", ".gradle",
+    ".adoc", ".avsc", ".bash", ".c", ".cc", ".cfg", ".conf", ".cpp", ".cs", ".csv",
+    ".gql", ".go", ".gradle", ".graphql", ".graphqls", ".groovy", ".h", ".hcl", ".hpp",
+    ".ini", ".java", ".js", ".json", ".jsx", ".kt", ".kts", ".md", ".mustache", ".php",
+    ".properties", ".proto", ".py", ".rb", ".rs", ".rst", ".scala", ".sh", ".sql",
+    ".swift", ".tf", ".tfvars", ".toml", ".tpl", ".ts", ".tsx", ".vue", ".xml", ".yaml",
+    ".yml", ".zsh",
 }
 
 
@@ -70,6 +72,12 @@ class Settings:
     graph_enabled: bool = True
     graph_lazy: bool = True
     branch_priority: list[str] = field(default_factory=lambda: ["develop", "development"])
+    path_result_limit: int = 12
+    experience_enabled: bool = True
+    ticket_pattern: str = r"(?<![A-Z0-9])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Z0-9])"
+    experience_commit_limit: int = 1000
+    experience_similar_cases: int = 5
+    experience_patch_chars: int = 0
 
     def repos(self, names: Iterable[str] | None = None) -> list[Repository]:
         wanted = set(names or [])
@@ -175,6 +183,7 @@ class ContextBundle:
     evidence: list[Evidence] = field(default_factory=list)
     relationships: list[str] = field(default_factory=list)
     history: list[str] = field(default_factory=list)
+    experience: str = ""
     unresolved: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -373,6 +382,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
     delivery = data.get("delivery") or {}
     graph = data.get("graph") or {}
     sources = data.get("sources") or {}
+    experience = data.get("experience") or {}
     branch_priority = sources.get("branch_priority", ["develop", "development"])
     if not isinstance(branch_priority, list):
         raise BrainError("sources.branch_priority must be a list")
@@ -401,7 +411,17 @@ def load_settings(path: str | Path | None = None) -> Settings:
         graph_enabled=bool(graph.get("enabled", True)),
         graph_lazy=graph_mode == "lazy",
         branch_priority=[str(value).strip() for value in branch_priority if str(value).strip()],
+        path_result_limit=max(1, int(search.get("path_result_limit") or 12)),
+        experience_enabled=bool(experience.get("enabled", True)),
+        ticket_pattern=str(experience.get("ticket_pattern") or r"(?<![A-Z0-9])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Z0-9])"),
+        experience_commit_limit=max(1, int(experience.get("commit_limit") or 1000)),
+        experience_similar_cases=max(1, int(experience.get("similar_cases") or 5)),
+        experience_patch_chars=max(0, int(experience.get("patch_chars") or 0)),
     )
+    try:
+        re.compile(settings.ticket_pattern)
+    except re.error as exc:
+        raise BrainError(f"Invalid experience.ticket_pattern: {exc}") from exc
     _attach_source_snapshots(settings)
     return settings
 
@@ -442,7 +462,9 @@ def _walk_files(root: Path) -> Iterable[Path]:
         base = Path(directory)
         for name in names:
             path = base / name
-            if path.suffix.lower() in CODE_SUFFIXES or name in {"Dockerfile", "Makefile", "pom.xml", "build.gradle"}:
+            if path.suffix.lower() in CODE_SUFFIXES or name in {
+                "Dockerfile", "Jenkinsfile", "Makefile", "Procfile", "build.gradle", "gradlew", "mvnw", "pom.xml"
+            }:
                 yield path
 
 
@@ -514,6 +536,34 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
         # A busy first repository must not hide evidence in later repositories.
         hits.extend(search_repo(repo, pattern, fixed=fixed, max_results=settings.max_results))
     return hits[: settings.max_results * max(1, len(selected))]
+
+
+def path_hits(settings: Settings, query: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
+    """Find verified repository-relative paths without searching file contents."""
+    needle = query.strip().lower().replace("\\", "/")
+    if not needle:
+        raise BrainError("Path query is empty")
+    tokens = [value for value in re.findall(r"[a-z0-9_.-]+", needle) if len(value) > 1]
+    hits: list[SearchHit] = []
+    for repo in settings.repos(repos):
+        root = repo.scan_path
+        matches: list[SearchHit] = []
+        for path in _walk_files(root) if root.is_dir() else []:
+            relative = str(path.relative_to(root))
+            lowered = relative.lower()
+            basename = path.name.lower()
+            stem = path.stem.lower()
+            if needle in {lowered, basename, stem}:
+                score = 100
+            elif needle in lowered:
+                score = 95
+            elif tokens and all(token in lowered for token in tokens):
+                score = 85
+            else:
+                continue
+            matches.append(SearchHit(repo.name, relative, 1, relative, "verified path", score, ["repository path index"]))
+        hits.extend(sorted(matches, key=lambda item: (-item.score, len(item.path), item.path))[: settings.path_result_limit])
+    return hits
 
 
 def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
@@ -753,12 +803,14 @@ def _request_body(text: str) -> dict[str, Any]:
     if version != PROTOCOL_VERSION:
         raise BrainError(f"Unsupported CONTEXT_REQUEST version {version!r}; this build supports version {PROTOCOL_VERSION}")
     request["version"] = PROTOCOL_VERSION
-    for key in ("searches", "symbols", "files", "history"):
+    for key in ("searches", "paths", "symbols", "files", "history"):
         value = request.get(key, [])
         if value is None:
             request[key] = []
         elif not isinstance(value, list):
             raise BrainError(f"{key} must be a list")
+        else:
+            request[key] = value
     if not str(request.get("objective") or "").strip():
         raise BrainError("objective is required")
     return request
@@ -769,6 +821,10 @@ def parse_context_request(text: str) -> dict[str, Any]:
     for index, item in enumerate(request["searches"]):
         if not isinstance(item, dict) or not str(item.get("query") or "").strip():
             raise BrainError(f"searches[{index}].query is required")
+        _requested_repos(item)
+    for index, item in enumerate(request["paths"]):
+        if not isinstance(item, dict) or not str(item.get("query") or "").strip():
+            raise BrainError(f"paths[{index}].query is required")
         _requested_repos(item)
     allowed = {"definition", "callers", "callees", "implementations", "tests"}
     for index, item in enumerate(request["symbols"]):
@@ -807,6 +863,8 @@ def request_preview(text: str, settings: Settings | None = None) -> dict[str, An
 
     for item in request["searches"]:
         actions.append({"kind": "search", "value": str(item["query"]), "repos": repos_for(item)})
+    for item in request["paths"]:
+        actions.append({"kind": "path", "value": str(item["query"]), "repos": repos_for(item)})
     for item in request["symbols"]:
         repos = repos_for(item)
         for operation in item["include"]:
@@ -836,6 +894,7 @@ def request_preview(text: str, settings: Settings | None = None) -> dict[str, An
         "signature": signature,
         "counts": {
             "searches": len(request["searches"]),
+            "paths": len(request["paths"]),
             "symbols": len(request["symbols"]),
             "files": len(request["files"]),
             "history": len(request["history"]),
@@ -855,6 +914,7 @@ def request_repair_prompt(error: str) -> str:
         f"  version: {PROTOCOL_VERSION}\n"
         "  objective: Explain the next fact that must be established.\n"
         "  searches: []\n"
+        "  paths: []\n"
         "  symbols: []\n"
         "  files: []\n"
         "  history: []\n"
@@ -945,6 +1005,14 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
         bundle.evidence.extend(read_source(settings, hit) for hit in hits)
         bundle.evidence.extend(knowledge_hits(settings, query))
 
+    for item in request["paths"]:
+        query = str(item["query"])
+        repos = _requested_repos(item)
+        hits = path_hits(settings, query, repos)
+        if not hits:
+            bundle.unresolved.append(f"Path search `{query}` returned no matches in {repos or ['all repositories']}")
+        bundle.evidence.extend(read_source(settings, hit) for hit in hits)
+
     for item in request["symbols"]:
         name = str(item["name"])
         repos = _requested_repos(item)
@@ -1000,6 +1068,50 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
     if include_diff:
         bundle.evidence.extend(working_tree_diffs(settings))
 
+    if settings.experience_enabled:
+        from .experience import render_similar_cases
+
+        bundle.experience = render_similar_cases(settings, bundle.objective)
+
+    from .relations import related_relationships
+
+    relationship_queries = [bundle.objective]
+    relationship_queries.extend(str(item["query"]) for item in request["searches"])
+    relationship_queries.extend(str(item["query"]) for item in request["paths"])
+    relationship_queries.extend(str(item["name"]) for item in request["symbols"])
+    related = related_relationships(
+        settings,
+        relationship_queries,
+        {(item.repo, item.path) for item in bundle.evidence if item.repo not in {"external", "knowledge"}},
+    )
+    for relationship in related:
+        line = (
+            f"{relationship.summary()} | source {relationship.source_evidence} | "
+            f"target {relationship.target_evidence}"
+        )
+        bundle.relationships.append(line)
+        for location in (relationship.source_evidence, relationship.target_evidence):
+            match = re.fullmatch(r"([^:]+):(.+):(\d+)", location)
+            if not match:
+                continue
+            repo_name, path, line_number = match.group(1), match.group(2), int(match.group(3))
+            try:
+                evidence = read_source(
+                    settings,
+                    SearchHit(
+                        repo_name,
+                        path,
+                        line_number,
+                        "",
+                        "contract relationship",
+                        92,
+                        [f"{relationship.kind} contract graph"],
+                    ),
+                )
+            except BrainError:
+                continue
+            bundle.evidence.append(evidence)
+
     bundle.evidence = _deduplicate(bundle.evidence)
     state = load_index_state(settings)
     for repo in settings.repositories:
@@ -1008,6 +1120,24 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
         if indexed and current and indexed != current:
             bundle.warnings.append(f"Index for {repo.name} is stale: indexed {indexed[:12]}, source {current[:12]}.")
     return bundle
+
+
+def _coverage(bundle: ContextBundle) -> dict[str, Any]:
+    config_suffixes = {".conf", ".gradle", ".json", ".properties", ".toml", ".xml", ".yaml", ".yml"}
+    tests = [item for item in bundle.evidence if item.kind == "test" or re.search(r"(^|/)(test|tests|src/test)/|(?:Test|Tests|IT|Spec)\.", item.path, re.I)]
+    configs = [item for item in bundle.evidence if Path(item.path).suffix.lower() in config_suffixes]
+    production = [
+        item for item in bundle.evidence
+        if item.repo not in {"external", "knowledge"} and item.kind != "local diff" and item not in tests and item not in configs
+    ]
+    return {
+        "production_source": bool(production),
+        "tests": bool(tests),
+        "configuration": bool(configs),
+        "relationships": bool(bundle.relationships),
+        "git_history": bool(bundle.history),
+        "similar_tickets": bool(bundle.experience),
+    }
 
 
 def _language(path: str) -> str:
@@ -1069,8 +1199,33 @@ def pack_context(
                 "- This request added no new repository evidence. Do not repeat open-ended retrieval; "
                 "either ask the user for the specific external/runtime fact that blocks the decision or produce FINAL_SOLUTION."
             )
+        coverage = progress.get("coverage") or {}
+        output.extend(
+            [
+                "",
+                "## Implementation readiness",
+                "",
+                "This is deterministic evidence coverage, not a claim that implementation is safe or complete.",
+                "",
+                f"- Production source: {'VERIFIED' if coverage.get('production_source') else 'MISSING'}",
+                f"- Tests: {'VERIFIED' if coverage.get('tests') else 'NOT YET FOUND'}",
+                f"- Configuration: {'VERIFIED' if coverage.get('configuration') else 'NOT SHOWN / MAY BE IRRELEVANT'}",
+                f"- Static or contract relationships: {'VERIFIED' if coverage.get('relationships') else 'NOT YET FOUND'}",
+                f"- Git change history: {'VERIFIED' if coverage.get('git_history') else 'NOT REQUESTED / NOT FOUND'}",
+                f"- Similar ticket history: {'FOUND' if coverage.get('similar_tickets') else 'NONE MATCHED'}",
+                f"- Unresolved operations in this request: {len(bundle.unresolved)}",
+            ]
+        )
+        if not coverage.get("production_source"):
+            output.append("- Suggested next action: continue repository retrieval with a more specific symbol, literal, or path query.")
+        elif progress["no_progress_rounds"]:
+            output.append("- Suggested next action: ask for the external/runtime blocker or produce FINAL_SOLUTION; more identical searching will not help.")
+        else:
+            output.append("- Suggested next action: the AI must decide whether remaining unknowns can change the implementation; if not, produce FINAL_SOLUTION.")
     if bundle.relationships:
         output.extend(["", "## Static execution relationships", "", "```text", *sorted(set(bundle.relationships)), "```"])
+    if bundle.experience:
+        output.extend(["", bundle.experience.rstrip(), ""])
     output.extend(["", "## Source evidence", ""])
     if not bundle.evidence:
         output.append("No source evidence was retrieved.")
@@ -1188,6 +1343,8 @@ def save_session(settings: Settings, ticket: str, state: dict[str, Any]) -> None
 
 
 def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[str, Path]:
+    from .experience import build_experience_index, load_experience_index, render_similar_cases
+
     directory = session_dir(settings, ticket)
     directory.mkdir(parents=True, exist_ok=True)
     ticket_path = directory / "ticket.md"
@@ -1204,6 +1361,15 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
         if repo.source_warning:
             sections.append(f"  - Freshness warning: {repo.source_warning}")
     sections.extend(["", "## Operating protocol", "", prompt, "", "## Ticket", "", ticket_text.strip(), ""])
+    if settings.experience_enabled:
+        if not load_experience_index(settings):
+            build_experience_index(settings, changed_only=True)
+        historical = render_similar_cases(settings, f"{ticket}\n{ticket_text}", include_patches=True)
+        if historical:
+            sections.extend([historical.rstrip(), ""])
+    ticket_knowledge = settings.knowledge_dir / "tickets" / f"{directory.name}.md"
+    if ticket_knowledge.is_file():
+        sections.extend(["## Human-maintained knowledge for this ticket", "", ticket_knowledge.read_text(encoding="utf-8", errors="replace").strip(), ""])
     for title, path in (
         ("Human project map", settings.knowledge_dir / "PROJECT_MAP.md"),
         ("Generated project facts", settings.generated_dir / "PROJECT_FACTS.md"),
@@ -1276,6 +1442,7 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
     path = directory / f"context-{number:03d}.md"
     try:
         bundle = retrieve_context(settings, request, include_diff=include_diff)
+        bundle.evidence = _deduplicate(bundle.evidence + _external_evidence(settings, ticket))
         evidence_keys = {
             hashlib.sha256(
                 f"{item.repo}\0{item.path}\0{item.line_start}\0{item.line_end}\0{item.content}".encode("utf-8")
@@ -1285,12 +1452,15 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
         known_keys = set(state.get("evidence_keys") or [])
         new_evidence = evidence_keys - known_keys
         no_progress_rounds = 0 if new_evidence else int(state.get("no_progress_rounds") or 0) + 1
+        coverage = dict(state.get("coverage") or {})
+        coverage.update({key: bool(coverage.get(key) or value) for key, value in _coverage(bundle).items()})
         progress = {
             "operations": plan["operation_count"],
             "new_evidence": len(new_evidence),
             "known_evidence": len(evidence_keys & known_keys),
             "no_progress_rounds": no_progress_rounds,
             "history": list(state.get("request_history") or []),
+            "coverage": coverage,
         }
         content = pack_context(settings, ticket, number, bundle, progress)
         request_path.write_text(request_text.rstrip() + "\n", encoding="utf-8")
@@ -1299,6 +1469,7 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
         state["status"] = "waiting_for_ai"
         state["no_progress_rounds"] = no_progress_rounds
         state["evidence_keys"] = sorted(known_keys | evidence_keys)
+        state["coverage"] = coverage
         history = list(state.get("request_history") or [])
         history.append({
             "number": number,
@@ -1378,7 +1549,96 @@ def create_feedback(
     state["feedbacks"] = number
     state["status"] = "reviewing_implementation"
     save_session(settings, ticket, state)
+    if settings.experience_enabled:
+        from .experience import evaluate_sessions
+
+        evaluate_sessions(settings)
     return content, path, number
+
+
+def add_external_evidence(
+    settings: Settings,
+    ticket: str,
+    source: Path,
+    *,
+    kind: str = "document",
+) -> tuple[str, Path, int, Path]:
+    """Archive user-supplied evidence locally; include text verbatim and never claim to parse binaries."""
+    directory = session_dir(settings, ticket)
+    if not directory.is_dir():
+        raise BrainError(f"Session {ticket} does not exist. Run `brain start {ticket}` first.")
+    supplied = source.expanduser()
+    if supplied.is_symlink():
+        raise BrainError(f"Evidence file must not be a symlink: {supplied}")
+    source = supplied.resolve()
+    if not source.is_file():
+        raise BrainError(f"Evidence file does not exist or is a symlink: {source}")
+    size = source.stat().st_size
+    if size > 20 * 1024 * 1024:
+        raise BrainError("Evidence files are limited to 20 MB; extract or split the relevant content first")
+    if kind not in {"document", "log", "note", "runtime"}:
+        raise BrainError("Evidence kind must be document, log, note, or runtime")
+    state = session_state(settings, ticket)
+    number = int(state.get("external_evidence") or 0) + 1
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip(".-") or f"evidence-{number:03d}"
+    stored_dir = directory / "external"
+    stored_dir.mkdir(parents=True, exist_ok=True)
+    stored = stored_dir / f"{number:03d}-{safe_name}"
+    shutil.copy2(source, stored)
+    digest = hashlib.sha256(stored.read_bytes()).hexdigest()
+    text_suffixes = {".conf", ".csv", ".html", ".htm", ".json", ".log", ".md", ".properties", ".txt", ".xml", ".yaml", ".yml"}
+    display_name = source.name.replace("`", "'").replace("\n", " ").replace("\r", " ")
+    sections = [
+        "# PROJECT BRAIN — EXTERNAL EVIDENCE",
+        "",
+        f"Ticket: `{ticket}`",
+        f"Evidence: `{number:03d}`",
+        f"Kind: `{kind}`",
+        f"Original filename: `{display_name}`",
+        f"SHA-256: `{digest}`",
+        "",
+        "This evidence was explicitly supplied by the user. It is not repository proof and may describe runtime or external state.",
+        "",
+    ]
+    if source.suffix.lower() in text_suffixes:
+        sections.extend(["## Content", "", "```text", stored.read_text(encoding="utf-8", errors="replace").rstrip(), "```", ""])
+    else:
+        sections.extend(
+            [
+                "## Binary attachment",
+                "",
+                "Project Brain archived this file but did not parse it. Attach the stored binary directly to an AI that can read this format.",
+                f"Stored file: `{stored.relative_to(settings.root) if stored.is_relative_to(settings.root) else stored.name}`",
+                "",
+            ]
+        )
+    content = "\n".join(sections).rstrip() + "\n"
+    artifact = directory / f"external-{number:03d}.md"
+    artifact.write_text(content, encoding="utf-8")
+    state["external_evidence"] = number
+    state["status"] = "waiting_for_ai"
+    save_session(settings, ticket, state)
+    return content, artifact, number, stored
+
+
+def _external_evidence(settings: Settings, ticket: str) -> list[Evidence]:
+    directory = session_dir(settings, ticket)
+    evidence: list[Evidence] = []
+    for path in sorted(directory.glob("external-*.md")):
+        content = path.read_text(encoding="utf-8", errors="replace")
+        evidence.append(
+            Evidence(
+                "external",
+                path.name,
+                1,
+                content.count("\n") + 1,
+                content,
+                "user-supplied external evidence",
+                100,
+                ["explicit ticket evidence"],
+            )
+        )
+    return evidence
 
 
 def chunk_text(text: str, size: int) -> list[str]:
@@ -1440,6 +1700,9 @@ def deliver(settings: Settings, ticket: str, text: str, target: str, *, copy: bo
         current_handoff.write_text(text, encoding="utf-8")
         if text.startswith("# PROJECT BRAIN — START"):
             label = "start"
+        elif text.startswith("# PROJECT BRAIN — EXTERNAL EVIDENCE"):
+            match = re.search(r"(?m)^Evidence: `(\d+)`", text)
+            label = f"evidence-{int(match.group(1)):03d}" if match else "evidence"
         elif text.startswith("# PROJECT BRAIN — IMPLEMENTATION FEEDBACK"):
             match = re.search(r"(?m)^Feedback: `(\d+)`", text)
             label = f"feedback-{int(match.group(1)):03d}" if match else "feedback"

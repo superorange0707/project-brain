@@ -10,6 +10,7 @@ from . import __version__
 from .agent import archive_final_solution, create_m365_agent_kit, response_preview
 from .core import (
     BrainError,
+    add_external_evidence,
     clipboard_read,
     create_feedback,
     create_context,
@@ -24,6 +25,7 @@ from .core import (
     move_delivery,
     request_repair_prompt,
     search,
+    path_hits,
     session_state,
     snapshot_indexes,
     start_session,
@@ -33,6 +35,7 @@ from .core import (
 from .relations import generate_relationship_map
 from .sync import SyncResult, parse_branch_overrides, sync_repositories
 from .graph import GraphIndexResult, index_graph
+from .experience import build_experience_index, evaluate_sessions, render_similar_cases, similar_cases
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -66,6 +69,10 @@ def _parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--repo", action="append", default=[])
     search_parser.add_argument("--fixed", action="store_true", help="treat query as literal text")
 
+    paths = commands.add_parser("paths", help="find verified repository-relative file paths")
+    paths.add_argument("query")
+    paths.add_argument("--repo", action="append", default=[])
+
     symbol = commands.add_parser("symbol", help="find symbol declarations with lexical fallback")
     symbol.add_argument("name")
     symbol.add_argument("--repo", action="append", default=[])
@@ -77,6 +84,13 @@ def _parser() -> argparse.ArgumentParser:
     history = commands.add_parser("history", help="search Git change history")
     history.add_argument("query")
     history.add_argument("--repo", action="append", default=[])
+
+    experience = commands.add_parser("experience", help="inspect local ticket-labelled Git experience")
+    experience.add_argument("query", nargs="?", help="ticket description or implementation concept")
+    experience.add_argument("--rebuild", action="store_true", help="rescan configured Git history")
+    experience.add_argument("--patches", action="store_true", help="include bounded historical patch excerpts")
+    experience.add_argument("--json", action="store_true", help="print index or evaluation metadata")
+    commands.add_parser("evaluate", help="compare past retrieval evidence with later ticket commits")
 
     start = commands.add_parser("start", help="start a ticket investigation")
     start.add_argument("ticket")
@@ -119,6 +133,14 @@ def _parser() -> argparse.ArgumentParser:
     agent_kit = commands.add_parser("agent-kit", help="generate setup files for a persistent chat agent")
     agent_kit.add_argument("target", choices=("m365",))
     agent_kit.add_argument("--json", action="store_true", help="print generated paths as JSON")
+
+    evidence = commands.add_parser("evidence", help="add a user-supplied document, log, note, or runtime artifact")
+    evidence.add_argument("ticket")
+    evidence.add_argument("file")
+    evidence.add_argument("--kind", choices=("document", "log", "note", "runtime"), default="document")
+    evidence.add_argument("--target", choices=("claude", "m365"), default="claude")
+    evidence.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
+    evidence.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
     feedback = commands.add_parser("feedback", help="package implementation diffs and test results for AI review")
     feedback.add_argument("ticket")
@@ -188,6 +210,8 @@ def _refresh_all(
     snapshot_indexes(settings, changed_only=True)
     generate_map(settings)
     generate_relationship_map(settings)
+    experience = build_experience_index(settings, changed_only=True)
+    evaluate_sessions(settings, experience)
     return additions, results, index_graph(settings, defer_lazy=True)
 
 
@@ -218,6 +242,7 @@ def _init(args: argparse.Namespace) -> int:
         "",
         "[search]",
         "max_results = 100",
+        "path_result_limit = 12",
         "",
         "[context]",
         "source_window_lines = 150",
@@ -235,6 +260,13 @@ def _init(args: argparse.Namespace) -> int:
         "",
         "[knowledge]",
         'path = "knowledge"',
+        "",
+        "[experience]",
+        "enabled = true",
+        'ticket_pattern = "(?<![A-Z0-9])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Z0-9])"',
+        "commit_limit = 1000",
+        "similar_cases = 5",
+        "patch_chars = 0",
     ]
     for path in repos:
         name = path.name
@@ -377,6 +409,7 @@ def execute(args: argparse.Namespace) -> int:
         _print_graph(graphs)
         print(f"Generated {settings.generated_dir / 'PROJECT_FACTS.md'}")
         print(f"Generated {settings.generated_dir / 'PROJECT_RELATIONSHIPS.md'}")
+        print(f"Generated {settings.generated_dir / 'EXPERIENCE_REPORT.md'}")
         return 0
     if args.command == "map":
         generate_map(settings)
@@ -386,6 +419,9 @@ def execute(args: argparse.Namespace) -> int:
         return 0
     if args.command == "search":
         _print_hits(search(settings, args.query, args.repo, fixed=args.fixed))
+        return 0
+    if args.command == "paths":
+        _print_hits(path_hits(settings, args.query, args.repo), "No matching repository paths.")
         return 0
     if args.command == "symbol":
         _print_hits(symbol_hits(settings, args.name, args.repo), "No symbol evidence found.")
@@ -407,6 +443,29 @@ def execute(args: argparse.Namespace) -> int:
                 print(f"\n[{repo.name}]\n{result}")
         if not found:
             print("No matching history.")
+        return 0
+    if args.command == "experience":
+        index = build_experience_index(settings, changed_only=not args.rebuild)
+        if args.query:
+            if args.json:
+                print(json.dumps({"query": args.query, "matches": similar_cases(settings, args.query)}, indent=2))
+            else:
+                rendered = render_similar_cases(
+                    settings,
+                    args.query,
+                    include_patches=args.patches,
+                    patch_chars=40_000 if args.patches and settings.experience_patch_chars == 0 else None,
+                )
+                print(rendered or "No similar ticket-labelled Git history found.")
+        elif args.json:
+            print(json.dumps({"cases": len(index.get("cases") or []), "generated_at": index.get("generated_at")}, indent=2))
+        else:
+            print(f"Indexed {len(index.get('cases') or [])} ticket cases from local Git history.")
+        return 0
+    if args.command == "evaluate":
+        report = evaluate_sessions(settings)
+        print(settings.generated_dir / "EXPERIENCE_REPORT.md")
+        print(f"Evaluated {report['evaluated_sessions']} sessions against {report['indexed_cases']} indexed ticket cases.")
         return 0
     if args.command == "start":
         additions = []
@@ -527,6 +586,31 @@ def execute(args: argparse.Namespace) -> int:
             print(kit["instructions_path"])
             print(kit["knowledge_path"])
         return 0
+    if args.command == "evidence":
+        content, path, number, stored = add_external_evidence(
+            settings,
+            args.ticket,
+            Path(args.file),
+            kind=args.kind,
+        )
+        copy = args.copy if args.copy is not None else args.target == "claude"
+        parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)
+        result = {
+            "ticket": args.ticket,
+            "evidence": number,
+            "path": str(path),
+            "stored": str(stored),
+            "delivery": {"current": current, "total": len(parts), "parts": [str(part) for part in parts], "copied": copy},
+        }
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(path)
+            print(f"Stored source: {stored}")
+            if args.target == "m365":
+                print(f"M365 handoff: {parts[0]}")
+            print(f"Evidence: {number:03d}; delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
+        return 0
     if args.command == "feedback":
         notes = _read_optional(args.notes, args.notes_file)
         test_output = _read_optional(None, args.test_output_file)
@@ -564,6 +648,7 @@ def execute(args: argparse.Namespace) -> int:
             print(f"{status['project']['name']}: {status['summary']['current']}/{status['summary']['repositories']} repositories current")
             for repo in status["repositories"]:
                 print(f"- {repo['name']}: {repo['status']} {repo['sha'] or 'unknown'}")
+            print(f"Ticket memory: {status['summary']['experience_cases']} committed cases")
             print(f"Investigations: {len(status['sessions'])}")
         return 0
     if args.command == "ui":

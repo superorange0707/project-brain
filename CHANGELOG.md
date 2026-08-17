@@ -2,6 +2,35 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.6.0] - 2026-08-17
+
+### Added
+
+- Build an incremental, local experience index from ticket identifiers in Git
+  commit subjects, grouping the same ticket across repositories and recording
+  changed production, test, and configuration paths.
+- Rank similar historical tickets from the new ticket description, with
+  bounded, credential-redacted patch evidence available as an explicit opt-in.
+- Add deterministic `brain evaluate` retrieval recall reports by comparing old
+  Brain evidence with the files later changed by matching ticket commits.
+- Add verified filename/path retrieval through `paths:` requests and the
+  `brain paths` command.
+- Add bounded evidence-backed contract expansion for relevant Kafka, HTTP,
+  Feign, and Maven relationships.
+- Cache the relationship graph by analyzed source snapshot so repeated ticket
+  rounds do not rescan every repository.
+- Add cumulative implementation-readiness coverage to every context response.
+- Add `brain evidence` for explicit local document, note, log, and runtime
+  artifacts; text is reused in later contexts while binary files are archived
+  without claiming they were parsed.
+- Show indexed committed-ticket memory in the local cockpit and project status.
+
+### Security
+
+- Exclude sensitive file types and names from automatic historical patch
+  excerpts and redact common private-key, access-key, token, password, and
+  secret patterns before a patch reaches a handoff.
+
 ## [0.5.4] - 2026-08-17
 
 ### Fixed
@@ -212,6 +241,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.6.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.6.0
 [0.5.4]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.4
 [0.5.3]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.3
 [0.5.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.2

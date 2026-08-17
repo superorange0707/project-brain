@@ -17,6 +17,7 @@ CONTEXT_REQUEST:
   version: 1
   objective: State the exact implementation blocker this request must resolve.
   searches: []
+  paths: []
   symbols: []
   files: []
   history: []
@@ -24,9 +25,9 @@ CONTEXT_REQUEST:
 
 Batch all useful exact searches, symbols, callers, callees, implementations, tests, configuration, direct files, and Git history into that request. Do not repeat an operation already completed unless newer evidence explicitly invalidates it. Do not perform open-ended exploration.
 
-Use `files:` only for exact repository paths already verified in Project Brain evidence. Never guess a file path. When a location is unknown, use `searches:` first with the literal configuration key, symbol, endpoint, topic, property name, or filename fragment that must be located.
+Use `files:` only for exact repository paths already verified in Project Brain evidence. Never guess a file path. When a location is unknown, use `paths:` for a filename/path fragment or `searches:` for a literal configuration key, symbol, endpoint, topic, or property value.
 
-Project Brain results report analyzed branches and commits, unique evidence gained, repeated evidence, unresolved operations, and no-progress rounds. Treat those as tool facts. When a request adds no new evidence, change strategy: ask the user for the specific external/runtime blocker or produce the final solution.
+Project Brain results report analyzed branches and commits, unique evidence gained, repeated evidence, unresolved operations, evidence coverage, and no-progress rounds. It may also provide similar ticket-labelled Git changes and bounded historical patches. Treat committed history as an implementation analogue, not proof that the old change was correct for the current ticket. When a request adds no new evidence, change strategy: ask the user for the specific external/runtime blocker or produce the final solution.
 
 Each evidence response has a round-specific `TICKET-context-NNN.md` filename and a matching `Request: NNN` header. Always use the highest newly attached context number; never fall back to an older attachment. Files named `request-NNN.yml` are AI-to-Brain commands and are not evidence responses.
 

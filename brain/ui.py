@@ -34,6 +34,7 @@ from .core import (
 )
 from .graph import index_graph
 from .relations import generate_relationship_map
+from .experience import build_experience_index, evaluate_sessions, load_experience_index
 from .sync import parse_branch_overrides, sync_repositories
 
 
@@ -105,6 +106,11 @@ def project_status(settings: Settings) -> dict[str, Any]:
         graphs = json.loads(graph_path.read_text(encoding="utf-8")) if graph_path.is_file() else {}
     except (OSError, json.JSONDecodeError):
         graphs = {}
+    experience = load_experience_index(settings)
+    try:
+        evaluation = json.loads((settings.state_dir / "experience-eval.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        evaluation = {}
     repositories: list[dict[str, Any]] = []
     current = 0
     warnings = 0
@@ -135,7 +141,13 @@ def project_status(settings: Settings) -> dict[str, Any]:
         })
     return {
         "project": {"name": settings.name, "config": settings.config_path.name},
-        "summary": {"repositories": len(repositories), "current": current, "warnings": warnings},
+        "summary": {
+            "repositories": len(repositories),
+            "current": current,
+            "warnings": warnings,
+            "experience_cases": len(experience.get("cases") or []),
+            "evaluated_sessions": int(evaluation.get("evaluated_sessions") or 0),
+        },
         "repositories": repositories,
         "sessions": _sessions(settings),
     }
@@ -153,11 +165,14 @@ def _refresh(
     snapshot_indexes(settings, changed_only=True)
     generate_map(settings)
     generate_relationship_map(settings)
+    experience = build_experience_index(settings, changed_only=True)
+    evaluation = evaluate_sessions(settings, experience)
     graphs = index_graph(settings, defer_lazy=True)
     return {
         "discovered": [repo.name for repo in additions],
         "sync": [asdict(item) for item in synced],
         "graph": [asdict(item) for item in graphs],
+        "experience": {"cases": len(experience.get("cases") or []), "evaluated_sessions": evaluation["evaluated_sessions"]},
     }
 
 
@@ -215,7 +230,7 @@ def _delete_session(settings: Settings, ticket: str) -> list[str]:
     removed = [str(directory)]
     handoff_directory = settings.generated_dir / "handoffs"
     pattern = re.compile(
-        rf"^{re.escape(safe_name)}-(?:current|start|final|update|context-\d+|feedback-\d+)\.md$"
+        rf"^{re.escape(safe_name)}-(?:current|start|final|update|context-\d+|evidence-\d+|feedback-\d+)\.md$"
     )
     if handoff_directory.is_dir():
         for path in handoff_directory.iterdir():

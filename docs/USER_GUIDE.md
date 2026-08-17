@@ -37,7 +37,7 @@ then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.4"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.0"
 ```
 
 Upgrade later with:
@@ -49,7 +49,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.4"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.0"
 ```
 
 ### From a source checkout
@@ -186,6 +186,7 @@ generated_dir = "generated"
 
 [search]
 max_results = 100
+path_result_limit = 12
 
 [context]
 source_window_lines = 150
@@ -204,6 +205,13 @@ branch_priority = ["develop", "development"]
 [knowledge]
 path = "knowledge"
 
+[experience]
+enabled = true
+ticket_pattern = "(?<![A-Z0-9])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Z0-9])"
+commit_limit = 1000
+similar_cases = 5
+patch_chars = 0
+
 [[repositories]]
 name = "trading-service"
 path = "../trading-service"
@@ -218,6 +226,18 @@ Project Brain also accepts legacy `config.yml` and `config.yaml` files.
 ### Search settings
 
 - `max_results`: maximum matches gathered per operation.
+- `path_result_limit`: maximum verified filename/path matches read per repository.
+
+### Experience settings
+
+- `enabled`: build local committed-ticket experience during refresh/start.
+- `ticket_pattern`: regular expression used to extract ticket identifiers from
+  Git commit subjects. Change this if your organization does not use `ABC-1234`.
+- `commit_limit`: most recent non-merge commits scanned per repository.
+- `similar_cases`: historical cases placed in a new ticket handoff.
+- `patch_chars`: maximum historical patch characters automatically included for
+  each similar case. The safe default is `0` (metadata only). Set a positive
+  budget only when the destination AI is approved for repository source.
 
 ### Context settings
 
@@ -413,7 +433,8 @@ operation under `Unresolved`, completes the remaining batched operations, and
 still produces the numbered `context-NNN.md`. Unsafe paths remain rejected. A
 request number is committed only when its context artifact is also produced.
 The generated AI instructions permit `files:` only for paths already verified
-in Brain evidence; an unknown location must be found with `searches:` first.
+in Brain evidence; unknown filenames/locations use `paths:`, while unknown
+configuration keys, endpoints, topics, and source literals use `searches:`.
 
 Old investigations can be removed from **Project overview** with **Delete
 history**. The confirmation names the ticket; this deletes only `.runs/TICKET`
@@ -433,6 +454,10 @@ CONTEXT_REQUEST:
     - query: "JURISDICTION_CHANGED"
       repos: []
     - query: "customer.updated"
+      repos: [trading-service]
+
+  paths:
+    - query: application.properties
       repos: [trading-service]
 
   symbols:
@@ -487,15 +512,19 @@ brain preview --clipboard
 brain preview --clipboard --json
 ```
 
-The preview validates repository names and lists every search, symbol operation,
-file read, and history query. JSON request objects are accepted as well as fenced
-YAML inside a complete chat response.
+The preview validates repository names and lists every content search, path
+search, symbol operation, file read, and history query. JSON request objects are
+accepted as well as fenced YAML inside a complete chat response.
 
 An identical retrieval plan against the same pinned repository snapshots is
 rejected. Every returned context reports new evidence regions, previously seen
 evidence, recent retrieval objectives, and consecutive no-progress requests. A
 no-progress result tells the AI to ask for a specific external/runtime fact or
 produce `FINAL_SOLUTION`, rather than continuing open-ended repository searches.
+The cumulative **Implementation readiness** section reports whether production
+source, tests, configuration, relationships, Git history, and similar tickets
+have been seen. It is evidence coverage, not an automatic claim that the change
+is safe; the chat AI still decides whether an unknown is blocking.
 
 ## 10. Claude chunk navigation
 
@@ -519,6 +548,8 @@ All requests and responses remain under `.runs/ABC-1234/`:
 ├── context-002.md
 ├── current-handoff.md
 ├── final-solution.md
+├── external-001.md
+├── external/
 ├── feedback-001.md
 ├── delivery/
 └── session.json
@@ -533,6 +564,17 @@ brain search JURISDICTION_CHANGED --fixed
 brain search 'class .*Eligibility'
 brain search 'customer\.updated' --repo trading-service
 ```
+
+### Verified filename/path search
+
+```bash
+brain paths application.properties
+brain paths CachePolicy --repo payment-service
+```
+
+Path search walks the same ignored-directory-safe source manifest as repository
+search. A matching path is verified before Brain reads it, so the AI does not
+need to guess conventional Spring or Maven locations.
 
 ### Symbol resolution
 
@@ -587,14 +629,66 @@ Python-only installs can add that executable to `PATH` or set
 shows which backend is active. If it is missing or fails, exact search and lexical
 analysis continue automatically.
 
-### Solved-ticket memory
+### Automatic committed-ticket experience
+
+Every `brain refresh` scans a bounded number of local commits on the selected
+source snapshot and extracts ticket identifiers from commit subjects. This is
+normally the fresh `origin/develop` snapshot when that branch exists. Ordinary,
+squash, and ticket-labelled merge commits are included; merge changes are
+attributed against the first parent. Commits with the same ticket are joined
+across repositories. Brain records changed paths, tests, configuration,
+subjects, and commit SHAs, then ranks similar cases for each new ticket.
+
+```bash
+brain experience
+brain experience "increase transaction cache duration" --patches
+brain evaluate
+```
+
+This is retrieval over local Git metadata and patches, not machine learning and
+not an upload. `brain evaluate` compares files retrieved during an older Brain
+session with files later changed by a commit carrying the same ticket number.
+The generated `EXPERIENCE_REPORT.md` reports repository, changed-file, and test
+recall plus exact missed paths. Evaluation becomes available after the commit is
+visible in the analyzed branch.
+
+Git does not contain the full Jira/GitLab ticket description unless developers
+put it in the commit. If a ticket was started in Brain, its local ticket text is
+automatically joined to the case once a matching commit appears on the analyzed
+snapshot. Add authoritative details for older tickets with the existing
+human-maintained memory command:
 
 ```bash
 brain learn ABC-1234
 ```
 
 Fill in the generated short template under `knowledge/tickets/`. Future searches
-can reuse the root cause, flow, tests, and gotchas.
+can use its root cause, flow, tests, and gotchas both for similarity ranking and
+for the resulting historical evidence.
+
+The normal closed loop is: start and investigate the ticket, implement and test
+manually, commit with the same ticket identifier, merge it into the analyzed
+branch, then run `brain refresh`. That refresh learns the committed cross-repo
+case and regenerates `brain evaluate`; future similar tickets inherit the
+observed repo/file/test/config pattern. No model training or source upload occurs.
+
+Historical patch excerpts are disabled by default. `brain experience QUERY
+--patches` is an explicit one-time opt-in; configured automatic excerpts are
+bounded, skip known key/credential file types, and redact common private-key,
+token, password, and secret patterns. This is defense in depth; review a handoff
+before moving it outside the project's trust boundary.
+
+### External documents and runtime evidence
+
+```bash
+brain evidence ABC-1234 internal-standard.md --kind document --target m365
+brain evidence ABC-1234 production.log --kind log --target m365
+```
+
+Text evidence is archived under the ticket and automatically included in later
+context rounds as explicitly user-supplied evidence. Binary files such as PDFs
+are archived locally, but Brain does not claim to parse them; attach the stored
+binary directly to M365 Copilot or another AI that supports that format.
 
 ## 12. Review your implementation
 

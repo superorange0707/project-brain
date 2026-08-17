@@ -7,9 +7,8 @@ recent minor release.
 
 | Version | Supported |
 |---|---|
-| 0.3.x | Yes |
-| 0.2.x | No |
-| 0.1.x | No |
+| 0.6.x | Yes |
+| 0.5.x | No |
 | Older | No |
 
 ## Reporting a vulnerability
@@ -33,6 +32,8 @@ Project Brain is designed as a local, read-only retrieval tool:
 - It does not edit, clean, reset, checkout, build, or commit target repositories.
 - Subprocesses use argument arrays rather than a shell.
 - Direct file requests are constrained to configured repository roots.
+- User-supplied evidence files are copied only into the ignored ticket session;
+  symlinks are rejected and file size is limited.
 - The GUI listens on IPv4 loopback only and every API call requires a random,
   per-process bearer token.
 - The GUI rejects non-local Host headers, caps JSON requests at 4 MiB, disables
@@ -62,6 +63,13 @@ The largest practical risk is not a Project Brain credential: it is source or a
 secret already present in a target repository being included in generated context.
 Project Brain cannot know whether the destination chat is approved by your employer
 or repository owner.
+
+Ticket-history patch excerpts can expose content that has since been deleted
+from the current branch, so they are disabled by default. If explicitly enabled,
+Project Brain excludes known credential/key file names and formats and redacts
+common private-key, access-key, token, password, and secret patterns. These
+filters are defense in depth and cannot recognize every organization-specific
+secret format.
 
 Before pasting or uploading context:
 

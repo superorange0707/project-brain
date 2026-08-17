@@ -71,6 +71,8 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("Retrieval plan", html)
         self.assertIn("M365 agent", html)
         self.assertIn("Discover &amp; sync", html)
+        self.assertIn("Ticket memory", html)
+        self.assertIn('id="experience-count"', html)
         self.assertIn('document.getElementById("request-text").value = ""', html)
         self.assertIn('setDelivery(data.delivery, "view-request")', html)
         self.assertNotIn('document.querySelectorAll("[data-output]")', html)
@@ -81,6 +83,9 @@ class LocalUiTest(unittest.TestCase):
             self.get("/api/status", authorized=False)
         self.assertEqual(403, caught.exception.code)
         caught.exception.close()
+
+        _, status_data, _ = self.get("/api/status")
+        self.assertEqual(0, status_data["data"]["summary"]["experience_cases"])
 
     def test_request_preview_start_context_feedback_and_artifacts(self) -> None:
         request_text = """The next evidence I need is:

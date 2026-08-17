@@ -46,6 +46,7 @@ configured repositories. You apply the final solution in your IDE.
 | 🧠 **Structural + exact** | Pinned code graph when bundled; deterministic exact/lexical fallback everywhere |
 | 🔍 **Honest uncertainty** | Missing evidence and static-analysis limits are reported, never hidden |
 | 🎯 **Convergent investigation** | Rejects duplicate retrievals and reports new evidence, prior objectives, and no-progress turns |
+| 🧩 **Local ticket experience** | Learns reusable repo/file/test patterns from ticket-labelled Git commits—without a model or upload |
 | 🧑‍💻 **Persistent M365 Agent** | Generates permanent Instructions and Knowledge so Copilot always knows when to use Brain or ask you directly |
 
 No vector database, hosted indexing service, or model/API credential.
@@ -71,7 +72,7 @@ Download the archive for your CPU from the
 extract it, and place both executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.5.4-macos-arm64.tar.gz
+tar -xzf project-brain-v0.6.0-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp ~/.local/bin/
 ```
@@ -82,19 +83,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.4"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.0"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.4"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.0"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.5.4/project_brain_context-0.5.4-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.0/project_brain_context-0.6.0-py3-none-any.whl
 ```
 
 Then verify:
@@ -119,6 +120,36 @@ relationship map. By default it prefers each repo's fresh `origin/develop` or
 `origin/development`, then falls back to that repo's remote default branch. A
 fetch failure is reported per repo and falls back to the newest locally available
 commit; it never blocks the other repositories.
+
+The same refresh incrementally indexes ticket identifiers found in ordinary,
+squash, and merge commit subjects on the selected snapshot (normally
+`origin/develop`). The same ticket is joined across repositories, giving future
+tickets local examples of files, tests, configuration, and patch patterns that
+changed together. This is deterministic retrieval from Git—not model training—
+and no history leaves the machine.
+
+Git can provide the ticket identifier, commit subject, changed files, and diff;
+it cannot reconstruct a Jira/GitLab description that was never committed. Add
+authoritative old ticket details with `brain learn TICKET` when they materially
+improve future investigations. For tickets already investigated through Brain,
+the saved `.runs/TICKET/ticket.md` description automatically enriches that case
+after a matching commit appears. `brain evaluate` later compares retrieved paths
+with the files actually committed under that ticket number.
+
+The feedback loop is deliberately simple and auditable:
+
+```text
+brain start IPF-123  → saved ticket + retrieved evidence
+          ↓ you implement, test, and commit with IPF-123
+brain refresh        → cross-repo committed case is learned locally
+          ↓
+brain evaluate       → retrieval recall and missed changed paths
+          ↓
+next ticket          → matching repos/files/tests/config become prior evidence
+```
+
+Brain never edits or commits the target repositories. It learns only from the
+selected local Git snapshots and ignored local Brain artifacts.
 
 Clone another Git repository anywhere below this project root and the next
 `brain refresh` automatically appends it to `brain.toml`, fetches it, snapshots
@@ -246,6 +277,10 @@ CONTEXT_REQUEST:
     - query: "JURISDICTION_CHANGED"
       repos: []
 
+  paths:
+    - query: "application.properties"
+      repos: [trading-service]
+
   symbols:
     - name: "TradingEligibilityService.recalculate"
       repos: [trading-service]
@@ -266,12 +301,14 @@ objectives, and no-progress turns. An identical plan against the same pinned
 snapshots is rejected instead of wasting another round.
 
 `files:` is for paths already verified by prior evidence. If the exact location
-is unknown, the AI requests a literal search first instead of guessing a path.
+is unknown, the AI uses `paths:` for filename/path fragments or `searches:` for
+configuration keys and source literals instead of guessing.
 
 ## What it can explore
 
 - Safe fetch plus exact, immutable remote-commit snapshots
 - Cross-repository literal and regular-expression search
+- Verified filename and repository-relative path search
 - Classes, interfaces, methods, functions, and lexical symbol fallback
 - Interface implementations and inheritance
 - Static callers and likely outbound calls
@@ -279,6 +316,8 @@ is unknown, the AI requests a literal search first instead of guessing a path.
 - Direct file and line-range retrieval
 - Git pickaxe/history and optional working-tree diffs
 - Human project maps, glossaries, flows, and solved-ticket memory
+- Cross-repository ticket-labelled Git experience, historical patches, and
+  retrieval-versus-commit evaluation
 - Evidence-linked Spring REST ↔ Feign, Kafka producer ↔ consumer, and Maven
   producer ↔ consumer relationships with multi-hop workflow summaries
 - Java, Kotlin, Python, JavaScript/TypeScript, Go, Rust, Ruby, C/C++, C#, Swift,
@@ -320,15 +359,19 @@ brain doctor            Check config, repositories, git, rg, and freshness
 brain status            Show project health and ticket sessions (optionally JSON)
 brain refresh           Discover new repos, sync, and regenerate intelligence
 brain search            Search all configured repositories
+brain paths             Find verified repository-relative file paths
 brain symbol            Resolve symbol definitions with lexical fallback
 brain trace             Find static callers and likely outbound calls
 brain history           Search Git history
+brain experience        Inspect or rebuild local ticket-labelled Git experience
+brain evaluate          Compare past retrievals with later matching commits
 brain map               Generate Spring/Maven/project facts
 brain start             Start a ticket investigation
 brain continue          Route a complete AI reply and run only tool requests
 brain preview           Classify an AI reply and dry-run repository requests
 brain ctx               Fulfil a CONTEXT_REQUEST
 brain agent-kit m365    Generate permanent M365 Agent setup files
+brain evidence          Add an explicit document, log, note, or runtime artifact
 brain feedback          Package diffs and observed test output for AI review
 brain ui                Open the token-protected local investigation cockpit
 brain next / prev       Navigate Claude clipboard chunks
@@ -361,6 +404,11 @@ token belongs in this repository.
 
 The prebuilt archive includes the pinned open-source structural backend; see
 [third-party notices](THIRD_PARTY.md).
+
+Historical patch excerpts are off by default. The explicit `brain experience
+QUERY --patches` mode skips known credential/key file types and redacts common
+secret patterns. Redaction is defense in depth, not a guarantee; review generated
+handoffs before sending them outside the repository's trust boundary.
 
 Read [SECURITY.md](SECURITY.md) before using Project Brain with private code.
 

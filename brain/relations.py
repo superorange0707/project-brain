@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -273,6 +274,62 @@ def analyze_relationships(settings: Settings) -> tuple[list[Fact], list[Relation
     return facts, sorted(relationships, key=lambda item: (item.source, item.target, item.kind, item.key))
 
 
+def _source_signature(settings: Settings) -> list[list[str | None]]:
+    return [[repo.name, repo.source_ref, repo.source_sha] for repo in settings.repositories]
+
+
+def _cached_relationships(settings: Settings) -> list[Relationship] | None:
+    path = settings.state_dir / "relationships.json"
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if value.get("version") != 1 or value.get("sources") != _source_signature(settings):
+            return None
+        return [Relationship(**item) for item in value.get("relationships") or []]
+    except (AttributeError, OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def related_relationships(
+    settings: Settings,
+    queries: Iterable[str],
+    evidence_paths: set[tuple[str, str]],
+    *,
+    limit: int = 12,
+) -> list[Relationship]:
+    """Return a bounded, evidence-backed contract-graph slice for the current retrieval."""
+    relationships = _cached_relationships(settings)
+    if relationships is None:
+        _, relationships = analyze_relationships(settings)
+    terms = {
+        value.lower()
+        for query in queries
+        for value in re.findall(r"[A-Za-z0-9_.:/{}-]{3,}", query)
+        if value.lower() not in {
+            "behavior", "change", "configuration", "current", "determine", "exact", "find", "implementation",
+            "inspect", "locate", "repository", "service", "source", "the",
+        }
+    }
+
+    def location(value: str) -> tuple[str, str] | None:
+        match = re.fullmatch(r"([^:]+):(.+):(\d+)", value)
+        return (match.group(1), match.group(2)) if match else None
+
+    scored: list[tuple[int, Relationship]] = []
+    for relationship in relationships:
+        haystack = " ".join(
+            [relationship.source, relationship.target, relationship.kind, relationship.key]
+        ).lower()
+        path_match = location(relationship.source_evidence) in evidence_paths or location(relationship.target_evidence) in evidence_paths
+        term_matches = sum(1 for term in terms if term in haystack)
+        if not path_match and not term_matches:
+            continue
+        scored.append(((100 if path_match else 0) + term_matches * 10, relationship))
+    scored.sort(key=lambda item: (-item[0], item[1].source, item[1].target, item[1].kind, item[1].key))
+    return [item for _, item in scored[:limit]]
+
+
 def _runtime_workflows(relationships: list[Relationship]) -> list[str]:
     runtime = [item for item in relationships if item.kind in {"KAFKA", "HTTP", "FEIGN_TARGET"}]
     adjacency: dict[str, list[Relationship]] = {}
@@ -334,4 +391,17 @@ def generate_relationship_map(settings: Settings) -> str:
     text = "\n".join(output).rstrip() + "\n"
     settings.generated_dir.mkdir(parents=True, exist_ok=True)
     (settings.generated_dir / "PROJECT_RELATIONSHIPS.md").write_text(text, encoding="utf-8")
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    (settings.state_dir / "relationships.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sources": _source_signature(settings),
+                "relationships": [item.__dict__ for item in relationships],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return text
