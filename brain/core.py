@@ -722,7 +722,9 @@ def _request_body(text: str) -> dict[str, Any]:
             raise BrainError(f"Invalid CONTEXT_REQUEST JSON: line {exc.lineno}, column {exc.colno}: {exc.msg}") from exc
 
     if loaded is None:
-        marker = text.find("CONTEXT_REQUEST:")
+        # A textarea or copied chat can contain an earlier request followed by
+        # the AI's new one. The newest directive is the one to execute.
+        marker = text.rfind("CONTEXT_REQUEST:")
         if marker < 0:
             raise BrainError(
                 "Input does not contain CONTEXT_REQUEST:. Copy the AI's complete response, "
@@ -1250,7 +1252,8 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
         if previous.get("signature") == plan["signature"] and previous.get("source_signature") == state.get("source_signature"):
             raise BrainError(
                 f"This retrieval plan already ran as request {int(previous.get('number') or 0):03d}. "
-                "Return that result to the AI instead of repeating it."
+                "Clear any old reply and paste only the AI's latest complete response. If the latest reply "
+                "is a human question, answer it directly in the AI chat; Brain should not create a new request."
             )
     for repo in settings.repositories:
         source = (state.get("sources") or {}).get(repo.name) or {}
@@ -1421,10 +1424,28 @@ def deliver(settings: Settings, ticket: str, text: str, target: str, *, copy: bo
         internal_handoff.write_text(text, encoding="utf-8")
         handoff_directory = settings.generated_dir / "handoffs"
         handoff_directory.mkdir(parents=True, exist_ok=True)
-        handoff = handoff_directory / f"{directory.name}-current.md"
+        current_handoff = handoff_directory / f"{directory.name}-current.md"
+        current_handoff.write_text(text, encoding="utf-8")
+        if text.startswith("# PROJECT BRAIN — START"):
+            label = "start"
+        elif text.startswith("# PROJECT BRAIN — IMPLEMENTATION FEEDBACK"):
+            match = re.search(r"(?m)^Feedback: `(\d+)`", text)
+            label = f"feedback-{int(match.group(1)):03d}" if match else "feedback"
+        elif re.search(r"(?im)^\s*(?:#+\s*)?FINAL_SOLUTION\b", text):
+            label = "final"
+        else:
+            match = re.search(r"(?m)^Request: `(\d+)`", text)
+            label = f"request-{int(match.group(1)):03d}" if match else "update"
+        handoff = handoff_directory / f"{directory.name}-{label}.md"
         handoff.write_text(text, encoding="utf-8")
         paths = [handoff]
-        state["delivery"] = {"target": target, "parts": [str(handoff)], "current": 1, "handoff": str(handoff)}
+        state["delivery"] = {
+            "target": target,
+            "parts": [str(handoff)],
+            "current": 1,
+            "handoff": str(current_handoff),
+            "latest": str(handoff),
+        }
         save_session(settings, ticket, state)
         if copy:
             clipboard_write(text)

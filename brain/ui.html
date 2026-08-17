@@ -479,7 +479,7 @@
       } else if (plan.kind === "final_solution") {
         message.innerHTML = '<div class="success"><strong>Ready to implement.</strong><br>' + esc(plan.message) + '</div>';
       } else if (plan.duplicate_of) {
-        message.innerHTML = '<div class="error">This retrieval already ran as request ' + String(plan.duplicate_of).padStart(3, "0") + '. Return the earlier result to the AI instead of running it again.</div>';
+        message.innerHTML = '<div class="error">This retrieval already ran as request ' + String(plan.duplicate_of).padStart(3, "0") + '. Clear the old reply and paste only the AI’s latest complete response. If the AI asked you a human question, answer it directly in that chat; Brain should not create another request.</div>';
       } else {
         message.innerHTML = '<div class="success">Valid repository request. Review exactly what Brain will retrieve, then run it.</div>';
       }
@@ -497,6 +497,7 @@
     document.getElementById("run-request").addEventListener("click", async function () {
       if (!state.preview) return;
       var button = this; busy(button, true, state.preview.kind === "final_solution" ? "Archiving…" : "Retrieving…");
+      var completed = false;
       try {
         var body = {
           ticket: document.getElementById("request-ticket").value,
@@ -508,8 +509,19 @@
         state.ticket = data.ticket;
         if (data.delivery) setDelivery(data.delivery);
         await loadStatus();
+        completed = true;
         showToast(data.kind === "final_solution" ? "Final plan archived — ready to implement" : "Evidence ready — return it to the same AI chat");
-      } catch (error) { report(error); } finally { busy(button, false); }
+      } catch (error) { report(error); } finally {
+        busy(button, false);
+        if (completed) {
+          document.getElementById("request-text").value = "";
+          state.preview = null;
+          button.disabled = true;
+          document.getElementById("operation-count").textContent = "0";
+          document.getElementById("request-objective").textContent = "Paste the AI’s next complete reply.";
+          document.getElementById("request-plan").innerHTML = "";
+        }
+      }
     });
 
     document.getElementById("create-feedback").addEventListener("click", async function () {

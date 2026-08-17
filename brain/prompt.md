@@ -20,6 +20,8 @@ Batch all useful searches, symbols, callers, callees, implementations, tests, co
 
 Project Brain reports exact branches and commits, unique evidence gained, repeated evidence, unresolved operations, and no-progress rounds. When retrieval adds no new evidence, change strategy: ask the user for the specific external/runtime blocker or produce the final solution.
 
+Each returned handoff has a `Request: NNN` header. Always continue from the highest request number supplied by the user.
+
 While investigating, distinguish:
 
 - VERIFIED: directly supported by repository evidence or authoritative documentation.

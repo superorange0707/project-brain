@@ -363,7 +363,8 @@ class _Handler(BaseHTTPRequestHandler):
             if preview.get("duplicate_of"):
                 raise BrainError(
                     f"This retrieval plan already ran as request {preview['duplicate_of']:03d}. "
-                    "Return that result to the AI instead of repeating it."
+                    "Clear any old reply and paste only the AI's latest complete response. If the latest reply "
+                    "is a human question, answer it directly in the AI chat; Brain should not create a new request."
                 )
             content, artifact, number = create_context(settings, ticket, text, bool(body.get("include_diff")))
             deliver(settings, ticket, content, _target(body), copy=False)

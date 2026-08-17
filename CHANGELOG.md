@@ -2,6 +2,19 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.5.2] - 2026-08-17
+
+### Fixed
+
+- Execute the last `CONTEXT_REQUEST` in a complete or accidentally appended AI
+  reply instead of re-reading an earlier request from the same text.
+- Prefer a later `FINAL_SOLUTION` over quoted older repository requests.
+- Clear the cockpit's processed AI reply so the next response cannot be appended
+  to stale input by accident.
+- Give every M365 handoff a round-specific filename such as
+  `TICKET-request-010.md`, preventing file-attachment caches from showing the
+  previous round; `TICKET-current.md` remains available as a stable alias.
+
 ## [0.5.1] - 2026-08-17
 
 ### Added
@@ -173,6 +186,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.5.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.2
 [0.5.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.1
 [0.5.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.0
 [0.4.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.4.1

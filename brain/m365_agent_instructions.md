@@ -26,6 +26,8 @@ Batch all useful exact searches, symbols, callers, callees, implementations, tes
 
 Project Brain results report analyzed branches and commits, unique evidence gained, repeated evidence, unresolved operations, and no-progress rounds. Treat those as tool facts. When a request adds no new evidence, change strategy: ask the user for the specific external/runtime blocker or produce the final solution.
 
+Each returned handoff has a round-specific filename and a `Request: NNN` header. Always use the highest newly attached request number; never fall back to evidence from an older attachment when a newer numbered handoff is present.
+
 # Investigation discipline
 
 Maintain these distinctions while reasoning:

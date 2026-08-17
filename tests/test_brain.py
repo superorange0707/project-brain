@@ -372,17 +372,41 @@ else:
         refreshed = response_preview(REQUEST, self.settings, "ABC-ROUTE")
         self.assertIsNone(refreshed["duplicate_of"])
 
+    def test_complete_ai_reply_uses_the_latest_directive(self) -> None:
+        start_session(self.settings, "ABC-LATEST", "Investigate eligibility.")
+        create_context(self.settings, "ABC-LATEST", REQUEST)
+        newer = REQUEST.replace(
+            "Determine why jurisdiction changes do not recalculate eligibility online.",
+            "Find the exact cache duration configuration.",
+        ).replace("JURISDICTION_CHANGED", "transaction-cache-duration")
+
+        preview = response_preview(REQUEST + "\nThe next request is:\n" + newer, self.settings, "ABC-LATEST")
+        self.assertEqual("Find the exact cache duration configuration.", preview["objective"])
+        self.assertIsNone(preview["duplicate_of"])
+        _, _, number = create_context(self.settings, "ABC-LATEST", REQUEST + "\n" + newer)
+        self.assertEqual(2, number)
+
+        final = response_preview(REQUEST + "\nFINAL_SOLUTION\nChange the cache configuration.", self.settings)
+        self.assertEqual("final_solution", final["kind"])
+
     def test_final_solution_m365_handoff_and_agent_kit(self) -> None:
         start, _ = start_session(self.settings, "ABC-M365", "Prepare an M365 handoff.")
         first, _ = deliver(self.settings, "ABC-M365", start, "m365", copy=False)
-        self.assertEqual("ABC-M365-current.md", first[0].name)
+        self.assertEqual("ABC-M365-start.md", first[0].name)
         self.assertEqual(self.settings.generated_dir / "handoffs", first[0].parent)
         self.assertTrue((self.settings.runs_dir / "ABC-M365/current-handoff.md").is_file())
+        self.assertTrue((self.settings.generated_dir / "handoffs/ABC-M365-current.md").is_file())
+
+        context, _, _ = create_context(self.settings, "ABC-M365", REQUEST)
+        request_handoff, _ = deliver(self.settings, "ABC-M365", context, "m365", copy=False)
+        self.assertEqual("ABC-M365-request-001.md", request_handoff[0].name)
+        self.assertIn("Request: `001`", request_handoff[0].read_text(encoding="utf-8"))
 
         final_text = "FINAL_SOLUTION\n\nChange `CustomerChangedListener.java`."
         final_path = archive_final_solution(self.settings, "ABC-M365", final_text)
         second, _ = deliver(self.settings, "ABC-M365", final_text, "m365", copy=False)
-        self.assertEqual(first[0], second[0])
+        self.assertEqual("ABC-M365-final.md", second[0].name)
+        self.assertNotEqual(first[0], second[0])
         self.assertEqual(final_text, second[0].read_text(encoding="utf-8"))
         self.assertTrue(final_path.is_file())
         self.assertEqual("ready_to_implement", json.loads((final_path.parent / "session.json").read_text())["status"])

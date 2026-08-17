@@ -71,7 +71,7 @@ Download the archive for your CPU from the
 extract it, and place both executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.5.1-macos-arm64.tar.gz
+tar -xzf project-brain-v0.5.2-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp ~/.local/bin/
 ```
@@ -82,19 +82,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.2"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.2"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.5.1/project_brain_context-0.5.1-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.5.2/project_brain_context-0.5.2-py3-none-any.whl
 ```
 
 Then verify:
@@ -191,12 +191,16 @@ The AI then permanently knows that it should talk to you directly
 for business, document, runtime, and environment facts, and emit a
 `CONTEXT_REQUEST` only for local repository evidence.
 
-Start every M365 ticket with `--target m365`. Brain continually replaces one
-stable file, so upload the same path each round:
+Start every M365 ticket with `--target m365`. Upload the newly printed
+round-specific file each time, for example:
 
 ```text
-generated/handoffs/ABC-1234-current.md
+generated/handoffs/ABC-1234-request-010.md
 ```
+
+The changing filename prevents M365 from reusing a cached attachment. Brain also
+maintains `ABC-1234-current.md` as a stable local alias; you never create or
+rename either file yourself.
 
 ### Try the complete workflow without your own repositories
 

@@ -71,6 +71,7 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("Retrieval plan", html)
         self.assertIn("M365 agent", html)
         self.assertIn("Discover &amp; sync", html)
+        self.assertIn('document.getElementById("request-text").value = ""', html)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         with self.assertRaises(HTTPError) as caught:
             self.get("/api/status", authorized=False)

@@ -14,7 +14,18 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
     stripped = text.strip()
     if not stripped:
         raise BrainError("The AI response is empty")
-    looks_like_request = "CONTEXT_REQUEST:" in text or (
+    request_position = text.rfind("CONTEXT_REQUEST:")
+    final_matches = list(re.finditer(r"(?im)^\s*(?:#+\s*)?FINAL_SOLUTION\b", text))
+    if final_matches and final_matches[-1].start() > request_position:
+        return {
+            "valid": True,
+            "kind": "final_solution",
+            "label": "Ready to implement",
+            "message": "The AI returned a final implementation plan. No repository retrieval is required.",
+            "operation_count": 0,
+            "actions": [],
+        }
+    looks_like_request = request_position >= 0 or (
         stripped.startswith("{") and ("CONTEXT_REQUEST" in stripped or '"objective"' in stripped)
     )
     if looks_like_request:
@@ -34,15 +45,6 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
             )
             result["duplicate_of"] = int(previous.get("number") or 0) if previous else None
         return result
-    if re.search(r"(?im)^\s*(?:#+\s*)?FINAL_SOLUTION\b", text):
-        return {
-            "valid": True,
-            "kind": "final_solution",
-            "label": "Ready to implement",
-            "message": "The AI returned a final implementation plan. No repository retrieval is required.",
-            "operation_count": 0,
-            "actions": [],
-        }
     return {
         "valid": True,
         "kind": "conversation",
@@ -129,7 +131,7 @@ Starter prompt:
 
 > Investigate this ticket as a read-only coding agent. I will attach the Project Brain start package. Ask me directly for business, document, or runtime facts; emit a CONTEXT_REQUEST only when local repository evidence is required; return FINAL_SOLUTION when the implementation is ready.
 
-For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365`, upload `generated/handoffs/TICKET-current.md`, and keep using the same agent conversation.
+For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365`, upload the newly printed round-specific file such as `generated/handoffs/TICKET-request-001.md`, and keep using the same agent conversation. The changing filename prevents M365 from reusing an older attachment; `TICKET-current.md` remains a local alias.
 """
     setup_path = directory / "SETUP.md"
     setup_path.write_text(setup, encoding="utf-8")

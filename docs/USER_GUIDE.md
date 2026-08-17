@@ -37,7 +37,7 @@ then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.2"
 ```
 
 Upgrade later with:
@@ -49,7 +49,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.2"
 ```
 
 ### From a source checkout
@@ -372,10 +372,11 @@ generated facts, and glossary. For Claude, it is copied automatically. Use
 brain start ABC-1234 --ticket-file ticket.md --target m365
 ```
 
-Upload the printed `generated/handoffs/ABC-1234-current.md` file to the dedicated
-M365 Agent. This folder is visible in Finder. Brain replaces the same file after
-every retrieval and implementation feedback package, while retaining internal
-history under `.runs/`, so you never create or rename a Markdown file manually.
+Upload the newly printed round-specific file, such as
+`generated/handoffs/ABC-1234-request-010.md`, to the dedicated M365 Agent. The
+changing filename prevents a stale attachment cache. Brain creates it
+automatically, keeps `ABC-1234-current.md` as a stable local alias, and retains
+internal history under `.runs/`; you never create or rename a Markdown file.
 
 ## 9. Continue an AI investigation
 
@@ -397,8 +398,9 @@ For M365, use:
 brain continue ABC-1234 --file ai-response.txt --target m365
 ```
 
-Then upload the refreshed `generated/handoffs/ABC-1234-current.md`. Use the same M365
-Agent conversation so it retains earlier documents, human answers, and evidence.
+Then upload the newly printed round-specific handoff. Use the same M365 Agent
+conversation so it retains earlier documents, human answers, and evidence. The
+`Request: NNN` header and filename must both show the new round.
 
 The strict `brain ctx` command remains useful for automation when the input is
 known to contain a `CONTEXT_REQUEST`.
