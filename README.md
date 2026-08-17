@@ -71,7 +71,7 @@ Download the archive for your CPU from the
 extract it, and place both executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.5.3-macos-arm64.tar.gz
+tar -xzf project-brain-v0.5.4-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp ~/.local/bin/
 ```
@@ -82,19 +82,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.3"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.4"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.3"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.4"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.5.3/project_brain_context-0.5.3-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.5.4/project_brain_context-0.5.4-py3-none-any.whl
 ```
 
 Then verify:
@@ -264,6 +264,9 @@ framework relationships, ranked source evidence, Git history, and an explicit
 unresolved section. It also reports unique evidence gained, prior retrieval
 objectives, and no-progress turns. An identical plan against the same pinned
 snapshots is rejected instead of wasting another round.
+
+`files:` is for paths already verified by prior evidence. If the exact location
+is unknown, the AI requests a literal search first instead of guessing a path.
 
 ## What it can explore
 

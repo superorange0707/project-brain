@@ -340,6 +340,36 @@ else:
         self.assertIn("## Investigation progress", context)
         self.assertIn("New unique evidence regions:", context)
 
+    def test_missing_requested_file_is_unresolved_without_half_written_round(self) -> None:
+        start_session(self.settings, "ABC-MISSING", "Find the implementation even if one guessed file is absent.")
+        request = """CONTEXT_REQUEST:
+  version: 1
+  objective: Find the evaluator and inspect a guessed configuration file.
+  searches:
+    - query: EligibilityEvaluator
+      repos: [trading-service]
+  symbols: []
+  files:
+    - repo: trading-service
+      path: src/main/resources/guessed-missing.yml
+  history: []
+"""
+
+        context, _, number = create_context(self.settings, "ABC-MISSING", request)
+        self.assertEqual(1, number)
+        self.assertIn("EligibilityEvaluator", context)
+        self.assertIn("Requested file `trading-service:src/main/resources/guessed-missing.yml` was not found", context)
+        self.assertTrue((self.settings.runs_dir / "ABC-MISSING/request-001.yml").is_file())
+        self.assertTrue((self.settings.runs_dir / "ABC-MISSING/context-001.md").is_file())
+        self.assertEqual(1, json.loads((self.settings.runs_dir / "ABC-MISSING/session.json").read_text())["requests"])
+
+        start_session(self.settings, "ABC-UNSAFE", "Reject an unsafe direct file path.")
+        unsafe = request.replace("src/main/resources/guessed-missing.yml", "../../outside.txt")
+        with self.assertRaisesRegex(BrainError, "Unsafe file path"):
+            create_context(self.settings, "ABC-UNSAFE", unsafe)
+        self.assertFalse((self.settings.runs_dir / "ABC-UNSAFE/request-001.yml").exists())
+        self.assertFalse((self.settings.runs_dir / "ABC-UNSAFE/context-001.md").exists())
+
     def test_ai_reply_routing_duplicate_detection_and_no_progress(self) -> None:
         start_session(self.settings, "ABC-ROUTE", "Investigate eligibility.")
         conversation = response_preview("Which production profile is active?", self.settings, "ABC-ROUTE")
@@ -414,6 +444,8 @@ else:
         kit = create_m365_agent_kit(self.settings)
         self.assertLessEqual(len(kit["instructions"]), 8000)
         self.assertIn("The user never needs to remind you", kit["instructions"])
+        self.assertIn("Never guess a file path", kit["instructions"])
+        self.assertIn("use `searches:` first", kit["instructions"])
         self.assertIn("customer-service", kit["knowledge"])
         self.assertIn("Investigate a ticket", kit["suggested_prompts"])
         self.assertTrue(Path(kit["suggested_prompts_path"]).is_file())

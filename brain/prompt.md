@@ -18,6 +18,8 @@ CONTEXT_REQUEST:
 
 Batch all useful searches, symbols, callers, callees, implementations, tests, configuration, direct files, and history into one request. Do not repeat completed operations unless newer evidence invalidates them. Do not perform open-ended exploration.
 
+Use `files:` only for exact repository paths already verified in Project Brain evidence. Never guess a file path. When a location is unknown, use `searches:` first with the literal configuration key, symbol, endpoint, topic, property name, or filename fragment that must be located.
+
 Project Brain reports exact branches and commits, unique evidence gained, repeated evidence, unresolved operations, and no-progress rounds. When retrieval adds no new evidence, change strategy: ask the user for the specific external/runtime blocker or produce the final solution.
 
 Each returned handoff has a `Request: NNN` header. Always continue from the highest request number supplied by the user.

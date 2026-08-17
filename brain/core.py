@@ -869,13 +869,15 @@ def _requested_repos(item: dict[str, Any]) -> list[str]:
     return [str(repo) for repo in repos]
 
 
-def _direct_file(settings: Settings, item: dict[str, Any]) -> Evidence:
+def _direct_file(settings: Settings, item: dict[str, Any]) -> Evidence | None:
     repo = settings.repo(str(item["repo"]))
     relative = str(item["path"])
     root = repo.scan_path.resolve()
     path = (root / relative).resolve()
-    if not path.is_relative_to(root) or not path.is_file():
-        raise BrainError(f"Unsafe or missing file: {repo.name}:{relative}")
+    if not path.is_relative_to(root):
+        raise BrainError(f"Unsafe file path: {repo.name}:{relative}")
+    if not path.is_file():
+        return None
     requested = item.get("lines")
     line_range: tuple[int, int] | None = None
     if requested:
@@ -975,7 +977,11 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
                 bundle.unresolved.append(f"No tests referencing `{name}` were found")
 
     for item in request["files"]:
-        bundle.evidence.append(_direct_file(settings, item))
+        evidence = _direct_file(settings, item)
+        if evidence:
+            bundle.evidence.append(evidence)
+        else:
+            bundle.unresolved.append(f"Requested file `{item['repo']}:{item['path']}` was not found")
 
     for item in request["history"]:
         if not isinstance(item, dict) or not item.get("query"):
@@ -1266,44 +1272,50 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
             repo.source_fetched = bool(source.get("fetched"))
             repo.source_warning = str(source.get("warning") or "") or None
     number = int(state.get("requests") or 0) + 1
-    (directory / f"request-{number:03d}.yml").write_text(request_text.rstrip() + "\n", encoding="utf-8")
-    bundle = retrieve_context(settings, request, include_diff=include_diff)
-    evidence_keys = {
-        hashlib.sha256(
-            f"{item.repo}\0{item.path}\0{item.line_start}\0{item.line_end}\0{item.content}".encode("utf-8")
-        ).hexdigest()
-        for item in bundle.evidence
-    }
-    known_keys = set(state.get("evidence_keys") or [])
-    new_evidence = evidence_keys - known_keys
-    no_progress_rounds = 0 if new_evidence else int(state.get("no_progress_rounds") or 0) + 1
-    progress = {
-        "operations": plan["operation_count"],
-        "new_evidence": len(new_evidence),
-        "known_evidence": len(evidence_keys & known_keys),
-        "no_progress_rounds": no_progress_rounds,
-        "history": list(state.get("request_history") or []),
-    }
-    content = pack_context(settings, ticket, number, bundle, progress)
+    request_path = directory / f"request-{number:03d}.yml"
     path = directory / f"context-{number:03d}.md"
-    path.write_text(content, encoding="utf-8")
-    state["requests"] = number
-    state["status"] = "waiting_for_ai"
-    state["no_progress_rounds"] = no_progress_rounds
-    state["evidence_keys"] = sorted(known_keys | evidence_keys)
-    history = list(state.get("request_history") or [])
-    history.append({
-        "number": number,
-        "objective": plan["objective"],
-        "signature": plan["signature"],
-        "source_signature": state.get("source_signature"),
-        "operations": plan["operation_count"],
-        "new_evidence": len(new_evidence),
-        "unresolved": len(bundle.unresolved),
-        "created_at": datetime.now(UTC).isoformat(),
-    })
-    state["request_history"] = history
-    save_session(settings, ticket, state)
+    try:
+        bundle = retrieve_context(settings, request, include_diff=include_diff)
+        evidence_keys = {
+            hashlib.sha256(
+                f"{item.repo}\0{item.path}\0{item.line_start}\0{item.line_end}\0{item.content}".encode("utf-8")
+            ).hexdigest()
+            for item in bundle.evidence
+        }
+        known_keys = set(state.get("evidence_keys") or [])
+        new_evidence = evidence_keys - known_keys
+        no_progress_rounds = 0 if new_evidence else int(state.get("no_progress_rounds") or 0) + 1
+        progress = {
+            "operations": plan["operation_count"],
+            "new_evidence": len(new_evidence),
+            "known_evidence": len(evidence_keys & known_keys),
+            "no_progress_rounds": no_progress_rounds,
+            "history": list(state.get("request_history") or []),
+        }
+        content = pack_context(settings, ticket, number, bundle, progress)
+        request_path.write_text(request_text.rstrip() + "\n", encoding="utf-8")
+        path.write_text(content, encoding="utf-8")
+        state["requests"] = number
+        state["status"] = "waiting_for_ai"
+        state["no_progress_rounds"] = no_progress_rounds
+        state["evidence_keys"] = sorted(known_keys | evidence_keys)
+        history = list(state.get("request_history") or [])
+        history.append({
+            "number": number,
+            "objective": plan["objective"],
+            "signature": plan["signature"],
+            "source_signature": state.get("source_signature"),
+            "operations": plan["operation_count"],
+            "new_evidence": len(new_evidence),
+            "unresolved": len(bundle.unresolved),
+            "created_at": datetime.now(UTC).isoformat(),
+        })
+        state["request_history"] = history
+        save_session(settings, ticket, state)
+    except Exception:
+        request_path.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+        raise
     return content, path, number
 
 

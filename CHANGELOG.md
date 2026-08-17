@@ -2,6 +2,19 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.5.4] - 2026-08-17
+
+### Fixed
+
+- Treat an AI-requested file that does not exist as an `Unresolved` operation,
+  allowing the rest of the batched searches and the numbered context handoff to
+  complete.
+- Commit request/context artifacts only after retrieval succeeds, and remove
+  orphaned artifacts when a genuinely fatal or unsafe operation aborts a round.
+  Retrying an old half-written round now safely reuses its expected number.
+- Instruct chat agents to use direct file retrieval only for previously verified
+  paths and to search first whenever the exact location is unknown.
+
 ## [0.5.3] - 2026-08-17
 
 ### Fixed
@@ -199,6 +212,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.5.4]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.4
 [0.5.3]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.3
 [0.5.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.2
 [0.5.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.1

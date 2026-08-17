@@ -37,7 +37,7 @@ then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.3"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.4"
 ```
 
 Upgrade later with:
@@ -49,7 +49,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.3"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.4"
 ```
 
 ### From a source checkout
@@ -407,6 +407,13 @@ conversation so it retains earlier documents, human answers, and evidence. The
 
 The strict `brain ctx` command remains useful for automation when the input is
 known to contain a `CONTEXT_REQUEST`.
+
+If the AI guesses a direct file path that does not exist, Brain records that
+operation under `Unresolved`, completes the remaining batched operations, and
+still produces the numbered `context-NNN.md`. Unsafe paths remain rejected. A
+request number is committed only when its context artifact is also produced.
+The generated AI instructions permit `files:` only for paths already verified
+in Brain evidence; an unknown location must be found with `searches:` first.
 
 Old investigations can be removed from **Project overview** with **Delete
 history**. The confirmation names the ticket; this deletes only `.runs/TICKET`
