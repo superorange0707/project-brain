@@ -20,6 +20,7 @@ from brain.core import (
     create_context,
     create_feedback,
     deliver,
+    discover_and_configure_repositories,
     generate_map,
     load_settings,
     load_index_state,
@@ -374,7 +375,9 @@ else:
     def test_final_solution_m365_handoff_and_agent_kit(self) -> None:
         start, _ = start_session(self.settings, "ABC-M365", "Prepare an M365 handoff.")
         first, _ = deliver(self.settings, "ABC-M365", start, "m365", copy=False)
-        self.assertEqual("current-handoff.md", first[0].name)
+        self.assertEqual("ABC-M365-current.md", first[0].name)
+        self.assertEqual(self.settings.generated_dir / "handoffs", first[0].parent)
+        self.assertTrue((self.settings.runs_dir / "ABC-M365/current-handoff.md").is_file())
 
         final_text = "FINAL_SOLUTION\n\nChange `CustomerChangedListener.java`."
         final_path = archive_final_solution(self.settings, "ABC-M365", final_text)
@@ -388,6 +391,8 @@ else:
         self.assertLessEqual(len(kit["instructions"]), 8000)
         self.assertIn("The user never needs to remind you", kit["instructions"])
         self.assertIn("customer-service", kit["knowledge"])
+        self.assertIn("Investigate a ticket", kit["suggested_prompts"])
+        self.assertTrue(Path(kit["suggested_prompts_path"]).is_file())
         self.assertTrue(Path(kit["setup_path"]).is_file())
 
     def test_implementation_feedback_packages_observed_results_without_running_them(self) -> None:
@@ -442,6 +447,60 @@ else:
 
 
 class InitTest(unittest.TestCase):
+    def test_refresh_discovers_new_repositories_and_can_be_opted_out(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo-a/.git").mkdir(parents=True)
+            config = root / "brain.toml"
+            config.write_text(
+                '[project]\nname="refresh-discovery"\n[graph]\nenabled=false\n'
+                '[[repositories]]\nname="repo-a"\npath="repo-a"\n',
+                encoding="utf-8",
+            )
+            (root / "repo-b/.git").mkdir(parents=True)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(0, main(["-c", str(config), "refresh", "--no-fetch"]))
+            self.assertIn("Discovered and configured: repo-b", output.getvalue())
+            self.assertIn('name = "repo-b"', config.read_text(encoding="utf-8"))
+
+            (root / "repo-c/.git").mkdir(parents=True)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, main(["-c", str(config), "refresh", "--no-fetch", "--no-discover"]))
+            self.assertNotIn('name = "repo-c"', config.read_text(encoding="utf-8"))
+
+    def test_new_repositories_are_appended_without_rewriting_existing_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "team-a/service"
+            second = root / "team-b/service"
+            (first / ".git").mkdir(parents=True)
+            (second / ".git").mkdir(parents=True)
+            (root / "state/ignored/.git").mkdir(parents=True)
+            config = root / "brain.toml"
+            config.write_text(
+                '[project]\nname="discovery"\n[graph]\nenabled=false\n'
+                '[[repositories]]\nname="service"\npath="team-a/service"\n'
+                'description="Keep this description"\ntags=["existing"]\n',
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config)
+            additions = discover_and_configure_repositories(settings)
+            self.assertEqual(["team-b-service"], [repo.name for repo in additions])
+            self.assertEqual([], discover_and_configure_repositories(settings))
+
+            content = config.read_text(encoding="utf-8")
+            self.assertEqual(2, content.count("[[repositories]]"))
+            self.assertIn('description="Keep this description"', content)
+            self.assertIn('name = "team-b-service"', content)
+            self.assertNotIn("ignored", content)
+            self.assertEqual(
+                {"service", "team-b-service"},
+                {repo.name for repo in load_settings(config).repositories},
+            )
+
     def test_demo_creates_a_complete_four_repo_investigation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "project-brain-demo"

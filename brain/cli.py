@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -16,6 +15,8 @@ from .core import (
     create_context,
     create_learning_template,
     deliver,
+    discover_and_configure_repositories,
+    discover_git_repositories,
     doctor,
     generate_map,
     git_history,
@@ -56,6 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     sync.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="override one repository branch")
     refresh = commands.add_parser("refresh", help="sync repositories and regenerate project intelligence")
     refresh.add_argument("--no-fetch", action="store_true", help="refresh from locally available commits")
+    refresh.add_argument("--no-discover", action="store_true", help="do not add newly cloned repositories")
     refresh.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="override one repository branch")
     commands.add_parser("map", help="regenerate deterministic project facts")
 
@@ -83,6 +85,7 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--target", choices=("claude", "m365"), default="claude")
     start.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     start.add_argument("--no-sync", action="store_true", help="use the last source snapshots")
+    start.add_argument("--no-discover", action="store_true", help="do not add newly cloned repositories during sync")
     start.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="analyze a feature branch in one repository")
     start.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
@@ -152,15 +155,7 @@ def _discover_repos(values: list[str]) -> list[Path]:
     invalid = [path for path in roots if not path.is_dir()]
     if invalid:
         raise BrainError("Repository paths do not exist: " + ", ".join(map(str, invalid)))
-    paths: set[Path] = set()
-    ignored = {".git", ".runs", "state", "generated", "node_modules", "target", "build", ".venv"}
-    for root in roots:
-        for directory, dirs, files in os.walk(root):
-            dirs[:] = [name for name in dirs if name not in ignored]
-            if ".git" in dirs or ".git" in files or (Path(directory) / ".git").exists():
-                paths.add(Path(directory).resolve())
-        if (root / ".git").exists():
-            paths.add(root)
+    paths = set(discover_git_repositories(roots))
     if not paths and len(roots) == 1:
         paths.add(roots[0])
     if not paths:
@@ -184,13 +179,21 @@ def _refresh_all(
     settings,
     *,
     fetch: bool,
-    branch_overrides: dict[str, str] | None = None,
-) -> tuple[list[SyncResult], list[GraphIndexResult]]:
-    results = sync_repositories(settings, fetch=fetch, branch_overrides=branch_overrides)
+    branch_values: list[str] | None = None,
+    discover: bool = True,
+) -> tuple[list, list[SyncResult], list[GraphIndexResult]]:
+    additions = discover_and_configure_repositories(settings) if discover else []
+    overrides = parse_branch_overrides(settings, branch_values or [])
+    results = sync_repositories(settings, fetch=fetch, branch_overrides=overrides)
     snapshot_indexes(settings, changed_only=True)
     generate_map(settings)
     generate_relationship_map(settings)
-    return results, index_graph(settings, defer_lazy=True)
+    return additions, results, index_graph(settings, defer_lazy=True)
+
+
+def _print_discovered(repositories: list) -> None:
+    if repositories:
+        print("Discovered and configured: " + ", ".join(repo.name for repo in repositories))
 
 
 def _init(args: argparse.Namespace) -> int:
@@ -271,7 +274,7 @@ def _init(args: argparse.Namespace) -> int:
             path.write_text(content, encoding="utf-8")
     print(f"Created {config}")
     settings = load_settings(config)
-    results, graphs = _refresh_all(settings, fetch=not args.no_fetch)
+    _, results, graphs = _refresh_all(settings, fetch=not args.no_fetch, discover=False)
     print(f"Configured {len(repos)} repositories and built project intelligence.")
     _print_sync(results)
     _print_graph(graphs)
@@ -296,7 +299,7 @@ def _demo(args: argparse.Namespace) -> int:
 
     config = create_demo(Path(args.path))
     settings = load_settings(config)
-    results, graphs = _refresh_all(settings, fetch=False)
+    _, results, graphs = _refresh_all(settings, fetch=False, discover=False)
     print(f"Created Project Brain demo at {settings.root}")
     _print_sync(results)
     _print_graph(graphs)
@@ -363,11 +366,13 @@ def execute(args: argparse.Namespace) -> int:
         )
         return 0
     if args.command == "refresh":
-        results, graphs = _refresh_all(
+        additions, results, graphs = _refresh_all(
             settings,
             fetch=not args.no_fetch,
-            branch_overrides=parse_branch_overrides(settings, args.branch),
+            branch_values=args.branch,
+            discover=not args.no_discover,
         )
+        _print_discovered(additions)
         _print_sync(results)
         _print_graph(graphs)
         print(f"Generated {settings.generated_dir / 'PROJECT_FACTS.md'}")
@@ -404,17 +409,20 @@ def execute(args: argparse.Namespace) -> int:
             print("No matching history.")
         return 0
     if args.command == "start":
+        additions = []
         synced: list[SyncResult] = []
         graphs: list[GraphIndexResult] = []
         if args.no_sync and args.branch:
             raise BrainError("--branch requires sync; remove --no-sync")
         if not args.no_sync:
-            synced, graphs = _refresh_all(
+            additions, synced, graphs = _refresh_all(
                 settings,
                 fetch=True,
-                branch_overrides=parse_branch_overrides(settings, args.branch),
+                branch_values=args.branch,
+                discover=not args.no_discover,
             )
             if not args.json:
+                _print_discovered(additions)
                 _print_sync(synced)
                 _print_graph(graphs)
         elif not (settings.generated_dir / "PROJECT_FACTS.md").exists():
@@ -428,6 +436,7 @@ def execute(args: argparse.Namespace) -> int:
                 "ticket": args.ticket,
                 "path": str(path),
                 "delivery": {"current": current, "total": len(parts), "parts": [str(part) for part in parts], "copied": copy},
+                "discovered": [repo.name for repo in additions],
                 "sync": [asdict(item) for item in synced],
                 "graph": [asdict(item) for item in graphs],
             }, indent=2))

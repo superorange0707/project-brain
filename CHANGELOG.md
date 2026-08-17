@@ -2,6 +2,27 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.5.1] - 2026-08-17
+
+### Added
+
+- Automatically discover newly cloned Git repositories during `brain refresh`,
+  normal ticket startup, and **Discover & sync** in the local cockpit.
+- Append only new repository blocks to `brain.toml`, preserving every existing
+  description, tag, branch override, comment, and custom setting.
+- Add `--no-discover` to `brain refresh` and `brain start` for intentionally
+  narrow workspaces.
+- Generate four ready-to-paste M365 Agent Builder prompts in
+  `SUGGESTED_PROMPTS.md`.
+
+### Changed
+
+- Deliver M365 handoffs through the Finder-visible
+  `generated/handoffs/TICKET-current.md` path while retaining internal history
+  under `.runs/TICKET/`.
+- Stop repository discovery at each Git root so refreshing a large multi-repo
+  parent does not walk every source file.
+
 ## [0.5.0] - 2026-08-16
 
 ### Added
@@ -152,6 +173,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.5.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.1
 [0.5.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.0
 [0.4.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.4.1
 [0.4.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.4.0

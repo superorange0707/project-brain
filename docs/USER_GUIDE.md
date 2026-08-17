@@ -37,7 +37,7 @@ then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.1"
 ```
 
 Upgrade later with:
@@ -49,7 +49,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.1"
 ```
 
 ### From a source checkout
@@ -120,6 +120,13 @@ generates project facts and relationships. Structural repositories are indexed
 on demand when a symbol request first implicates them, so a 30-repo workspace does
 not pay the startup cost for every repo. Run `brain doctor` only when you want the
 detailed health report.
+
+After initialization, clone new repositories normally. The next `brain refresh`,
+synced ticket start, or cockpit **Discover & sync** automatically finds them and
+appends only the missing `[[repositories]]` blocks to `brain.toml`. Existing
+descriptions, tags, comments, branch overrides, and settings are not rewritten.
+Use `--no-discover` when a workspace intentionally excludes other Git repos below
+the same parent folder.
 
 ### What “latest” means
 
@@ -289,6 +296,7 @@ This creates:
 generated/m365-agent/
 ├── INSTRUCTIONS.md
 ├── PROJECT_KNOWLEDGE.md
+├── SUGGESTED_PROMPTS.md
 └── SETUP.md
 ```
 
@@ -296,6 +304,8 @@ Paste `INSTRUCTIONS.md` into the Agent Builder **Instructions** field. Add
 `PROJECT_KNOWLEDGE.md` plus approved IPF, architecture, API, deployment, and
 coding-standard documents to **Knowledge**. Keep operational instructions in the
 Instructions field rather than hiding them in a knowledge document.
+Add the four title/prompt pairs from `SUGGESTED_PROMPTS.md` to **Suggested
+prompts**.
 
 Recommended settings:
 
@@ -362,9 +372,10 @@ generated facts, and glossary. For Claude, it is copied automatically. Use
 brain start ABC-1234 --ticket-file ticket.md --target m365
 ```
 
-Upload the printed `.runs/ABC-1234/current-handoff.md` file to the dedicated M365
-Agent. Brain replaces this same file after every retrieval and implementation
-feedback package, so you never create or rename a Markdown file manually.
+Upload the printed `generated/handoffs/ABC-1234-current.md` file to the dedicated
+M365 Agent. This folder is visible in Finder. Brain replaces the same file after
+every retrieval and implementation feedback package, while retaining internal
+history under `.runs/`, so you never create or rename a Markdown file manually.
 
 ## 9. Continue an AI investigation
 
@@ -386,7 +397,7 @@ For M365, use:
 brain continue ABC-1234 --file ai-response.txt --target m365
 ```
 
-Then upload the refreshed `.runs/ABC-1234/current-handoff.md`. Use the same M365
+Then upload the refreshed `generated/handoffs/ABC-1234-current.md`. Use the same M365
 Agent conversation so it retains earlier documents, human answers, and evidence.
 
 The strict `brain ctx` command remains useful for automation when the input is

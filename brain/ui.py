@@ -20,6 +20,7 @@ from .core import (
     create_context,
     create_feedback,
     deliver,
+    discover_and_configure_repositories,
     generate_map,
     load_index_state,
     load_source_state,
@@ -134,14 +135,20 @@ def _refresh(
     settings: Settings,
     *,
     fetch: bool = True,
-    branch_overrides: dict[str, str] | None = None,
+    branch_values: list[str] | None = None,
 ) -> dict[str, Any]:
-    synced = sync_repositories(settings, fetch=fetch, branch_overrides=branch_overrides)
+    additions = discover_and_configure_repositories(settings)
+    overrides = parse_branch_overrides(settings, branch_values or [])
+    synced = sync_repositories(settings, fetch=fetch, branch_overrides=overrides)
     snapshot_indexes(settings, changed_only=True)
     generate_map(settings)
     generate_relationship_map(settings)
     graphs = index_graph(settings, defer_lazy=True)
-    return {"sync": [asdict(item) for item in synced], "graph": [asdict(item) for item in graphs]}
+    return {
+        "discovered": [repo.name for repo in additions],
+        "sync": [asdict(item) for item in synced],
+        "graph": [asdict(item) for item in graphs],
+    }
 
 
 def _delivery(settings: Settings, ticket: str, part: int | None = None) -> dict[str, Any]:
@@ -154,7 +161,8 @@ def _delivery(settings: Settings, ticket: str, part: int | None = None) -> dict[
     current = max(1, min(len(paths), current))
     directory = session_dir(settings, ticket).resolve()
     path = paths[current - 1].resolve()
-    if not path.is_relative_to(directory) or not path.is_file():
+    handoffs = (settings.generated_dir / "handoffs").resolve()
+    if not (path.is_relative_to(directory) or path.is_relative_to(handoffs)) or not path.is_file():
         raise BrainError("Invalid delivery path in session state")
     return {"current": current, "total": len(paths), "content": path.read_text(encoding="utf-8"), "path": str(path)}
 
@@ -312,11 +320,10 @@ class _Handler(BaseHTTPRequestHandler):
             branch_lines = [line.strip() for line in str(body.get("branches") or "").splitlines() if line.strip()]
             if branch_lines and not body.get("sync", True):
                 raise BrainError("Feature branch overrides require repository sync")
-            overrides = parse_branch_overrides(settings, branch_lines)
             refresh = (
-                _refresh(settings, fetch=True, branch_overrides=overrides)
+                _refresh(settings, fetch=True, branch_values=branch_lines)
                 if body.get("sync", True)
-                else {"sync": [], "graph": []}
+                else {"discovered": [], "sync": [], "graph": []}
             )
             content, artifact = start_session(settings, ticket, ticket_text)
             target = _target(body)

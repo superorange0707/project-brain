@@ -70,6 +70,7 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("Continue with AI", html)
         self.assertIn("Retrieval plan", html)
         self.assertIn("M365 agent", html)
+        self.assertIn("Discover &amp; sync", html)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         with self.assertRaises(HTTPError) as caught:
             self.get("/api/status", authorized=False)
@@ -126,6 +127,7 @@ CONTEXT_REQUEST:
         self.assertEqual("final_solution", final["data"]["kind"])
         self.assertEqual("ready_to_implement", final["data"]["session"]["status"])
         self.assertTrue((self.root / ".runs/UI-1/current-handoff.md").is_file())
+        self.assertTrue((self.root / "generated/handoffs/UI-1-current.md").is_file())
 
         _, feedback, _ = self.post(
             "/api/feedback",
@@ -155,6 +157,7 @@ CONTEXT_REQUEST:
 
         _, kit, _ = self.post("/api/agent-kit", {})
         self.assertIn("Project Brain", kit["data"]["instructions"])
+        self.assertIn("Investigate a ticket", kit["data"]["suggested_prompts"])
         self.assertTrue(Path(kit["data"]["instructions_path"]).is_file())
 
     def test_artifact_path_traversal_is_rejected(self) -> None:
@@ -163,6 +166,18 @@ CONTEXT_REQUEST:
             self.get("/api/artifact?ticket=UI-2&name=" + quote("../session.json", safe=""))
         self.assertEqual(400, caught.exception.code)
         caught.exception.close()
+
+    def test_sync_discovers_a_newly_cloned_repository_once(self) -> None:
+        (self.root / "service-b/.git").mkdir(parents=True)
+
+        _, refreshed, _ = self.post("/api/sync", {})
+        self.assertEqual(["service-b"], refreshed["data"]["discovered"])
+        self.assertEqual(2, refreshed["data"]["status"]["summary"]["repositories"])
+        self.assertIn('name = "service-b"', self.config.read_text(encoding="utf-8"))
+
+        _, repeated, _ = self.post("/api/sync", {})
+        self.assertEqual([], repeated["data"]["discovered"])
+        self.assertEqual(1, self.config.read_text(encoding="utf-8").count('name = "service-b"'))
 
 
 class UiShutdownTest(unittest.TestCase):

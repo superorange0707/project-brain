@@ -189,7 +189,7 @@
         <div><h1 id="page-title">Project overview</h1><p class="subtitle" id="project-name">Loading local project…</p></div>
         <div class="top-actions">
           <button class="button ghost" id="refresh-button">Refresh</button>
-          <button class="button" id="sync-button">Sync repositories</button>
+          <button class="button" id="sync-button">Discover &amp; sync</button>
         </div>
       </header>
 
@@ -432,7 +432,10 @@
     document.getElementById("refresh-button").addEventListener("click", function () { loadStatus().then(function () { showToast("Status refreshed"); }).catch(report); });
     document.getElementById("sync-button").addEventListener("click", async function () {
       var button = this; busy(button, true, "Syncing…");
-      try { var data = await api("/api/sync", {method:"POST",body:"{}"}); state.status = data.status; await loadStatus(); showToast("Repositories synced and indexed"); }
+      try {
+        var data = await api("/api/sync", {method:"POST",body:"{}"}); state.status = data.status; await loadStatus();
+        showToast(data.discovered.length ? "Added " + data.discovered.length + " new repositories and synced" : "Repositories synced and indexed");
+      }
       catch (error) { report(error); } finally { busy(button, false); }
     });
 
@@ -451,7 +454,7 @@
         document.getElementById("request-ticket").value = data.ticket;
         document.getElementById("review-ticket").value = data.ticket;
         document.getElementById("request-target").value = body.target;
-        showToast("Investigation ready — copy the context for your AI");
+        showToast(data.discovered.length ? "New repositories added — investigation ready" : "Investigation ready — copy the context for your AI");
       } catch (error) { report(error); } finally { busy(button, false); }
     });
 
@@ -556,7 +559,7 @@
         document.getElementById("agent-instructions").textContent = data.instructions;
         var paths = document.getElementById("agent-paths");
         paths.style.display = "block";
-        paths.textContent = "Created " + data.instructions_path + " · " + data.knowledge_path + " · " + data.setup_path;
+        paths.textContent = "Created " + data.instructions_path + " · " + data.knowledge_path + " · " + data.suggested_prompts_path + " · " + data.setup_path;
         showToast("M365 Agent setup kit generated");
       } catch (error) { report(error); } finally { busy(button, false); }
     });

@@ -94,20 +94,42 @@ def create_m365_agent_kit(settings: Settings) -> dict[str, Any]:
     knowledge_path = directory / "PROJECT_KNOWLEDGE.md"
     knowledge_path.write_text("\n".join(knowledge).rstrip() + "\n", encoding="utf-8")
 
+    suggested = """# Suggested prompts
+
+## Investigate a ticket
+
+Investigate this ticket as a read-only coding agent. I will attach the latest Project Brain handoff. Reconstruct the relevant multi-repository flow, identify blocking unknowns, and decide what evidence is needed next.
+
+## Continue with Brain evidence
+
+Continue the investigation using the attached latest Project Brain handoff. Update what is VERIFIED, INFERRED, BLOCKING UNKNOWN, and NON-BLOCKING UNKNOWN. Request more repository evidence only when it would materially change the implementation.
+
+## Read internal documentation
+
+Use the attached internal IPF documentation together with the ticket and repository evidence. Explain what the document proves, whether it conflicts with the current implementation, and how it changes the proposed solution.
+
+## Produce the implementation plan
+
+Decide whether enough evidence now exists to implement safely. If yes, return FINAL_SOLUTION with exact repositories, files, methods, configuration, suggested changes, tests, validation commands, edge cases, and implementation order. Otherwise ask only the specific blocking question or return one focused CONTEXT_REQUEST.
+"""
+    suggested_path = directory / "SUGGESTED_PROMPTS.md"
+    suggested_path.write_text(suggested, encoding="utf-8")
+
     setup = f"""# Microsoft 365 Copilot Agent setup
 
 1. In Microsoft 365 Copilot, create a new agent and open **Configure**.
 2. Name it `Project Brain Engineer` and select **Think deeper** as the default response mode.
 3. Paste the complete contents of `{instructions_path.name}` into **Instructions**.
 4. Add `{knowledge_path.name}` plus approved architecture, IPF, API, deployment, and coding-standard documents to **Knowledge**.
-5. Enable **Only use specified sources**. Disable broad web, email, Teams, and people sources unless this project needs them.
-6. Create the agent and test it with the starter prompt below.
+5. Add the four title/prompt pairs from `{suggested_path.name}` to **Suggested prompts**.
+6. Enable **Only use specified sources**. Disable broad web, email, Teams, and people sources unless this project needs them.
+7. Create the agent and test it with the starter prompt below.
 
 Starter prompt:
 
 > Investigate this ticket as a read-only coding agent. I will attach the Project Brain start package. Ask me directly for business, document, or runtime facts; emit a CONTEXT_REQUEST only when local repository evidence is required; return FINAL_SOLUTION when the implementation is ready.
 
-For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365`, upload `.runs/TICKET/current-handoff.md`, and keep using the same agent conversation.
+For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365`, upload `generated/handoffs/TICKET-current.md`, and keep using the same agent conversation.
 """
     setup_path = directory / "SETUP.md"
     setup_path.write_text(setup, encoding="utf-8")
@@ -115,8 +137,10 @@ For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365`
         "directory": str(directory),
         "instructions_path": str(instructions_path),
         "knowledge_path": str(knowledge_path),
+        "suggested_prompts_path": str(suggested_path),
         "setup_path": str(setup_path),
         "instructions": instructions,
         "knowledge": knowledge_path.read_text(encoding="utf-8"),
+        "suggested_prompts": suggested,
         "setup": setup,
     }

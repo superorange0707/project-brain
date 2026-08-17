@@ -71,7 +71,7 @@ Download the archive for your CPU from the
 extract it, and place both executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.5.0-macos-arm64.tar.gz
+tar -xzf project-brain-v0.5.1-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp ~/.local/bin/
 ```
@@ -82,19 +82,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.1"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.1"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.5.0/project_brain_context-0.5.0-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.5.1/project_brain_context-0.5.1-py3-none-any.whl
 ```
 
 Then verify:
@@ -119,6 +119,12 @@ relationship map. By default it prefers each repo's fresh `origin/develop` or
 `origin/development`, then falls back to that repo's remote default branch. A
 fetch failure is reported per repo and falls back to the newest locally available
 commit; it never blocks the other repositories.
+
+Clone another Git repository anywhere below this project root and the next
+`brain refresh` automatically appends it to `brain.toml`, fetches it, snapshots
+it, and rebuilds cross-repository intelligence. Existing repository metadata and
+custom settings are preserved. Use `--no-discover` only for a deliberately fixed
+workspace.
 
 For SSH remotes, one temporary multiplexed connection is reused per host during
 the sync. Only the first fetch may interactively request a passphrase; every later
@@ -179,8 +185,9 @@ brain agent-kit m365
 ```
 
 Paste `generated/m365-agent/INSTRUCTIONS.md` into the Agent Builder Instructions
-field and add `PROJECT_KNOWLEDGE.md` plus approved internal architecture/IPF docs
-to Knowledge. The AI then permanently knows that it should talk to you directly
+field, add the entries from `SUGGESTED_PROMPTS.md`, and add
+`PROJECT_KNOWLEDGE.md` plus approved internal architecture/IPF docs to Knowledge.
+The AI then permanently knows that it should talk to you directly
 for business, document, runtime, and environment facts, and emit a
 `CONTEXT_REQUEST` only for local repository evidence.
 
@@ -188,7 +195,7 @@ Start every M365 ticket with `--target m365`. Brain continually replaces one
 stable file, so upload the same path each round:
 
 ```text
-.runs/ABC-1234/current-handoff.md
+generated/handoffs/ABC-1234-current.md
 ```
 
 ### Try the complete workflow without your own repositories
@@ -301,7 +308,7 @@ brain demo              Create a safe four-repository example investigation
 brain sync              Safely fetch all repos and rebuild remote snapshots
 brain doctor            Check config, repositories, git, rg, and freshness
 brain status            Show project health and ticket sessions (optionally JSON)
-brain refresh           Sync and regenerate all project intelligence
+brain refresh           Discover new repos, sync, and regenerate intelligence
 brain search            Search all configured repositories
 brain symbol            Resolve symbol definitions with lexical fallback
 brain trace             Find static callers and likely outbound calls

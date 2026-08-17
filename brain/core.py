@@ -18,6 +18,7 @@ from typing import Any, Iterable
 
 
 IGNORED_DIRS = {".git", ".idea", ".venv", "node_modules", "target", "build", "dist"}
+DISCOVERY_IGNORED_DIRS = IGNORED_DIRS | {".runs", ".codex", ".agents", "state", "generated", "knowledge"}
 PROTOCOL_VERSION = 1
 CODE_SUFFIXES = {
     ".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js",
@@ -82,6 +83,67 @@ class Settings:
 
     def repo(self, name: str) -> Repository:
         return self.repos([name])[0]
+
+
+def discover_git_repositories(roots: Iterable[Path]) -> list[Path]:
+    """Find repository roots without walking every file inside each repository."""
+    paths: set[Path] = set()
+    for root in roots:
+        for directory, dirs, _ in os.walk(root):
+            path = Path(directory)
+            if (path / ".git").exists():
+                paths.add(path.resolve())
+                dirs[:] = []
+                continue
+            dirs[:] = [name for name in dirs if name not in DISCOVERY_IGNORED_DIRS]
+    return sorted(paths)
+
+
+def discover_and_configure_repositories(settings: Settings) -> list[Repository]:
+    """Append newly cloned repositories to brain.toml while preserving existing config."""
+    configured_paths = {repo.path.resolve() for repo in settings.repositories}
+    new_paths = [path for path in discover_git_repositories([settings.root]) if path not in configured_paths]
+    if not new_paths:
+        return []
+    if settings.config_path.suffix.lower() != ".toml":
+        raise BrainError(
+            "New Git repositories were found, but automatic config updates require brain.toml; "
+            "migrate the legacy YAML config or add them manually."
+        )
+
+    all_paths = [repo.path.resolve() for repo in settings.repositories] + new_paths
+    used_names = {repo.name for repo in settings.repositories}
+    additions: list[Repository] = []
+    rows: list[str] = []
+    for path in new_paths:
+        candidate = path.name
+        if sum(other.name == path.name for other in all_paths) > 1 or candidate in used_names:
+            candidate = "-".join(path.relative_to(settings.root).parts)
+        name = candidate
+        counter = 2
+        while name in used_names:
+            name = f"{candidate}-{counter}"
+            counter += 1
+        used_names.add(name)
+        relative = str(path.relative_to(settings.root))
+        rows.extend([
+            "[[repositories]]",
+            f"name = {json.dumps(name)}",
+            f"path = {json.dumps(relative)}",
+            'description = ""',
+            "tags = []",
+            "",
+        ])
+        additions.append(Repository(name=name, path=path))
+
+    existing = settings.config_path.read_text(encoding="utf-8")
+    separator = "\n" if existing.endswith("\n") else "\n\n"
+    temporary = settings.config_path.with_suffix(settings.config_path.suffix + ".tmp")
+    temporary.write_text(existing + separator + "\n".join(rows), encoding="utf-8")
+    shutil.copymode(settings.config_path, temporary)
+    temporary.replace(settings.config_path)
+    settings.repositories.extend(additions)
+    return additions
 
 
 @dataclass
@@ -1355,7 +1417,11 @@ def deliver(settings: Settings, ticket: str, text: str, target: str, *, copy: bo
     directory = session_dir(settings, ticket)
     state = session_state(settings, ticket)
     if target == "m365":
-        handoff = directory / "current-handoff.md"
+        internal_handoff = directory / "current-handoff.md"
+        internal_handoff.write_text(text, encoding="utf-8")
+        handoff_directory = settings.generated_dir / "handoffs"
+        handoff_directory.mkdir(parents=True, exist_ok=True)
+        handoff = handoff_directory / f"{directory.name}-current.md"
         handoff.write_text(text, encoding="utf-8")
         paths = [handoff]
         state["delivery"] = {"target": target, "parts": [str(handoff)], "current": 1, "handoff": str(handoff)}
