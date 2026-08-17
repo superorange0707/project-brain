@@ -1435,7 +1435,7 @@ def deliver(settings: Settings, ticket: str, text: str, target: str, *, copy: bo
             label = "final"
         else:
             match = re.search(r"(?m)^Request: `(\d+)`", text)
-            label = f"request-{int(match.group(1)):03d}" if match else "update"
+            label = f"context-{int(match.group(1)):03d}" if match else "update"
         handoff = handoff_directory / f"{directory.name}-{label}.md"
         handoff.write_text(text, encoding="utf-8")
         paths = [handoff]

@@ -399,7 +399,7 @@ else:
 
         context, _, _ = create_context(self.settings, "ABC-M365", REQUEST)
         request_handoff, _ = deliver(self.settings, "ABC-M365", context, "m365", copy=False)
-        self.assertEqual("ABC-M365-request-001.md", request_handoff[0].name)
+        self.assertEqual("ABC-M365-context-001.md", request_handoff[0].name)
         self.assertIn("Request: `001`", request_handoff[0].read_text(encoding="utf-8"))
 
         final_text = "FINAL_SOLUTION\n\nChange `CustomerChangedListener.java`."

@@ -1,3 +1,3 @@
 """Project Brain: deterministic codebase context for chat AIs."""
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"

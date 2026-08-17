@@ -37,7 +37,7 @@ then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.2"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.3"
 ```
 
 Upgrade later with:
@@ -49,7 +49,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.2"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.3"
 ```
 
 ### From a source checkout
@@ -373,10 +373,13 @@ brain start ABC-1234 --ticket-file ticket.md --target m365
 ```
 
 Upload the newly printed round-specific file, such as
-`generated/handoffs/ABC-1234-request-010.md`, to the dedicated M365 Agent. The
+`generated/handoffs/ABC-1234-context-010.md`, to the dedicated M365 Agent. The
 changing filename prevents a stale attachment cache. Brain creates it
 automatically, keeps `ABC-1234-current.md` as a stable local alias, and retains
 internal history under `.runs/`; you never create or rename a Markdown file.
+The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
+sent into Brain, while `ABC-1234-context-010.md` is Brain's evidence sent back to
+the AI. Only upload the visible `context-NNN.md` file.
 
 ## 9. Continue an AI investigation
 
@@ -398,12 +401,17 @@ For M365, use:
 brain continue ABC-1234 --file ai-response.txt --target m365
 ```
 
-Then upload the newly printed round-specific handoff. Use the same M365 Agent
+Then upload the newly printed `TICKET-context-NNN.md` handoff. Use the same M365 Agent
 conversation so it retains earlier documents, human answers, and evidence. The
 `Request: NNN` header and filename must both show the new round.
 
 The strict `brain ctx` command remains useful for automation when the input is
 known to contain a `CONTEXT_REQUEST`.
+
+Old investigations can be removed from **Project overview** with **Delete
+history**. The confirmation names the ticket; this deletes only `.runs/TICKET`
+and that ticket's generated handoffs. Repositories, branches, and source files
+are never deleted.
 
 ### `CONTEXT_REQUEST` format
 

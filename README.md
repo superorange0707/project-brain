@@ -71,7 +71,7 @@ Download the archive for your CPU from the
 extract it, and place both executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.5.2-macos-arm64.tar.gz
+tar -xzf project-brain-v0.5.3-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp ~/.local/bin/
 ```
@@ -82,19 +82,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.2"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.3"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.2"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.5.3"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.5.2/project_brain_context-0.5.2-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.5.3/project_brain_context-0.5.3-py3-none-any.whl
 ```
 
 Then verify:
@@ -150,6 +150,8 @@ token. Paste a ticket, click **Start investigation**, and copy the generated
 context to your chat AI. Paste a complete reply into **Continue with AI**. Brain
 routes repository requests, tells you when to answer the AI directly, recognizes a
 final plan, and previews every local operation before it runs.
+Old ticket history can be deleted from **Project overview** with an explicit
+confirmation; repositories and branches are never touched.
 
 Prefer the terminal? Start a ticket investigation directly:
 
@@ -195,12 +197,13 @@ Start every M365 ticket with `--target m365`. Upload the newly printed
 round-specific file each time, for example:
 
 ```text
-generated/handoffs/ABC-1234-request-010.md
+generated/handoffs/ABC-1234-context-010.md
 ```
 
-The changing filename prevents M365 from reusing a cached attachment. Brain also
+The changing filename prevents M365 from reusing a cached attachment. Upload the
+newly printed `context-NNN` file, not the internal `request-NNN.yml`. Brain also
 maintains `ABC-1234-current.md` as a stable local alias; you never create or
-rename either file yourself.
+rename any of these files yourself.
 
 ### Try the complete workflow without your own repositories
 

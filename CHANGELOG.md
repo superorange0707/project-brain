@@ -2,6 +2,19 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.5.3] - 2026-08-17
+
+### Fixed
+
+- Keep Start, AI evidence, implementation review, and selected history outputs
+  separate in the local cockpit instead of mirroring the latest handoff into
+  every panel.
+- Show immutable request/context artifacts as a chronological investigation
+  history while hiding the moving `current-handoff.md` transport alias from the
+  history list.
+- Add a confirmed **Delete history** action that removes only the selected
+  ticket's Brain session and generated handoffs, never repositories or branches.
+
 ## [0.5.2] - 2026-08-17
 
 ### Fixed
@@ -12,7 +25,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Clear the cockpit's processed AI reply so the next response cannot be appended
   to stale input by accident.
 - Give every M365 handoff a round-specific filename such as
-  `TICKET-request-010.md`, preventing file-attachment caches from showing the
+  `TICKET-context-010.md`, preventing file-attachment caches from showing the
   previous round; `TICKET-current.md` remains available as a stable alias.
 
 ## [0.5.1] - 2026-08-17
@@ -186,6 +199,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.5.3]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.3
 [0.5.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.2
 [0.5.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.1
 [0.5.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.0

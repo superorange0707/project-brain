@@ -131,7 +131,7 @@ Starter prompt:
 
 > Investigate this ticket as a read-only coding agent. I will attach the Project Brain start package. Ask me directly for business, document, or runtime facts; emit a CONTEXT_REQUEST only when local repository evidence is required; return FINAL_SOLUTION when the implementation is ready.
 
-For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365`, upload the newly printed round-specific file such as `generated/handoffs/TICKET-request-001.md`, and keep using the same agent conversation. The changing filename prevents M365 from reusing an older attachment; `TICKET-current.md` remains a local alias.
+For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365` and upload the printed `generated/handoffs/TICKET-start.md`. For every later repository round, upload only the newly printed `generated/handoffs/TICKET-context-NNN.md`. Never upload the internal `.runs/TICKET/request-NNN.yml`; it is the AI-to-Brain command, while `context-NNN.md` is Brain's evidence response. The changing filename prevents M365 from reusing an older attachment; `TICKET-current.md` is only a local alias.
 """
     setup_path = directory / "SETUP.md"
     setup_path.write_text(setup, encoding="utf-8")

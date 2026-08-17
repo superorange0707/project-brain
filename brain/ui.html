@@ -98,6 +98,7 @@
     .button.primary { color: #062016; background: var(--accent); border-color: var(--accent); }
     .button.secondary { color: #0c1c28; background: var(--accent-2); border-color: var(--accent-2); }
     .button.ghost { background: transparent; }
+    .button.danger { color: #ffd4d7; border-color: rgba(255,127,135,.55); background: rgba(255,127,135,.08); }
     .button:disabled { opacity: .45; cursor: not-allowed; transform: none; }
     .check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
     .check input { width: auto; accent-color: var(--accent); }
@@ -204,11 +205,11 @@
           </article>
           <article class="card wide">
             <h2>Investigations</h2><p class="help">Open a previous ticket, its requests, evidence, and implementation feedback.</p>
-            <div class="row"><div class="grow"><select id="session-select"><option value="">No investigations yet</option></select></div><button class="button" id="open-session">Open</button></div>
+            <div class="row"><div class="grow"><select id="session-select"><option value="">No investigations yet</option></select></div><button class="button" id="open-session">Open</button><button class="button danger" id="delete-session" disabled>Delete history</button></div>
             <div id="artifact-list" class="artifacts" style="margin-top:14px"></div>
           </article>
           <article class="card wide">
-            <div class="row"><div class="grow"><h2>Investigation artifact</h2></div><button class="button secondary" data-copy-output>Copy for AI</button></div>
+            <div class="row"><div class="grow"><h2>Selected history artifact</h2></div><button class="button secondary" data-copy-output>Copy for AI</button></div>
             <pre class="output" data-output>Select an investigation artifact to inspect it.</pre>
             <div class="deliverybar" data-deliverybar><button class="button ghost" data-prev>Previous part</button><span data-part>0 / 0</span><button class="button ghost" data-next>Next part</button></div>
           </article>
@@ -325,7 +326,7 @@
   <script>
     "use strict";
     var token = new URLSearchParams(location.search).get("token") || "";
-    var state = { status: null, preview: null, ticket: "", delivery: { current: 0, total: 0, content: "" } };
+    var state = { status: null, preview: null, ticket: "", deliveries: {} };
     var titles = { overview: "Project overview", ticket: "Start a ticket", request: "Continue with AI", review: "Review implementation", agent: "M365 Agent setup" };
 
     function esc(value) {
@@ -401,29 +402,35 @@
           state.ticket = selected;
         }
       });
+      document.getElementById("delete-session").disabled = !document.getElementById("session-select").value;
       return data;
     }
-    function setDelivery(data) {
-      state.delivery = data || {current:0,total:0,content:""};
-      document.querySelectorAll("[data-output]").forEach(function (output) { output.textContent = state.delivery.content || "No context available."; });
-      document.querySelectorAll("[data-deliverybar]").forEach(function (bar) { bar.classList.toggle("visible", state.delivery.total > 0); });
-      document.querySelectorAll("[data-part]").forEach(function (part) {
-        part.textContent = state.delivery.current + " / " + state.delivery.total + (state.delivery.path ? " · " + state.delivery.path : "");
+    function setDelivery(data, viewId) {
+      var delivery = data || {current:0,total:0,content:""};
+      var view = document.getElementById(viewId);
+      state.deliveries[viewId] = delivery;
+      view.querySelectorAll("[data-output]").forEach(function (output) { output.textContent = delivery.content || "No context available."; });
+      view.querySelectorAll("[data-deliverybar]").forEach(function (bar) { bar.classList.toggle("visible", delivery.total > 0); });
+      view.querySelectorAll("[data-part]").forEach(function (part) {
+        part.textContent = delivery.current + " / " + delivery.total + (delivery.path ? " · " + delivery.path : "");
       });
-      document.querySelectorAll("[data-prev]").forEach(function (button) { button.disabled = state.delivery.current <= 1; });
-      document.querySelectorAll("[data-next]").forEach(function (button) { button.disabled = state.delivery.current >= state.delivery.total; });
+      view.querySelectorAll("[data-prev]").forEach(function (button) { button.disabled = delivery.current <= 1; });
+      view.querySelectorAll("[data-next]").forEach(function (button) { button.disabled = delivery.current >= delivery.total; });
     }
-    async function moveDelivery(delta) {
-      if (!state.ticket || !state.delivery.total) return;
-      var part = Math.max(1, Math.min(state.delivery.total, state.delivery.current + delta));
-      setDelivery(await api("/api/delivery?ticket=" + encodeURIComponent(state.ticket) + "&part=" + part));
+    async function moveDelivery(delta, button) {
+      var viewId = button.closest(".view").id;
+      var delivery = state.deliveries[viewId] || {current:0,total:0};
+      if (!state.ticket || !delivery.total) return;
+      var part = Math.max(1, Math.min(delivery.total, delivery.current + delta));
+      setDelivery(await api("/api/delivery?ticket=" + encodeURIComponent(state.ticket) + "&part=" + part), viewId);
     }
-    document.querySelectorAll("[data-prev]").forEach(function (button) { button.addEventListener("click", function () { moveDelivery(-1).catch(report); }); });
-    document.querySelectorAll("[data-next]").forEach(function (button) { button.addEventListener("click", function () { moveDelivery(1).catch(report); }); });
+    document.querySelectorAll("[data-prev]").forEach(function (button) { button.addEventListener("click", function () { moveDelivery(-1, button).catch(report); }); });
+    document.querySelectorAll("[data-next]").forEach(function (button) { button.addEventListener("click", function () { moveDelivery(1, button).catch(report); }); });
     document.querySelectorAll("[data-copy-output]").forEach(function (button) {
       button.addEventListener("click", async function () {
-        if (!state.delivery.content) return showToast("Nothing to copy yet");
-        await copyText(state.delivery.content);
+        var delivery = state.deliveries[button.closest(".view").id] || {};
+        if (!delivery.content) return showToast("Nothing to copy yet");
+        await copyText(delivery.content);
         showToast("Current context part copied");
       });
     });
@@ -450,7 +457,7 @@
           target: document.getElementById("ticket-target").value
         };
         var data = await api("/api/start", {method:"POST",body:JSON.stringify(body)});
-        state.ticket = data.ticket; setDelivery(data.delivery); await loadStatus();
+        state.ticket = data.ticket; setDelivery(data.delivery, "view-ticket"); await loadStatus();
         document.getElementById("request-ticket").value = data.ticket;
         document.getElementById("review-ticket").value = data.ticket;
         document.getElementById("request-target").value = body.target;
@@ -507,7 +514,7 @@
         };
         var data = await api("/api/continue", {method:"POST",body:JSON.stringify(body)});
         state.ticket = data.ticket;
-        if (data.delivery) setDelivery(data.delivery);
+        if (data.delivery) setDelivery(data.delivery, "view-request");
         await loadStatus();
         completed = true;
         showToast(data.kind === "final_solution" ? "Final plan archived — ready to implement" : "Evidence ready — return it to the same AI chat");
@@ -537,7 +544,7 @@
           target: "claude"
         };
         var data = await api("/api/feedback", {method:"POST",body:JSON.stringify(body)});
-        state.ticket = data.ticket; setDelivery(data.delivery); await loadStatus();
+        state.ticket = data.ticket; setDelivery(data.delivery, "view-review"); await loadStatus();
         showToast("Review package ready");
       } catch (error) { report(error); } finally { busy(button, false); }
     });
@@ -546,7 +553,8 @@
       var ticket = document.getElementById("session-select").value;
       if (!ticket) return;
       var detail = await api("/api/session?ticket=" + encodeURIComponent(ticket));
-      state.ticket = ticket; setDelivery(detail.delivery);
+      state.ticket = ticket;
+      setDelivery({current:0,total:0,content:"Select a request or context artifact from the history above."}, "view-overview");
       var list = document.getElementById("artifact-list");
       list.innerHTML = detail.artifacts.map(function (artifact) {
         return '<button class="artifact" data-artifact="' + esc(artifact.name) + '"><span><strong>' + esc(artifact.name) + '</strong><br><small>' + esc(artifact.kind) + '</small></span><small>' + artifact.bytes.toLocaleString() + ' bytes</small></button>';
@@ -555,14 +563,33 @@
         button.addEventListener("click", async function () {
           try {
             var data = await api("/api/artifact?ticket=" + encodeURIComponent(ticket) + "&name=" + encodeURIComponent(button.dataset.artifact));
-            setDelivery({current:1,total:1,content:data.content});
+            setDelivery({current:1,total:1,content:data.content,path:data.name}, "view-overview");
             showToast(data.name + " opened below");
           } catch (error) { report(error); }
         });
       });
     }
     document.getElementById("open-session").addEventListener("click", function () { openSession().catch(report); });
-    document.getElementById("session-select").addEventListener("change", function () { if (this.value) openSession().catch(report); });
+    document.getElementById("session-select").addEventListener("change", function () {
+      document.getElementById("delete-session").disabled = !this.value;
+      if (this.value) openSession().catch(report);
+    });
+    document.getElementById("delete-session").addEventListener("click", async function () {
+      var ticket = document.getElementById("session-select").value;
+      if (!ticket || !window.confirm('Permanently delete Project Brain history for "' + ticket + '"? Repositories, branches, and source files will not be touched.')) return;
+      var button = this; busy(button, true, "Deleting…");
+      try {
+        await api("/api/session/delete", {method:"POST",body:JSON.stringify({ticket:ticket})});
+        state.ticket = "";
+        document.getElementById("artifact-list").innerHTML = '<div class="empty">Ticket history deleted.</div>';
+        setDelivery({current:0,total:0,content:"Ticket history deleted."}, "view-overview");
+        await loadStatus();
+        showToast(ticket + " history deleted; repositories were untouched");
+      } catch (error) { report(error); } finally {
+        busy(button, false);
+        button.disabled = !document.getElementById("session-select").value;
+      }
+    });
 
     document.getElementById("generate-agent-kit").addEventListener("click", async function () {
       var button = this; busy(button, true, "Generating…");

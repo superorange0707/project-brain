@@ -72,6 +72,10 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("M365 agent", html)
         self.assertIn("Discover &amp; sync", html)
         self.assertIn('document.getElementById("request-text").value = ""', html)
+        self.assertIn('setDelivery(data.delivery, "view-request")', html)
+        self.assertNotIn('document.querySelectorAll("[data-output]")', html)
+        self.assertIn('id="delete-session"', html)
+        self.assertIn("Repositories, branches, and source files will not be touched", html)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         with self.assertRaises(HTTPError) as caught:
             self.get("/api/status", authorized=False)
@@ -151,7 +155,7 @@ CONTEXT_REQUEST:
         self.assertIn("context-001.md", names)
         self.assertIn("feedback-001.md", names)
         self.assertIn("final-solution.md", names)
-        self.assertIn("current-handoff.md", names)
+        self.assertNotIn("current-handoff.md", names)
 
         _, artifact, _ = self.get("/api/artifact?ticket=UI-1&name=context-001.md")
         self.assertIn("HelloService.java", artifact["data"]["content"])
@@ -179,6 +183,25 @@ CONTEXT_REQUEST:
         _, repeated, _ = self.post("/api/sync", {})
         self.assertEqual([], repeated["data"]["discovered"])
         self.assertEqual(1, self.config.read_text(encoding="utf-8").count('name = "service-b"'))
+
+    def test_delete_session_removes_only_brain_history(self) -> None:
+        self.post(
+            "/api/start",
+            {"ticket": "UI-DELETE", "ticket_text": "Delete this history.", "sync": False, "target": "m365"},
+        )
+        self.post(
+            "/api/start",
+            {"ticket": "UI-DELETE-OTHER", "ticket_text": "Keep this history.", "sync": False, "target": "m365"},
+        )
+
+        _, deleted, _ = self.post("/api/session/delete", {"ticket": "UI-DELETE"})
+        self.assertEqual("UI-DELETE", deleted["data"]["ticket"])
+        self.assertFalse((self.root / ".runs/UI-DELETE").exists())
+        self.assertFalse((self.root / "generated/handoffs/UI-DELETE-current.md").exists())
+        self.assertFalse((self.root / "generated/handoffs/UI-DELETE-start.md").exists())
+        self.assertTrue((self.root / ".runs/UI-DELETE-OTHER").is_dir())
+        self.assertTrue((self.root / "generated/handoffs/UI-DELETE-OTHER-current.md").is_file())
+        self.assertTrue((self.root / "service-a").is_dir())
 
 
 class UiShutdownTest(unittest.TestCase):

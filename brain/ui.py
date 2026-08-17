@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
+import shutil
 import threading
 import webbrowser
 from dataclasses import asdict
@@ -50,8 +52,16 @@ def _session_artifacts(settings: Settings, ticket: str) -> list[dict[str, Any]]:
     if not directory.is_dir():
         return []
     artifacts: list[dict[str, Any]] = []
-    for path in sorted(directory.iterdir()):
-        if not path.is_file() or path.name == "session.json" or path.suffix not in {".md", ".yml", ".json"}:
+    paths = sorted(
+        (item for item in directory.iterdir() if not item.is_symlink()),
+        key=lambda item: (item.stat().st_mtime_ns, item.name),
+    )
+    for path in paths:
+        if (
+            not path.is_file()
+            or path.name in {"session.json", "current-handoff.md"}
+            or path.suffix not in {".md", ".yml", ".json"}
+        ):
             continue
         kind = path.name.split("-", 1)[0]
         artifacts.append({
@@ -196,6 +206,25 @@ def _artifact(settings: Settings, ticket: str, name: str) -> dict[str, Any]:
     return {"name": name, "content": path.read_text(encoding="utf-8")}
 
 
+def _delete_session(settings: Settings, ticket: str) -> list[str]:
+    directory = session_dir(settings, ticket)
+    if not directory.is_dir() or directory.is_symlink():
+        raise BrainError(f"Session {ticket} does not exist")
+    safe_name = directory.name
+    shutil.rmtree(directory)
+    removed = [str(directory)]
+    handoff_directory = settings.generated_dir / "handoffs"
+    pattern = re.compile(
+        rf"^{re.escape(safe_name)}-(?:current|start|final|update|context-\d+|feedback-\d+)\.md$"
+    )
+    if handoff_directory.is_dir():
+        for path in handoff_directory.iterdir():
+            if path.is_file() and not path.is_symlink() and pattern.fullmatch(path.name):
+                path.unlink()
+                removed.append(str(path))
+    return removed
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -311,6 +340,13 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/sync":
             result = _refresh(settings, fetch=True)
             self._json({"ok": True, "data": {**result, "status": project_status(settings)}})
+            return
+        if path == "/api/session/delete":
+            ticket = str(body.get("ticket") or "").strip()
+            if not ticket:
+                raise BrainError("Ticket identifier is required")
+            removed = _delete_session(settings, ticket)
+            self._json({"ok": True, "data": {"ticket": ticket, "removed": removed, "status": project_status(settings)}})
             return
         if path == "/api/start":
             ticket = str(body.get("ticket") or "").strip()
