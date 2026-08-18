@@ -2,7 +2,14 @@
 
 # 🧠 Project Brain
 
-**Give any chat AI the codebase exploration loop of a coding agent.**
+**Your company gave you a chatbot, not a coding agent.**
+
+Project Brain brings coding-agent-style codebase investigation to the chat AI
+your organization already allows.
+
+Use ChatGPT, Claude, M365 Copilot, or another chat AI to investigate your local
+multi-repo codebase — with relevant source, callers, tests, config, Git history,
+and cross-repo relationships retrieved locally and read-only.
 
 Turn a ticket into verified, up-to-date multi-repository source context—without
 cloud indexing, API keys, or giving an agent permission to edit your code.
