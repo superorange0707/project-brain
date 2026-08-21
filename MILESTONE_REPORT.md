@@ -61,15 +61,15 @@ brain model autotune PACK --latency-budget-ms 3000
 | Linux x86_64 measurements | DEFERRED TO TARGET MACHINE | Run the same local benchmark commands on the selected Linux host. |
 | Time-split ticket replay and real enterprise Recall/MRR/nDCG | DEFERRED TO PRIVATE LOCAL DATA | Use the existing local golden/replay and historical Git evaluation infrastructure with private labels retained on the work machine. No private corpus is requested or committed. |
 | Public GitHub v0.6.1 release and Homebrew upgrade | COMPLETE | v0.6.1 is published. The official tap points at its final four-platform SHA-256 artifacts; `brew update`, a real 0.6.0→0.6.1 upgrade, formula test, and strict online audit have passed. |
-| Public GitHub v0.6.3 Core release | IN PROGRESS | A 0.6.2 candidate tag exposed Python 3.11/CI and release-workflow eligibility defects before any GitHub Release or tap update. The clean 0.6.3 source must pass the full public/synthetic suite, build, artifact verification, commit, tag, and release publication. |
+| Public GitHub v0.6.3 Core release | COMPLETE | The public GitHub Release contains final checksum-published wheel/sdist and four standalone assets. GitHub CI passed Python 3.11–3.14 with the Semantic extra, distribution install, and standalone smoke checks. The official tap was rendered from the published SHA256SUMS, strictly audited, and a real 0.6.1→0.6.3 Homebrew upgrade plus formula test passed. |
 
 ## Publication state audit
 
-- `v0.6.1` is the current published Core release and its Homebrew formula is
-  verified against final GitHub Release SHA-256 values. The `v0.6.2` tag was
-  never released: its CI/release workflow defects were discovered before any
-  artifact or tap mutation. `v0.6.3` is the clean candidate that pins the
-  already-published, separately versioned Semantic pack.
+- `v0.6.3` is the current published Core release. Its Homebrew formula was
+  rendered only from final GitHub Release SHA-256 values; `brew update`, strict
+  audit, a real 0.6.1→0.6.3 upgrade, and formula test passed. The `v0.6.2` tag
+  was never released: its CI/release-workflow defects were discovered before
+  any artifact or tap mutation.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.
 - The Semantic pack's packaging download is a release-engineering operation
