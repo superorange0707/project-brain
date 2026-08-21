@@ -788,10 +788,16 @@ else:
             "artifacts": {"model.gguf": hashlib.sha256(model).hexdigest(), "conformance.json": hashlib.sha256(suite).hexdigest()},
         }
         archive_stream = io.BytesIO()
+        runtime = b"#!/bin/sh\nexit 0\n"
         with tarfile.open(fileobj=archive_stream, mode="w:gz") as archive:
-            for name, content in (("manifest.json", json.dumps(manifest).encode("utf-8")), ("conformance.json", suite)):
+            for name, content, mode in (
+                ("manifest.json", json.dumps(manifest).encode("utf-8"), 0o644),
+                ("conformance.json", suite, 0o644),
+                ("llama-server", runtime, 0o755),
+            ):
                 entry = tarfile.TarInfo(name)
                 entry.size = len(content)
+                entry.mode = mode
                 archive.addfile(entry, io.BytesIO(content))
         metadata = archive_stream.getvalue()
         parts = [model[:11], model[11:]]
@@ -836,6 +842,7 @@ else:
             installed = install_release_descriptor(self.settings, descriptor_url, hashlib.sha256(descriptor_bytes).hexdigest())
         self.assertEqual("synthetic-semantic", installed["pack_id"])
         self.assertEqual(model, (self.settings.state_dir / "models" / "synthetic-semantic" / "model.gguf").read_bytes())
+        self.assertTrue(os.access(self.settings.state_dir / "models" / "synthetic-semantic" / "llama-server", os.X_OK))
         self.assertTrue(verify_pack(self.settings, "synthetic-semantic")["verified"])
 
     def test_cli_official_semantic_alias_uses_the_controlled_catalog(self) -> None:

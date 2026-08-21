@@ -674,6 +674,7 @@ def _extract_pack_archive(source: Path, destination: Path) -> None:
                     raise ValueError("model pack contains an unreadable file")
                 with target.open("wb") as handle:
                     shutil.copyfileobj(extracted, handle)
+                target.chmod(member.mode & 0o777)
 
 
 def install_release_descriptor(settings: Settings, descriptor_url: str, expected_sha256: str) -> dict[str, Any]:
