@@ -15,6 +15,43 @@ This guide is for a release engineer or organization-controlled pack builder. It
 
 Qwen is the present implementation choice, not an architectural requirement: the manifest carries family, runtime, source revision, and capability. The official Qwen weights are the source of truth. When Qwen publishes the selected embedding model as an official GGUF, use that artifact directly rather than converting it again. Qwen documents both its official GGUF releases and local conversion path; its embedding repository also publishes the official embedding/reranking evaluation contract. See the [Qwen llama.cpp guide](https://github.com/QwenLM/Qwen3/blob/main/docs/source/run_locally/llama.cpp.md), [Qwen quantization guide](https://github.com/QwenLM/Qwen3/blob/main/docs/source/quantization/llama.cpp.md), and [Qwen3 Embedding evaluation repository](https://github.com/QwenLM/Qwen3-Embedding/tree/main/evaluation).
 
+## Official Semantic pack v1.0.0
+
+The first Project Brain-controlled Semantic release is a separately versioned
+macOS Apple Silicon pack, not part of the Core wheel, standalone archive, or
+Homebrew formula. It contains the unchanged official
+`Qwen/Qwen3-Embedding-4B-GGUF` artifact
+`Qwen3-Embedding-4B-Q6_K.gguf` at revision
+`4eb3b8293ac9b642f61ece63459fae31e82d6669`, SHA-256
+`0c04b2b5e9b039dd01fd1e6d757968855fd5e2523bb3e9a4a03fa6454973a1af`.
+The included official tokenizer is pinned to
+`Qwen/Qwen3-Embedding-4B` revision
+`5cf2132abc99cad020ac570b19d031efec650f2b`, SHA-256
+`83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d`.
+
+The pack release includes the checked GGUF, a source-pinned macOS ARM64
+`llama.cpp` runtime, Apache-2.0 and runtime notices, a provenance record,
+runtime arguments, 2560-dimensional last-token pooling metadata, the query
+instruction/card/chunk versions, and public/synthetic batch, multilingual,
+code, long-input, finite-vector, and ranking conformance cases. It makes no M3
+Pro performance or private-repository relevance claim.
+
+After installing a compatible Core release, use the controlled alias:
+
+```bash
+brain model install semantic
+brain model verify semantic
+brain model benchmark semantic
+brain model autotune semantic
+brain edition set semantic
+brain refresh
+```
+
+The Core catalog pins the release descriptor SHA-256. The installer verifies
+that descriptor, each GitHub Release part, and the final assembled model before
+installing the normal local pack layout. Hugging Face is only a packaging-time
+upstream source; enterprise runtime inference has no Hugging Face dependency.
+
 ## Pack layout and manifest
 
 An unpacked pack has no symlinks and contains all artifacts it declares:
@@ -27,6 +64,8 @@ qwen3-reranker-4b-q8/
   tokenizer.json
   conformance.json
   LICENSE
+  LLAMA_CPP_LICENSE
+  NOTICE
   PROVENANCE.md
 ```
 
@@ -56,7 +95,7 @@ Production manifests must contain checksums for the runtime, weights, tokenizer,
   "document_card_version": "1",
   "chunk_schema_version": "1",
   "embedding_dimension": 0,
-  "minimum_brain_version": "0.6.1",
+  "minimum_brain_version": "0.6.2",
   "golden_suite": "conformance.json",
   "golden_suite_hash": "<64-hex-sha256>",
   "artifacts": {

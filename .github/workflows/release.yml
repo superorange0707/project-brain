@@ -127,6 +127,44 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME"
 
+  homebrew-tap:
+    name: Update Homebrew tap after final release
+    needs: github-release
+    if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist/
+          merge-multiple: true
+      - name: Confirm published checksums are final
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir published
+          gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS.txt --dir published
+          cmp published/SHA256SUMS.txt dist/SHA256SUMS.txt
+      - name: Render, test, and publish the formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/superorange0707/homebrew-tap.git" homebrew-tap
+          python scripts/update_homebrew_formula.py --version "${GITHUB_REF_NAME#v}" --sha256sums published/SHA256SUMS.txt --formula homebrew-tap/Formula/project-brain.rb
+          ruby -c homebrew-tap/Formula/project-brain.rb
+          git -C homebrew-tap diff --check
+          if git -C homebrew-tap diff --quiet; then exit 0; fi
+          git -C homebrew-tap config user.name "project-brain-release[bot]"
+          git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C homebrew-tap add Formula/project-brain.rb
+          git -C homebrew-tap commit -m "project-brain ${GITHUB_REF_NAME}"
+          git -C homebrew-tap push origin main
+
   pypi:
     name: Publish to PyPI with OIDC
     if: ${{ vars.PUBLISH_PYPI == 'true' }}

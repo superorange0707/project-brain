@@ -1,15 +1,15 @@
-# Project Brain v0.6.1
+# Project Brain v0.6.2
 
-Project Brain v0.6.1 strengthens the local, read-only code-intelligence Core:
-persistent indexed retrieval, immutable snapshot verification, compact
-candidate-first context packing, structural/history relationships, and explicit
-Core fallback behavior.
+Project Brain v0.6.2 completes distribution readiness for the optional offline
+Semantic edition without changing the Core product boundary. The separately
+versioned Qwen3-Embedding-4B Q6_K pack is never bundled into Core or Homebrew;
+Core pins its Project Brain release descriptor and verifies every downloaded
+part, the assembled GGUF, pack manifest, provenance, and public/synthetic
+conformance before local use.
 
-It also introduces optional on-device Semantic and Precision infrastructure:
-auditable offline model packs, snapshot-filtered semantic retrieval, bounded
-protected reranking, local conformance, model benchmarking, and autotuning.
-Semantic models and rerankers can only discover or reorder candidates; final
-source evidence is always re-read from the investigation's pinned Git snapshot.
+The release also adds a final-release-only Homebrew automation gate. The tap is
+updated only after the GitHub Release and its published `SHA256SUMS.txt` exist
+and match the build output. Failed candidates cannot update the tap.
 
 ## Release qualification
 
@@ -25,8 +25,9 @@ source evidence is always re-read from the investigation's pinned Git snapshot.
   numbers are claimed.
 - No private-enterprise repository, ticket-replay, Recall, MRR, nDCG, or
   target-machine benchmark results are claimed.
-- Organization approval and installation of Qwen3 embedding/reranker model packs
-  remain local policy decisions; Core remains fully usable without them.
+- Precision remains unavailable until a separately verified reranker pack is
+  installed. Organization approval remains a local policy decision; Core stays
+  fully usable without model packs.
 
 See `MILESTONE_REPORT.md` and `docs/MODEL_PACKS.md` in the tagged source for the
 verified scope, offline-pack procedure, and target-machine/private-data follow-up.

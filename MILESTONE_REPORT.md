@@ -1,6 +1,6 @@
 # Project Brain milestone readiness report
 
-**Snapshot:** 2026-08-21 · **Local build candidate:** 0.6.1
+**Snapshot:** 2026-08-21 · **Local build candidate:** 0.6.2
 
 This report separates completed, locally tested engineering from validations
 that must run later on the target machine or private local data. It contains no
@@ -24,7 +24,7 @@ intentional local-only validation steps, not engineering blockers.
 | M07–M08 | COMPLETE | Persisted structural/history/relationship reuse, progressive cost-based plans, deterministic feature ranking, reciprocal-rank fusion, and explainable plans. |
 | M09–M12 | COMPLETE | Deterministic structural semantic cards, snapshot-filtered USearch shards, content-addressed embedding cache, verified-pack selection, batch-bounded embedding, and Core fallback. |
 | M10–M14 | COMPLETE | Local-only llama.cpp adapter, checksum/provenance manifest, pack-owned loopback lifecycle, conformance gates for official-reference vectors/order/long input/batch parity, bounded protected reranking, 10/20/40/80 public-synthetic reranker benchmarks, per-pack autotuning, and Semantic/Precision-to-Core fallback. |
-| M15 | COMPLETE | One Core codebase with capability profiles, schema incompatibility recovery guidance, controlled local/GitHub-Release/approved-internal pack installation, wheel/sdist build, notices, and a source-pinned Zoekt release workflow. |
+| M15 | IN PROGRESS | One Core codebase with capability profiles, schema incompatibility recovery guidance, controlled local/GitHub-Release/approved-internal pack installation, wheel/sdist build, notices, and a source-pinned Zoekt release workflow. The official Semantic pack release and its descriptor-pinned Core catalog entry are being qualified separately. |
 | M16 | COMPLETE | Status/freshness/storage/GC/watch/benchmark/explain commands, pinned-artifact GC protection, pre-write disk guard, local machine-profile capture, and machine-readable model tuning profile. |
 | M17 | COMPLETE | Sensitive-path exclusion, owner-only Brain state/session/output directories on POSIX, loopback-only UI/runtime boundaries, checksum/path-traversal protection, catalog/vector corruption fallback, stale-session protection, and low-disk fault injection. |
 
@@ -55,22 +55,26 @@ brain model autotune PACK --latency-budget-ms 3000
 
 | Item | Status | What remains |
 | --- | --- | --- |
-| Qwen3-Embedding-4B and Qwen3-Reranker-4B internal pack artifact | DEFERRED TO TARGET MACHINE | Install an organization-approved, checksummed pack locally; run the included verifier, conformance suite, benchmark, and autotune. The pack/runtime interfaces and conversion documentation are complete. |
+| Qwen3-Reranker-4B internal pack artifact | DEFERRED TO TARGET MACHINE | Install an organization-approved, checksummed reranker pack locally; run the included verifier, conformance suite, benchmark, and autotune. The pack/runtime interfaces and conversion documentation are complete. |
+| Official Qwen3-Embedding-4B Q6_K Semantic pack | IN PROGRESS | The independently versioned release workflow pins official source inputs, produces the multipart manifest/provenance/notices/conformance assets, then a Core release pins the resulting descriptor SHA-256. |
 | Company model approval | EXTERNAL POLICY DECISION | The organization chooses which official-source artifact is approved. Project Brain has no bypass mechanism and remains useful as Core without it. |
 | Apple M3 Pro / 36 GB measurements | DEFERRED TO TARGET MACHINE | Run the supplied local commands to record embedding p50/p95, batch throughput, 10/20/40/80 rerank latency, retrieval timing, and process/child peak memory. No unverified M3 numbers are claimed here. |
 | Linux x86_64 measurements | DEFERRED TO TARGET MACHINE | Run the same local benchmark commands on the selected Linux host. |
 | Time-split ticket replay and real enterprise Recall/MRR/nDCG | DEFERRED TO PRIVATE LOCAL DATA | Use the existing local golden/replay and historical Git evaluation infrastructure with private labels retained on the work machine. No private corpus is requested or committed. |
-| Public GitHub release | IN PROGRESS | User authorization has been received. Only this clean commit may be tagged; its tag push triggers the release workflow after the verification steps recorded below pass. |
+| Public GitHub v0.6.1 release and Homebrew upgrade | COMPLETE | v0.6.1 is published. The official tap points at its final four-platform SHA-256 artifacts; `brew update`, a real 0.6.0→0.6.1 upgrade, formula test, and strict online audit have passed. |
+| Public GitHub v0.6.2 Core release | IN PROGRESS | The clean source must pass the full public/synthetic suite, build, and artifact verification after the Semantic pack descriptor SHA-256 is known. |
 
 ## Publication state audit
 
-- At commit creation, the public latest release is `v0.6.0` (2026-08-17). It is
-  evidence only for that older source/archive; `v0.6.1` is published solely from
-  the clean, verified tag created from this commit.
+- `v0.6.1` is the current published Core release and its Homebrew formula is
+  verified against final GitHub Release SHA-256 values. `v0.6.2` remains a clean
+  Core candidate until its separate Semantic-pack descriptor is published and
+  pinned into the source.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.
-- No model download, model-pack installation, or external model inference is
-  part of this release process.
+- The Semantic pack's packaging download is a release-engineering operation
+  against fixed official upstream revisions. Installed target machines never
+  need Hugging Face or hosted model inference.
 
 ## Product boundary reaffirmed
 

@@ -61,9 +61,16 @@ or cloud service. Optional approved packs are installed from a local path or a
 hash-pinned approved release, checksum-verified, and may only use a loopback
 runtime; Project Brain never downloads weights while it runs.
 
+The first official Semantic pack is separately released for Apple Silicon. It
+uses the unchanged official Qwen3-Embedding-4B Q6_K GGUF, is installed only
+from a Project Brain-controlled GitHub Release descriptor, and remains entirely
+offline once installed. It is not bundled into Core or Homebrew.
+
 See [offline model-pack operations](docs/MODEL_PACKS.md) for the audited pack
 format, official-Qwen conversion provenance, local conformance, controlled
-installation, machine measurement, and autotuning workflow.
+installation, machine measurement, and autotuning workflow. See
+[release distribution](docs/RELEASING.md) for the final-checksum Homebrew and
+separate model-pack publishing gates.
 
 ## Install
 
@@ -73,12 +80,24 @@ installation, machine measurement, and autotuning workflow.
 brew install superorange0707/tap/project-brain
 ```
 
+Upgrade an existing installation through the same tap:
+
+```bash
+brew update
+brew upgrade superorange0707/tap/project-brain
+```
+
 The Homebrew package uses a prebuilt release: it does not compile Python or
 require Xcode. It includes the tested structural backend and pinned Zoekt search
 commands. The small,
 separate [Homebrew tap](https://github.com/superorange0707/homebrew-tap) is
 Homebrew's standard index for third-party formulae; the application source stays
 in this repository.
+
+After a GitHub Release has published its final assets and checksums, release
+automation renders and commits the matching formula only when the repository
+has a scoped `HOMEBREW_TAP_TOKEN` secret. A failed or incomplete release cannot
+update the tap.
 
 ### Standalone archive — macOS or Linux
 
@@ -87,7 +106,7 @@ Download the archive for your CPU from the
 extract it, and place all four executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.6.1-macos-arm64.tar.gz
+tar -xzf project-brain-v0.6.2-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp zoekt zoekt-index ~/.local/bin/
 ```
@@ -98,19 +117,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.2"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.2"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.1/project_brain_context-0.6.1-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.2/project_brain_context-0.6.2-py3-none-any.whl
 ```
 
 Then verify:

@@ -179,7 +179,8 @@ def build_semantic_index(
         dimension = int(manifest.get("embedding_dimension") or 0)
         if dimension <= 0:
             raise RuntimeError("embedding pack must declare embedding_dimension")
-        embed = lambda cards: runtime.embed(cards, dimension=dimension)
+        document_instruction = str(manifest.get("document_instruction") or "")
+        embed = lambda cards: runtime.embed(cards, instruction=document_instruction, dimension=dimension)
     else:
         pack_id = pack_id or "mock"
         dimension = 0
@@ -290,7 +291,8 @@ def search_semantic(settings: Settings, query: str, *, repos: set[str] | None = 
         if manifest is None or manifest.get("pack_id") != pack_id:
             return []
         runtime = runtime_for_pack(manifest)
-        embed = lambda values: runtime.embed(values, dimension=dimension)
+        query_instruction = str(manifest.get("query_instruction") or "")
+        embed = lambda values: runtime.embed(values, instruction=query_instruction, dimension=dimension)
     try:
         vector = _query_vector(settings, query, pack_id=pack_id, dimension=dimension, embed=embed)
         snapshots = {repo.name: repo.source_sha or "working-tree" for repo in settings.repositories}

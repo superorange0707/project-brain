@@ -39,7 +39,7 @@ same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.2"
 ```
 
 Upgrade later with:
@@ -51,7 +51,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.2"
 ```
 
 ### From a source checkout
@@ -315,6 +315,27 @@ brain model autotune approved-qwen-embedding --latency-budget-ms 3000
 brain edition set semantic
 brain capabilities
 ```
+
+On macOS Apple Silicon, the separately released official Semantic pack has a
+short controlled install path. This download happens once from a Project Brain
+GitHub Release; its descriptor, every release part, and the assembled GGUF are
+checked before the local pack is registered. It never contacts Hugging Face or
+any hosted model service while indexing or querying.
+
+```bash
+python -m pip install 'project-brain-context[semantic]'
+brain model install semantic
+brain model verify semantic
+brain model benchmark semantic
+brain model autotune semantic
+brain edition set semantic
+brain refresh
+```
+
+`brain refresh` builds the snapshot-filtered semantic index after the normal
+Core indexes when Semantic is selected. If its local runtime cannot start, the
+refresh completes with Core and reports the Semantic warning. Precision remains
+unavailable until a separately verified reranker pack is installed.
 
 The manifest records model/revision/license/runtime/checksum provenance. Every
 production embedding or reranker pack must include a hash-pinned local JSON

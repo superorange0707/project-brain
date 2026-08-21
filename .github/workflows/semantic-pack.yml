@@ -1,0 +1,78 @@
+name: Publish Semantic model pack
+
+on:
+  push:
+    tags: ["semantic-pack-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish official Qwen Semantic pack
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download and verify official upstream inputs
+        env:
+          QWEN_GGUF_REVISION: 4eb3b8293ac9b642f61ece63459fae31e82d6669
+          QWEN_GGUF_SHA256: 0c04b2b5e9b039dd01fd1e6d757968855fd5e2523bb3e9a4a03fa6454973a1af
+          QWEN_TOKENIZER_REVISION: 5cf2132abc99cad020ac570b19d031efec650f2b
+          QWEN_TOKENIZER_SHA256: 83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d
+        run: |
+          mkdir -p upstream
+          curl --fail --location --retry 3 --output upstream/Qwen3-Embedding-4B-Q6_K.gguf "https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/$QWEN_GGUF_REVISION/Qwen3-Embedding-4B-Q6_K.gguf"
+          echo "$QWEN_GGUF_SHA256  upstream/Qwen3-Embedding-4B-Q6_K.gguf" | shasum -a 256 --check
+          test "$(stat -f %z upstream/Qwen3-Embedding-4B-Q6_K.gguf)" = "3305683680"
+          curl --fail --location --retry 3 --output upstream/tokenizer.json "https://huggingface.co/Qwen/Qwen3-Embedding-4B/resolve/$QWEN_TOKENIZER_REVISION/tokenizer.json"
+          echo "$QWEN_TOKENIZER_SHA256  upstream/tokenizer.json" | shasum -a 256 --check
+          curl --fail --location --retry 3 --output upstream/APACHE-2.0.txt https://www.apache.org/licenses/LICENSE-2.0.txt
+      - name: Build the pinned local-only llama.cpp runtime
+        env:
+          LLAMA_CPP_REVISION: 0badc06ab53a8eb96e01242b92ec1365c4465a2a
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp.git upstream/llama.cpp
+          git -C upstream/llama.cpp checkout --detach "$LLAMA_CPP_REVISION"
+          test "$(git -C upstream/llama.cpp rev-parse HEAD)" = "$LLAMA_CPP_REVISION"
+          cmake -S upstream/llama.cpp -B upstream/llama.cpp/build -DGGML_METAL=ON -DLLAMA_BUILD_SERVER=ON
+          cmake --build upstream/llama.cpp/build --target llama-server --parallel 3
+          test -x upstream/llama.cpp/build/bin/llama-server
+      - name: Build public synthetic conformance pack and descriptor
+        env:
+          QWEN_GGUF_REVISION: 4eb3b8293ac9b642f61ece63459fae31e82d6669
+          QWEN_GGUF_SHA256: 0c04b2b5e9b039dd01fd1e6d757968855fd5e2523bb3e9a4a03fa6454973a1af
+          QWEN_TOKENIZER_REVISION: 5cf2132abc99cad020ac570b19d031efec650f2b
+          LLAMA_CPP_REVISION: 0badc06ab53a8eb96e01242b92ec1365c4465a2a
+        run: |
+          python3 scripts/build_semantic_pack.py \
+            --model upstream/Qwen3-Embedding-4B-Q6_K.gguf \
+            --model-sha256 "$QWEN_GGUF_SHA256" \
+            --tokenizer upstream/tokenizer.json \
+            --runtime upstream/llama.cpp/build/bin/llama-server \
+            --runtime-license upstream/llama.cpp/LICENSE \
+            --license upstream/APACHE-2.0.txt \
+            --output semantic-pack-dist \
+            --release-tag "$GITHUB_REF_NAME" \
+            --upstream-revision "$QWEN_GGUF_REVISION" \
+            --tokenizer-revision "$QWEN_TOKENIZER_REVISION" \
+            --runtime-revision "$LLAMA_CPP_REVISION" \
+            --minimum-brain-version 0.6.2
+          cd semantic-pack-dist
+          shasum -a 256 --check SHA256SUMS.txt
+      - name: Publish final immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            semantic-pack-dist/*-metadata.tar.gz \
+            semantic-pack-dist/*.part-* \
+            semantic-pack-dist/*-descriptor.json \
+            semantic-pack-dist/SHA256SUMS.txt \
+            --verify-tag \
+            --notes-file docs/SEMANTIC_PACK_RELEASE_NOTES.md \
+            --title "Project Brain Semantic Pack $GITHUB_REF_NAME"

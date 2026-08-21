@@ -2,6 +2,26 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.6.2] - 2026-08-21
+
+### Added
+
+- Add a separately versioned official Semantic-pack release pipeline for the
+  unchanged Qwen3-Embedding-4B Q6_K GGUF, with pinned upstream inputs, local
+  llama.cpp runtime, Apache/runtime notices, provenance, public/synthetic
+  conformance, multipart GitHub Release assets, and a pinned descriptor format.
+- Add `brain model install semantic` alias support for a Core-pinned Project
+  Brain release descriptor; descriptor, part, assembled-model, manifest, and
+  normal pack verification all remain local and checksum-gated.
+- Add document/query embedding contracts, Qwen input suffix/runtime arguments,
+  and semantic index refresh after a selected Semantic edition refresh.
+- Add a final-release-only Homebrew update job guarded by a scoped tap token.
+
+### Fixed
+
+- Do not build or query a Zoekt shard from a working tree that differs from its
+  declared pinned Git SHA; fall back to the blob-backed Core index instead.
+
 ## [0.6.1] - 2026-08-21
 
 ### Added

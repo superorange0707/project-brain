@@ -43,6 +43,32 @@ def _manifest(target: Path) -> dict[str, Any] | None:
         return None
 
 
+def _scan_path_matches_snapshot(repo: Repository) -> bool:
+    """Do not label a dirty working tree as a pinned Zoekt shard.
+
+    Normal synchronized snapshots are exported outside the repository and are
+    immutable by construction.  A caller may also deliberately point a
+    repository at its working tree while supplying a commit SHA.  In that case
+    only a clean tree can stand in for the pinned snapshot; otherwise Core's
+    blob-backed index remains the authoritative fallback.
+    """
+    if not repo.source_sha or not repo.source_path:
+        return True
+    try:
+        if repo.source_path.resolve() != repo.path.resolve():
+            return True
+        result = subprocess.run(
+            ["git", "diff", "--quiet", repo.source_sha, "--"],
+            cwd=repo.path,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+    except OSError:
+        return False
+
+
 def build(settings: Settings, repositories: list[Repository]) -> dict[str, dict[str, object]]:
     """Build immutable per-repository/snapshot local shards when Zoekt is installed."""
     available = status()
@@ -50,6 +76,12 @@ def build(settings: Settings, repositories: list[Repository]) -> dict[str, dict[
         return {}
     result: dict[str, dict[str, object]] = {}
     for repo in repositories:
+        if not _scan_path_matches_snapshot(repo):
+            result[repo.name] = {
+                "status": "skipped",
+                "reason": "working tree does not match pinned source SHA; SQLite fallback is authoritative",
+            }
+            continue
         sha = repo.source_sha or "working-tree"
         target = shard_path(settings.state_dir, repo.name, sha)
         current = _manifest(target)

@@ -12,6 +12,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from platform import machine, system
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from dataclasses import dataclass
@@ -34,6 +35,13 @@ MAX_RERANK_POOL = 80
 DEFAULT_EMBEDDING_BATCH_SIZE = 16
 DEFAULT_BENCHMARK_SAMPLES = 3
 DEFAULT_MODEL_LATENCY_BUDGET_MS = 3_000
+
+# The populated catalog is deliberately source-pinned in a Core release after a
+# separately versioned model-pack release has published its immutable descriptor.
+# Keeping this empty until then is safer than resolving an unpinned "latest"
+# release at install time.  Tests inject a tiny synthetic catalog.
+OFFICIAL_PACKS: dict[str, dict[str, str]] = {}
+MODEL_PACK_DESCRIPTOR_SCHEMA = "project-brain-model-pack-v1"
 
 
 def _version(value: str) -> tuple[int, ...]:
@@ -87,6 +95,7 @@ class LlamaCppRuntime:
     endpoint: str
     timeout_seconds: float = 30.0
     api_key: str | None = None
+    input_suffix: str = ""
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.endpoint)
@@ -109,7 +118,7 @@ class LlamaCppRuntime:
         return value
 
     def embed(self, texts: list[str], instruction: str = "", dimension: int | None = None) -> list[list[float]]:
-        payload: dict[str, object] = {"input": [instruction + text if instruction else text for text in texts]}
+        payload: dict[str, object] = {"input": [instruction + text + self.input_suffix for text in texts]}
         if dimension:
             payload["dimensions"] = dimension
         value = self._post("/v1/embeddings", payload)
@@ -197,8 +206,20 @@ class ManagedLlamaCppRuntime:
             command.append("--embedding")
         else:
             command.extend(["--embedding", "--pooling", "rank", "--rerank"])
+        runtime_args = self.manifest.get("runtime_args") or []
+        if not isinstance(runtime_args, list) or not all(isinstance(value, str) and value for value in runtime_args):
+            raise RuntimeError("model pack runtime_args must be a list of non-empty strings")
+        protected = {"--model", "-m", "--host", "--port", "--api-key", "--hf-repo", "--hf-file"}
+        if any(value in protected for value in runtime_args):
+            raise RuntimeError("model pack runtime_args may not override Project Brain local runtime controls")
+        command.extend(runtime_args)
         self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-        self.client = LlamaCppRuntime(f"http://127.0.0.1:{port}", api_key=key, timeout_seconds=2.0)
+        self.client = LlamaCppRuntime(
+            f"http://127.0.0.1:{port}",
+            api_key=key,
+            timeout_seconds=2.0,
+            input_suffix=str(self.manifest.get("input_suffix") or ""),
+        )
         deadline = time.monotonic() + min(120.0, max(1.0, float(self.manifest.get("startup_timeout_seconds") or 30)))
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
@@ -462,8 +483,9 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
                 dimension = case.get("dimension") or manifest.get("embedding_dimension")
                 if not isinstance(texts, list) or not texts or not all(isinstance(text, str) for text in texts) or not isinstance(dimension, int) or dimension < 1:
                     raise ValueError(f"golden_suite embedding case {number} is invalid")
-                batch = runtime.embed(texts, dimension=dimension)
-                individual = [runtime.embed([text], dimension=dimension)[0] for text in texts]
+                instruction = str(case.get("instruction") or manifest.get("document_instruction") or "")
+                batch = runtime.embed(texts, instruction=instruction, dimension=dimension)
+                individual = [runtime.embed([text], instruction=instruction, dimension=dimension)[0] for text in texts]
                 if (not _same_vectors(batch, individual) or any(len(vector) != dimension or any(not math.isfinite(value) for value in vector) for vector in batch)):
                     raise ValueError(f"embedding conformance failed at case {number}")
                 if case.get("normalized") and any(abs(math.sqrt(sum(value * value for value in vector)) - 1.0) > 1e-3 for vector in batch):
@@ -575,6 +597,159 @@ def install_pack_url(settings: Settings, source_url: str, expected_sha256: str) 
             staged.unlink(missing_ok=True)
 
 
+def official_packs() -> list[dict[str, str]]:
+    """List source-pinned Project Brain controlled pack descriptors."""
+    return [
+        {"alias": alias, **{key: value for key, value in pack.items() if key != "descriptor_sha256"}}
+        for alias, pack in sorted(OFFICIAL_PACKS.items())
+    ]
+
+
+def _descriptor_error(message: str) -> ValueError:
+    return ValueError(f"invalid Project Brain model-pack descriptor: {message}")
+
+
+def _descriptor_artifact(value: object, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _descriptor_error(f"{field} must be an object")
+    url = value.get("url")
+    digest = str(value.get("sha256") or "").lower()
+    size = value.get("size")
+    if not isinstance(url, str) or not _valid_sha256(digest):
+        raise _descriptor_error(f"{field} requires HTTPS url and SHA-256")
+    try:
+        size = int(size)
+    except (TypeError, ValueError) as error:
+        raise _descriptor_error(f"{field} requires a positive byte size") from error
+    if size < 1:
+        raise _descriptor_error(f"{field} requires a positive byte size")
+    return {"url": url, "sha256": digest, "size": size}
+
+
+def _download_verified_artifact(
+    settings: Settings,
+    artifact: dict[str, Any],
+    destination: Path,
+    *,
+    append: bool = False,
+) -> None:
+    """Download one declared release asset with a size and digest gate."""
+    source_url = str(artifact["url"])
+    _approved_pack_url(settings, source_url)
+    request = Request(source_url, headers={"User-Agent": "Project-Brain-model-pack/1"})
+    with urlopen(request, timeout=120) as response:
+        _approved_pack_url(settings, response.geturl(), final=True)
+        try:
+            content_length = int(response.headers.get("Content-Length") or 0)
+        except ValueError as error:
+            raise ValueError("model pack download has an invalid Content-Length") from error
+        if content_length != int(artifact["size"]):
+            raise ValueError("model pack download size does not match its pinned descriptor")
+        digest = hashlib.sha256()
+        with destination.open("ab" if append else "wb") as handle:
+            while chunk := response.read(1024 * 1024):
+                handle.write(chunk)
+                digest.update(chunk)
+    if digest.hexdigest() != str(artifact["sha256"]):
+        raise ValueError("model pack release artifact SHA-256 does not match its pinned descriptor")
+
+
+def _extract_pack_archive(source: Path, destination: Path) -> None:
+    with tarfile.open(source, "r:*") as archive:
+        for member in archive.getmembers():
+            target = (destination / member.name).resolve()
+            if not target.is_relative_to(destination) or member.issym() or member.islnk():
+                raise ValueError("model pack contains an unsafe path")
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise ValueError("model pack contains an unreadable file")
+                with target.open("wb") as handle:
+                    shutil.copyfileobj(extracted, handle)
+
+
+def install_release_descriptor(settings: Settings, descriptor_url: str, expected_sha256: str) -> dict[str, Any]:
+    """Install a multipart Project Brain release pack without a runtime network dependency."""
+    expected_sha256 = expected_sha256.lower().strip()
+    if not _valid_sha256(expected_sha256):
+        raise ValueError("model-pack descriptor requires a 64-character SHA-256")
+    _approved_pack_url(settings, descriptor_url)
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix="brain-pack-release-", dir=settings.state_dir))
+    try:
+        descriptor_path = temporary / "descriptor.json"
+        request = Request(descriptor_url, headers={"User-Agent": "Project-Brain-model-pack/1"})
+        with urlopen(request, timeout=60) as response:
+            _approved_pack_url(settings, response.geturl(), final=True)
+            digest = hashlib.sha256()
+            with descriptor_path.open("wb") as handle:
+                while chunk := response.read(1024 * 1024):
+                    handle.write(chunk)
+                    digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise ValueError("model-pack descriptor SHA-256 does not match the pinned Core catalog")
+        try:
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise _descriptor_error("descriptor is not JSON") from error
+        if not isinstance(descriptor, dict) or descriptor.get("schema") != MODEL_PACK_DESCRIPTOR_SCHEMA:
+            raise _descriptor_error(f"schema must be {MODEL_PACK_DESCRIPTOR_SCHEMA}")
+        pack_id = _safe_pack_id(str(descriptor.get("pack_id") or ""))
+        metadata = _descriptor_artifact(descriptor.get("metadata"), "metadata")
+        model = descriptor.get("model")
+        if not isinstance(model, dict):
+            raise _descriptor_error("model must be an object")
+        model_file = str(model.get("file") or "")
+        if Path(model_file).name != model_file or not model_file:
+            raise _descriptor_error("model.file must be a safe basename")
+        model_sha256 = str(model.get("sha256") or "").lower()
+        if not _valid_sha256(model_sha256):
+            raise _descriptor_error("model requires SHA-256")
+        parts = [_descriptor_artifact(part, "model.parts") for part in model.get("parts") or []]
+        if not parts:
+            raise _descriptor_error("model requires one or more parts")
+        platform_name = str(descriptor.get("platform") or "")
+        local_platform = f"{system().lower()}-{machine().lower()}"
+        supported_platforms = {"darwin-arm64", "darwin-aarch64"}
+        if platform_name and platform_name not in supported_platforms:
+            raise _descriptor_error("platform is unsupported")
+        if platform_name and local_platform not in supported_platforms:
+            raise ValueError(f"model pack {pack_id} is for {platform_name}, not {local_platform}")
+        from .ops import ensure_write_capacity
+
+        ensure_write_capacity(settings, int(metadata["size"]) + sum(int(part["size"]) for part in parts))
+        archive = temporary / "metadata.tar"
+        _download_verified_artifact(settings, metadata, archive)
+        contents = temporary / "contents"
+        contents.mkdir()
+        _extract_pack_archive(archive, contents)
+        assembled = contents / model_file
+        for part in parts:
+            _download_verified_artifact(settings, part, assembled, append=assembled.exists())
+        if _sha256(assembled) != model_sha256:
+            raise ValueError("assembled model SHA-256 does not match the pinned descriptor")
+        manifest_path = _manifest_file(contents)
+        manifest = _load_manifest(manifest_path)
+        if _safe_pack_id(str(manifest.get("pack_id") or "")) != pack_id:
+            raise _descriptor_error("pack_id does not match embedded manifest")
+        if str(manifest.get("model_file") or "") != model_file or str(manifest.get("weight_sha256") or "").lower() != model_sha256:
+            raise _descriptor_error("embedded manifest does not pin the assembled model")
+        return install_pack(settings, contents)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def install_official_pack(settings: Settings, alias: str) -> dict[str, Any]:
+    alias = alias.lower().strip()
+    pack = OFFICIAL_PACKS.get(alias)
+    if pack is None:
+        raise ValueError(f"no Project Brain-controlled release pack is available for {alias}")
+    return install_release_descriptor(settings, str(pack["descriptor_url"]), str(pack["descriptor_sha256"]))
+
+
 def install_pack(settings: Settings, source: Path) -> dict[str, Any]:
     """Install an already-local pack. Runtime never performs a network download."""
     source = source.expanduser().resolve()
@@ -594,20 +769,7 @@ def install_pack(settings: Settings, source: Path) -> dict[str, Any]:
     try:
         if source.is_file() and tarfile.is_tarfile(source):
             temporary = Path(tempfile.mkdtemp(prefix="brain-pack-", dir=settings.state_dir))
-            with tarfile.open(source, "r:*") as archive:
-                for member in archive.getmembers():
-                    target = (temporary / member.name).resolve()
-                    if not target.is_relative_to(temporary) or member.issym() or member.islnk():
-                        raise ValueError("model pack contains an unsafe path")
-                    if member.isdir():
-                        target.mkdir(parents=True, exist_ok=True)
-                    elif member.isfile():
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        extracted = archive.extractfile(member)
-                        if extracted is None:
-                            raise ValueError("model pack contains an unreadable file")
-                        with target.open("wb") as handle:
-                            shutil.copyfileobj(extracted, handle)
+            _extract_pack_archive(source, temporary)
             source = temporary
         manifest_path = _manifest_file(source)
         manifest = _load_manifest(manifest_path)

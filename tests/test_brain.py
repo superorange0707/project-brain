@@ -10,6 +10,7 @@ import re
 import sqlite3
 import stat
 import subprocess
+import tarfile
 import tempfile
 import time
 import unittest
@@ -57,7 +58,7 @@ from brain.catalog import connect as catalog_connect
 from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
 from brain.models import DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, rerank_candidates
-from brain.models import autotune_pack, benchmark_pack, install_pack, install_pack_url, runtime_for_pack, validate_manifest, verify_pack
+from brain.models import autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, runtime_for_pack, validate_manifest, verify_pack
 from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, build_semantic_index, chunk_source, search_semantic
 from brain.ops import gc
 from brain.evaluation import evaluate_golden
@@ -760,6 +761,85 @@ else:
         profile = machine_profile(self.settings)
         self.assertNotIn("hostname", profile)
         self.assertIn("logical_cpu_count", profile)
+
+    def test_release_descriptor_install_and_verify_assembles_a_pinned_pack(self) -> None:
+        model = b"official-weight-part-one-and-two"
+        suite = json.dumps({
+            "embedding": [{
+                "id": "public-synthetic-batch",
+                "texts": ["eligibility event handler", "customer eligibility event"],
+                "dimension": 4,
+                "expected_similarity_order": [1],
+            }],
+        }, separators=(",", ":")).encode("utf-8")
+        manifest = {
+            "pack_id": "synthetic-semantic", "capability": "test", "model_family": "test",
+            "upstream_model": "public-fixture", "upstream_revision": "1", "license": "Apache-2.0",
+            "runtime_name": "deterministic-test", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "test_only": True, "embedding_dimension": 4, "model_file": "model.gguf",
+            "weight_sha256": hashlib.sha256(model).hexdigest(), "golden_suite": "conformance.json",
+            "golden_suite_hash": hashlib.sha256(suite).hexdigest(),
+            "artifacts": {"model.gguf": hashlib.sha256(model).hexdigest(), "conformance.json": hashlib.sha256(suite).hexdigest()},
+        }
+        archive_stream = io.BytesIO()
+        with tarfile.open(fileobj=archive_stream, mode="w:gz") as archive:
+            for name, content in (("manifest.json", json.dumps(manifest).encode("utf-8")), ("conformance.json", suite)):
+                entry = tarfile.TarInfo(name)
+                entry.size = len(content)
+                archive.addfile(entry, io.BytesIO(content))
+        metadata = archive_stream.getvalue()
+        parts = [model[:11], model[11:]]
+        descriptor = {
+            "schema": "project-brain-model-pack-v1", "pack_id": "synthetic-semantic",
+            "metadata": {"url": "https://github.com/example/project/releases/download/v1/metadata.tar.gz", "sha256": hashlib.sha256(metadata).hexdigest(), "size": len(metadata)},
+            "model": {
+                "file": "model.gguf", "sha256": hashlib.sha256(model).hexdigest(),
+                "parts": [
+                    {"url": f"https://github.com/example/project/releases/download/v1/model.part{index}", "sha256": hashlib.sha256(part).hexdigest(), "size": len(part)}
+                    for index, part in enumerate(parts)
+                ],
+            },
+        }
+        descriptor_bytes = json.dumps(descriptor, separators=(",", ":")).encode("utf-8")
+        payloads = {
+            "https://github.com/example/project/releases/download/v1/descriptor.json": descriptor_bytes,
+            descriptor["metadata"]["url"]: metadata,
+            **{part["url"]: content for part, content in zip(descriptor["model"]["parts"], parts, strict=True)},
+        }
+
+        class Response(io.BytesIO):
+            def __init__(self, url: str, content: bytes):
+                super().__init__(content)
+                self.url = url
+                self.headers = {"Content-Length": str(len(content))}
+
+            def geturl(self) -> str:
+                return self.url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                self.close()
+
+        def download(request, timeout=0):
+            return Response(request.full_url, payloads[request.full_url])
+
+        descriptor_url = "https://github.com/example/project/releases/download/v1/descriptor.json"
+        with mock.patch("brain.models.urlopen", side_effect=download):
+            installed = install_release_descriptor(self.settings, descriptor_url, hashlib.sha256(descriptor_bytes).hexdigest())
+        self.assertEqual("synthetic-semantic", installed["pack_id"])
+        self.assertEqual(model, (self.settings.state_dir / "models" / "synthetic-semantic" / "model.gguf").read_bytes())
+        self.assertTrue(verify_pack(self.settings, "synthetic-semantic")["verified"])
+
+    def test_cli_official_semantic_alias_uses_the_controlled_catalog(self) -> None:
+        output = io.StringIO()
+        catalog = {"semantic": {"pack_id": "qwen3-embedding-4b-q6k-darwin-arm64", "descriptor_url": "https://github.com/example/project/releases/download/v1/descriptor.json", "descriptor_sha256": "a" * 64}}
+        with mock.patch("brain.models.OFFICIAL_PACKS", catalog), mock.patch("brain.models.install_official_pack", return_value={"pack_id": "qwen3-embedding-4b-q6k-darwin-arm64"}) as install:
+            with redirect_stdout(output):
+                self.assertEqual(0, main(["-c", str(self.config), "model", "install", "semantic"]))
+        install.assert_called_once_with(self.settings, "semantic")
+        self.assertEqual("qwen3-embedding-4b-q6k-darwin-arm64", json.loads(output.getvalue())["pack_id"])
 
     def test_model_conformance_rejects_bad_reranker_golden(self) -> None:
         pack = self.root / "bad-reranker-pack"
@@ -1572,6 +1652,40 @@ class GitSyncTest(unittest.TestCase):
 
 
 class ReleaseSafetyTest(unittest.TestCase):
+    def test_homebrew_formula_is_rendered_only_from_final_release_checksums(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("update_homebrew_formula", root / "scripts/update_homebrew_formula.py")
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(module)
+        values = {
+            "project-brain-v9.9.9-macos-arm64.tar.gz": "a" * 64,
+            "project-brain-v9.9.9-macos-amd64.tar.gz": "b" * 64,
+            "project-brain-v9.9.9-linux-arm64.tar.gz": "c" * 64,
+            "project-brain-v9.9.9-linux-amd64.tar.gz": "d" * 64,
+        }
+        formula = module.render("9.9.9", values)
+        self.assertIn("v9.9.9/project-brain-v9.9.9-macos-arm64.tar.gz", formula)
+        self.assertIn('sha256 "a" * 64', formula.replace('"' + "a" * 64 + '"', '"a" * 64'))
+        self.assertNotIn("bottle do", formula)
+        with self.assertRaisesRegex(ValueError, "missing standalone"):
+            module.render("9.9.9", {})
+        workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("needs: github-release", workflow)
+        self.assertIn("cmp published/SHA256SUMS.txt dist/SHA256SUMS.txt", workflow)
+        self.assertIn("HOMEBREW_TAP_TOKEN", workflow)
+
+    def test_semantic_pack_workflow_pins_official_inputs_and_never_bundles_core(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/semantic-pack.yml").read_text(encoding="utf-8")
+        self.assertIn("Qwen/Qwen3-Embedding-4B-GGUF/resolve/$QWEN_GGUF_REVISION/Qwen3-Embedding-4B-Q6_K.gguf", workflow)
+        self.assertIn("0c04b2b5e9b039dd01fd1e6d757968855fd5e2523bb3e9a4a03fa6454973a1af", workflow)
+        self.assertIn("QWEN_TOKENIZER_SHA256", workflow)
+        self.assertIn("semantic-pack-v*", workflow)
+        self.assertNotIn("release.yml", workflow)
+        self.assertIn("--minimum-brain-version 0.6.2", workflow)
+
     def test_standalone_release_builds_source_pinned_zoekt(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text(encoding="utf-8")
         self.assertIn('go-version: "1.24.7"', workflow)
