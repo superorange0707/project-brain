@@ -15,7 +15,7 @@ This guide is for a release engineer or organization-controlled pack builder. It
 
 Qwen is the present implementation choice, not an architectural requirement: the manifest carries family, runtime, source revision, and capability. The official Qwen weights are the source of truth. When Qwen publishes the selected embedding model as an official GGUF, use that artifact directly rather than converting it again. Qwen documents both its official GGUF releases and local conversion path; its embedding repository also publishes the official embedding/reranking evaluation contract. See the [Qwen llama.cpp guide](https://github.com/QwenLM/Qwen3/blob/main/docs/source/run_locally/llama.cpp.md), [Qwen quantization guide](https://github.com/QwenLM/Qwen3/blob/main/docs/source/quantization/llama.cpp.md), and [Qwen3 Embedding evaluation repository](https://github.com/QwenLM/Qwen3-Embedding/tree/main/evaluation).
 
-## Official Semantic pack v1.0.2
+## Official Semantic pack
 
 The first Project Brain-controlled Semantic release is a separately versioned
 macOS Apple Silicon pack, not part of the Core wheel, standalone archive, or
@@ -51,9 +51,8 @@ The Core catalog pins the release descriptor SHA-256. The installer verifies
 that descriptor, each GitHub Release part, and the final assembled model before
 installing the normal local pack layout. Hugging Face is only a packaging-time
 upstream source; enterprise runtime inference has no Hugging Face dependency.
-The published descriptor is
-[`semantic-pack-v1.0.2`](https://github.com/superorange0707/project-brain/releases/download/semantic-pack-v1.0.2/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json),
-SHA-256 `5c3e208a2af56f593bb782dfaed07956f3a95b27340e986fd91c1221d7392e52`.
+The Core catalog is populated only after a clean temporary installation verifies
+the published runtime as well as the descriptor and model checksums.
 
 ## Pack layout and manifest
 

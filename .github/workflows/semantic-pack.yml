@@ -38,9 +38,12 @@ jobs:
           git clone https://github.com/ggml-org/llama.cpp.git upstream/llama.cpp
           git -C upstream/llama.cpp checkout --detach "$LLAMA_CPP_REVISION"
           test "$(git -C upstream/llama.cpp rev-parse HEAD)" = "$LLAMA_CPP_REVISION"
-          cmake -S upstream/llama.cpp -B upstream/llama.cpp/build -DGGML_METAL=ON -DLLAMA_BUILD_SERVER=ON
+          cmake -S upstream/llama.cpp -B upstream/llama.cpp/build \
+            -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF
           cmake --build upstream/llama.cpp/build --target llama-server --parallel 3
           test -x upstream/llama.cpp/build/bin/llama-server
+          ! otool -L upstream/llama.cpp/build/bin/llama-server | rg '(@rpath|/opt/homebrew|/usr/local)'
       - name: Build public synthetic conformance pack and descriptor
         env:
           QWEN_GGUF_REVISION: 4eb3b8293ac9b642f61ece63459fae31e82d6669

@@ -66,12 +66,10 @@ uses the unchanged official Qwen3-Embedding-4B Q6_K GGUF, is installed only
 from a Project Brain-controlled GitHub Release descriptor, and remains entirely
 offline once installed. It is not bundled into Core or Homebrew.
 
-The initial Apple Silicon pack is
-[`semantic-pack-v1.0.2`](https://github.com/superorange0707/project-brain/releases/tag/semantic-pack-v1.0.2).
-Core v0.6.2 pins its descriptor SHA-256
-`5c3e208a2af56f593bb782dfaed07956f3a95b27340e986fd91c1221d7392e52`;
-`brain model install semantic` verifies that descriptor, the release parts, and
-the reassembled model before registering the pack.
+An official pack enters a Core catalog only after its exact descriptor, release
+parts, reconstructed model, provenance, and clean temporary installation have
+all been verified. `brain model install semantic` then verifies that descriptor,
+the release parts, and the reassembled model before registering the pack.
 
 See [offline model-pack operations](docs/MODEL_PACKS.md) for the audited pack
 format, official-Qwen conversion provenance, local conformance, controlled

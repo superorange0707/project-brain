@@ -326,9 +326,6 @@ GitHub Release; its descriptor, every release part, and the assembled GGUF are
 checked before the local pack is registered. It never contacts Hugging Face or
 any hosted model service while indexing or querying.
 
-The current pack is `semantic-pack-v1.0.2`; Core v0.6.2 pins descriptor
-SHA-256 `5c3e208a2af56f593bb782dfaed07956f3a95b27340e986fd91c1221d7392e52`.
-
 ```bash
 python -m pip install 'project-brain-context[semantic]'
 brain model install semantic

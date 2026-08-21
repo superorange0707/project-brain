@@ -1701,13 +1701,12 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("semantic-pack-v*", workflow)
         self.assertNotIn("release.yml", workflow)
         self.assertIn("--minimum-brain-version 0.6.2", workflow)
+        self.assertIn("-DBUILD_SHARED_LIBS=OFF", workflow)
+        self.assertIn("-DLLAMA_OPENSSL=OFF", workflow)
+        self.assertIn("otool -L", workflow)
 
-    def test_official_semantic_catalog_pins_the_published_descriptor(self) -> None:
-        self.assertEqual({
-            "pack_id": "qwen3-embedding-4b-q6k-darwin-arm64",
-            "descriptor_url": "https://github.com/superorange0707/project-brain/releases/download/semantic-pack-v1.0.2/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json",
-            "descriptor_sha256": "5c3e208a2af56f593bb782dfaed07956f3a95b27340e986fd91c1221d7392e52",
-        }, OFFICIAL_PACKS["semantic"])
+    def test_official_catalog_does_not_resolve_an_unpinned_latest_pack(self) -> None:
+        self.assertEqual({}, OFFICIAL_PACKS)
 
     def test_standalone_release_builds_source_pinned_zoekt(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text(encoding="utf-8")

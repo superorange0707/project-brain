@@ -40,9 +40,9 @@ unpinned `latest` asset. The target work machine downloads only the
 Project Brain-controlled release during installation; all later inference is
 local and offline.
 
-The first published pack is `semantic-pack-v1.0.2`: its descriptor SHA-256 is
-`5c3e208a2af56f593bb782dfaed07956f3a95b27340e986fd91c1221d7392e52`.
-Core v0.6.2 is the first Core release that pins this descriptor in source.
+Do not add an entry to the Core catalog until a clean temporary installation
+also verifies the packaged local runtime can start and complete its golden
+suite.
 
 No release workflow claims target-machine latency, M3 Pro memory usage, private
 ticket replay quality, or Precision capability until those local validations
