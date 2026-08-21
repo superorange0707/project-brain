@@ -1580,6 +1580,14 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("v0.0.0-20251202141441-886b229dcd5e", workflow)
         self.assertIn("zoekt-bin/zoekt zoekt-bin/zoekt-index package/", workflow)
         self.assertNotIn("sourcegraph/zoekt/cmd/zoekt@latest", workflow)
+        self.assertIn(
+            "github-release:\n"
+            "    name: Publish GitHub release\n"
+            "    needs: [build, standalone]\n",
+            workflow,
+        )
+        self.assertIn('gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md', workflow)
+        self.assertIn("    steps:\n      - uses: actions/checkout@v7\n        with:\n          persist-credentials: false\n      - uses: actions/download-artifact@v8", workflow)
 
     def test_repository_contains_no_credential_or_private_path_material(self) -> None:
         root = Path(__file__).resolve().parents[1]
