@@ -39,7 +39,7 @@ same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.2"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.3"
 ```
 
 Upgrade later with:
@@ -51,7 +51,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.2"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.3"
 ```
 
 ### From a source checkout

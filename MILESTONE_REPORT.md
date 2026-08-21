@@ -1,6 +1,6 @@
 # Project Brain milestone readiness report
 
-**Snapshot:** 2026-08-21 · **Local build candidate:** 0.6.2
+**Snapshot:** 2026-08-21 · **Local build candidate:** 0.6.3
 
 This report separates completed, locally tested engineering from validations
 that must run later on the target machine or private local data. It contains no
@@ -55,20 +55,21 @@ brain model autotune PACK --latency-budget-ms 3000
 | Item | Status | What remains |
 | --- | --- | --- |
 | Qwen3-Reranker-4B internal pack artifact | DEFERRED TO TARGET MACHINE | Install an organization-approved, checksummed reranker pack locally; run the included verifier, conformance suite, benchmark, and autotune. The pack/runtime interfaces and conversion documentation are complete. |
-| Official Qwen3-Embedding-4B Q6_K Semantic pack | COMPLETE | Public `semantic-pack-v1.0.6` contains the unchanged official Q6_K GGUF, provenance, notices, static local runtime, checksums, and public/synthetic conformance. A clean temporary installation verified the published descriptor, parts, assembled GGUF, runtime conformance, and a 583-card persistent USearch refresh. Core 0.6.2 pins descriptor SHA-256 `cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`. |
+| Official Qwen3-Embedding-4B Q6_K Semantic pack | COMPLETE | Public `semantic-pack-v1.0.6` contains the unchanged official Q6_K GGUF, provenance, notices, static local runtime, checksums, and public/synthetic conformance. A clean temporary installation verified the published descriptor, parts, assembled GGUF, runtime conformance, and a 583-card persistent USearch refresh. Core 0.6.3 pins descriptor SHA-256 `cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`. |
 | Company model approval | EXTERNAL POLICY DECISION | The organization chooses which official-source artifact is approved. Project Brain has no bypass mechanism and remains useful as Core without it. |
 | Apple M3 Pro / 36 GB measurements | DEFERRED TO TARGET MACHINE | Run the supplied local commands to record embedding p50/p95, batch throughput, 10/20/40/80 rerank latency, retrieval timing, and process/child peak memory. No unverified M3 numbers are claimed here. |
 | Linux x86_64 measurements | DEFERRED TO TARGET MACHINE | Run the same local benchmark commands on the selected Linux host. |
 | Time-split ticket replay and real enterprise Recall/MRR/nDCG | DEFERRED TO PRIVATE LOCAL DATA | Use the existing local golden/replay and historical Git evaluation infrastructure with private labels retained on the work machine. No private corpus is requested or committed. |
 | Public GitHub v0.6.1 release and Homebrew upgrade | COMPLETE | v0.6.1 is published. The official tap points at its final four-platform SHA-256 artifacts; `brew update`, a real 0.6.0→0.6.1 upgrade, formula test, and strict online audit have passed. |
-| Public GitHub v0.6.2 Core release | IN PROGRESS | The clean source passed its full public/synthetic suite after the Semantic descriptor pin. Final wheel/sdist rebuild, clean artifact verification, commit, tag, and release publication remain. |
+| Public GitHub v0.6.3 Core release | IN PROGRESS | A 0.6.2 candidate tag exposed Python 3.11/CI and release-workflow eligibility defects before any GitHub Release or tap update. The clean 0.6.3 source must pass the full public/synthetic suite, build, artifact verification, commit, tag, and release publication. |
 
 ## Publication state audit
 
 - `v0.6.1` is the current published Core release and its Homebrew formula is
-  verified against final GitHub Release SHA-256 values. `v0.6.2` is the clean
-  Core candidate that pins the already-published, separately versioned Semantic
-  pack; it remains subject to final artifact verification and publication.
+  verified against final GitHub Release SHA-256 values. The `v0.6.2` tag was
+  never released: its CI/release workflow defects were discovered before any
+  artifact or tap mutation. `v0.6.3` is the clean candidate that pins the
+  already-published, separately versioned Semantic pack.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.
 - The Semantic pack's packaging download is a release-engineering operation

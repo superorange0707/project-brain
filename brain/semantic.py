@@ -247,7 +247,8 @@ def build_semantic_index(
             Index, numpy = backend
             index = Index(ndim=dimension, metric="cos", dtype="f16")
             index.add(numpy.arange(len(vectors), dtype=numpy.uint64), numpy.asarray(vectors, dtype=numpy.float32))
-            shard = shard_root / f"{hashlib.sha256(f'{repo.name}\0{snapshot}\0{pack_id}'.encode()).hexdigest()}.usearch"
+            shard_identity = f"{repo.name}\0{snapshot}\0{pack_id}"
+            shard = shard_root / f"{hashlib.sha256(shard_identity.encode()).hexdigest()}.usearch"
             temporary = shard.with_suffix(".building")
             index.save(str(temporary))
             temporary.replace(shard)

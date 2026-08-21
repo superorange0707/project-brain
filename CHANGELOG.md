@@ -2,6 +2,15 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.6.3] - 2026-08-21
+
+### Fixed
+
+- Restore Python 3.11 compatibility for content-addressed semantic shard names.
+- Run CI and release-suite tests with the Semantic vector extra installed.
+- Move Homebrew tap-token evaluation into the post-release job so an absent
+  secret safely skips the tap update while a successful release remains valid.
+
 ## [0.6.2] - 2026-08-21
 
 ### Added

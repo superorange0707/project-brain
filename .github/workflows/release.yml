@@ -20,8 +20,8 @@ jobs:
           python-version: "3.14"
       - name: Build and test
         run: |
+          python -m pip install ".[semantic]" build
           python -m unittest discover -s tests -v
-          python -m pip install build
           python -m build
       - uses: actions/upload-artifact@v7
         with:
@@ -130,7 +130,6 @@ jobs:
   homebrew-tap:
     name: Update Homebrew tap after final release
     needs: github-release
-    if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -142,7 +141,19 @@ jobs:
         with:
           path: dist/
           merge-multiple: true
+      - name: Check tap authorization
+        id: authorization
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if test -n "$HOMEBREW_TAP_TOKEN"; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Homebrew tap token is not configured; skipping tap update."
+          fi
       - name: Confirm published checksums are final
+        if: steps.authorization.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -151,6 +162,7 @@ jobs:
           gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS.txt --dir published
           cmp published/SHA256SUMS.txt dist/SHA256SUMS.txt
       - name: Render, test, and publish the formula
+        if: steps.authorization.outputs.available == 'true'
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |

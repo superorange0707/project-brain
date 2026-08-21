@@ -1743,6 +1743,9 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("needs: github-release", workflow)
         self.assertIn("cmp published/SHA256SUMS.txt dist/SHA256SUMS.txt", workflow)
         self.assertIn("HOMEBREW_TAP_TOKEN", workflow)
+        self.assertIn("Check tap authorization", workflow)
+        self.assertIn("steps.authorization.outputs.available == 'true'", workflow)
+        self.assertNotIn("if: ${{ secrets.HOMEBREW_TAP_TOKEN", workflow)
 
     def test_semantic_pack_workflow_pins_official_inputs_and_never_bundles_core(self) -> None:
         root = Path(__file__).resolve().parents[1]

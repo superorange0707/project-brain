@@ -1,6 +1,6 @@
-# Project Brain v0.6.2
+# Project Brain v0.6.3
 
-Project Brain v0.6.2 completes distribution readiness for the optional offline
+Project Brain v0.6.3 completes distribution readiness for the optional offline
 Semantic edition without changing the Core product boundary. The separately
 versioned Qwen3-Embedding-4B Q6_K pack is never bundled into Core or Homebrew;
 Core pins its Project Brain release descriptor and verifies every downloaded
@@ -9,7 +9,9 @@ conformance before local use.
 
 The release also adds a final-release-only Homebrew automation gate. The tap is
 updated only after the GitHub Release and its published `SHA256SUMS.txt` exist
-and match the build output. Failed candidates cannot update the tap.
+and match the build output. Failed candidates cannot update the tap. The
+authorization check is evaluated inside the post-release job, so an absent tap
+token safely skips that update rather than invalidating the Core release.
 
 ## Release qualification
 
