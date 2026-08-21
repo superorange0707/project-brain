@@ -1431,7 +1431,9 @@ class InitTest(unittest.TestCase):
             self.assertIn('path = "."', config)
             self.assertIn("[experience]", config)
             self.assertIn("patch_chars = 0", config)
+            self.assertIn("minimum_free_disk_gb = 5", config)
             self.assertEqual(0, load_settings(repo / "brain.toml").experience_patch_chars)
+            self.assertEqual(5, load_settings(repo / "brain.toml").minimum_free_disk_gb)
 
 
 class GitSyncTest(unittest.TestCase):

@@ -86,7 +86,7 @@ class Settings:
     max_regions_per_file: int = 2
     max_regions_per_repo: int = 8
     max_state_gb: int = 200
-    minimum_free_disk_gb: int = 200
+    minimum_free_disk_gb: int = 5
     experience_enabled: bool = True
     ticket_pattern: str = r"(?<![A-Z0-9])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Z0-9])"
     experience_commit_limit: int = 1000
@@ -462,7 +462,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         max_regions_per_file=max(1, int(context.get("max_regions_per_file") or 2)),
         max_regions_per_repo=max(1, int(context.get("max_regions_per_repo") or 8)),
         max_state_gb=max(0, int(storage["max_state_gb"])) if "max_state_gb" in storage else 200,
-        minimum_free_disk_gb=max(0, int(storage["minimum_free_disk_gb"])) if "minimum_free_disk_gb" in storage else 200,
+        minimum_free_disk_gb=max(0, int(storage["minimum_free_disk_gb"])) if "minimum_free_disk_gb" in storage else 5,
         experience_enabled=bool(experience.get("enabled", True)),
         ticket_pattern=str(experience.get("ticket_pattern") or r"(?<![A-Z0-9])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Z0-9])"),
         experience_commit_limit=max(1, int(experience.get("commit_limit") or 1000)),

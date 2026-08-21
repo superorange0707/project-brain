@@ -42,6 +42,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 - Decode the current Zoekt JSONL base64 line representation before literal
   verification, so real local-shard matches are not dropped.
+- Keep the configurable free-disk safety guard while using a portable 5 GiB
+  default for new and legacy workspaces.
 
 ### Security
 

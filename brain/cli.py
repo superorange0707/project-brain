@@ -307,7 +307,7 @@ def _init(args: argparse.Namespace) -> int:
         "",
         "[storage]",
         "max_state_gb = 200",
-        "minimum_free_disk_gb = 200",
+        "minimum_free_disk_gb = 5",
         "",
         "[models]",
         "# Approved internal HTTPS hosts may be added here for one-time pack installation.",

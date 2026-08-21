@@ -216,7 +216,7 @@ path = "knowledge"
 
 [storage]
 max_state_gb = 200
-minimum_free_disk_gb = 200
+minimum_free_disk_gb = 5
 
 [models]
 approved_install_hosts = [] # optional organization HTTPS pack hosts
