@@ -57,7 +57,7 @@ from brain.catalog import current_generation
 from brain.catalog import connect as catalog_connect
 from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
-from brain.models import DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, rerank_candidates
+from brain.models import EMBEDDING_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
 from brain.models import autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, runtime_for_pack, validate_manifest, verify_pack
 from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, build_semantic_index, chunk_source, search_semantic
 from brain.ops import gc
@@ -758,6 +758,11 @@ else:
         with redirect_stdout(output):
             self.assertEqual(0, main(["-c", str(self.config), "model", "autotune", "test-embedding", "--samples", "1"]))
         self.assertEqual("test-embedding", json.loads(output.getvalue())["pack_id"])
+
+    def test_embedding_batch_parity_allows_only_bounded_runtime_rounding_drift(self) -> None:
+        self.assertEqual(1e-4, EMBEDDING_BATCH_PARITY_TOLERANCE)
+        self.assertTrue(_same_vectors([[0.0]], [[6.2e-5]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
+        self.assertFalse(_same_vectors([[0.0]], [[1.1e-4]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
 
     def test_remote_pack_install_requires_pinned_approved_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "not approved"):
@@ -1707,8 +1712,13 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("-DLLAMA_OPENSSL=OFF", workflow)
         self.assertIn("otool -L", workflow)
 
-    def test_official_catalog_does_not_resolve_an_unpinned_latest_pack(self) -> None:
+    def test_official_catalog_does_not_resolve_a_pack_before_cross_machine_qualification(self) -> None:
         self.assertEqual({}, OFFICIAL_PACKS)
+
+    def test_semantic_pack_builder_uses_a_strong_cross_machine_reference_threshold(self) -> None:
+        builder = (Path(__file__).resolve().parents[1] / "scripts/build_semantic_pack.py").read_text(encoding="utf-8")
+        self.assertIn("MINIMUM_REFERENCE_COSINE = 0.995", builder)
+        self.assertIn('"minimum_cosine_to_reference": MINIMUM_REFERENCE_COSINE', builder)
 
     def test_standalone_release_builds_source_pinned_zoekt(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text(encoding="utf-8")

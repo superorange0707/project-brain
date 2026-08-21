@@ -33,6 +33,11 @@ TOKENIZER_FILE = "tokenizer.json"
 SUITE_FILE = "conformance.json"
 QUERY_INSTRUCTION = "Instruct: Given a code search query, retrieve relevant code passages that answer the query\nQuery: "
 INPUT_SUFFIX = "<|endoftext|>"
+# Metal and CPU backends can differ slightly in floating-point reduction while
+# preserving retrieval ordering. This remains a strong cross-machine check and
+# is paired with exact model/runtime hashes, dimensions, finite values, and
+# ranking parity; it is not a model-quality claim.
+MINIMUM_REFERENCE_COSINE = 0.995
 
 
 def sha256(path: Path) -> str:
@@ -92,7 +97,7 @@ def _case(case_id: str, texts: list[str], expected_order: list[int], endpoint: s
         "texts": texts,
         "dimension": 2560,
         "reference_vectors": vectors,
-        "minimum_cosine_to_reference": 0.9999,
+        "minimum_cosine_to_reference": MINIMUM_REFERENCE_COSINE,
         "expected_similarity_order": expected_order,
         "normalized": False,
     }

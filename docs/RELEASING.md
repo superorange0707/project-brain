@@ -23,12 +23,13 @@ follow-up; do not put a personal token in source or a release artifact.
 
 ## Semantic model-pack release
 
-The first official Semantic pack is published by an independent
-`semantic-pack-v*` tag. Its workflow runs only on macOS Apple Silicon and:
+The first Core-catalogued official Semantic pack is published by an independent
+`semantic-pack-v*` tag. The workflow runs only on macOS Apple Silicon and:
 
 1. downloads the exact official Qwen GGUF and tokenizer revisions and verifies
    their upstream SHA-256 values;
-2. builds the recorded `llama.cpp` revision locally with Metal support;
+2. builds the recorded relocatable static `llama.cpp` runtime locally with
+   Metal support, rejecting Homebrew-linked and unresolved `@rpath` binaries;
 3. runs public/synthetic conformance through that exact local runtime;
 4. emits the manifest, provenance, Apache-2.0 and runtime notices, descriptor,
    model parts, and `SHA256SUMS.txt`;

@@ -61,10 +61,11 @@ or cloud service. Optional approved packs are installed from a local path or a
 hash-pinned approved release, checksum-verified, and may only use a loopback
 runtime; Project Brain never downloads weights while it runs.
 
-The first official Semantic pack is separately released for Apple Silicon. It
-uses the unchanged official Qwen3-Embedding-4B Q6_K GGUF, is installed only
-from a Project Brain-controlled GitHub Release descriptor, and remains entirely
-offline once installed. It is not bundled into Core or Homebrew.
+The first Core-catalogued Semantic pack will be separately released for Apple
+Silicon. It uses the unchanged official Qwen3-Embedding-4B Q6_K GGUF, is
+installed only from a Project Brain-controlled GitHub Release descriptor, and
+remains entirely offline once installed. It is not bundled into Core or
+Homebrew.
 
 An official pack enters a Core catalog only after its exact descriptor, release
 parts, reconstructed model, provenance, and clean temporary installation have

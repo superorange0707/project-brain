@@ -17,9 +17,9 @@ Qwen is the present implementation choice, not an architectural requirement: the
 
 ## Official Semantic pack
 
-The first Project Brain-controlled Semantic release is a separately versioned
-macOS Apple Silicon pack, not part of the Core wheel, standalone archive, or
-Homebrew formula. It contains the unchanged official
+The first Core-catalogued Project Brain Semantic release is a separately
+versioned macOS Apple Silicon pack, not part of the Core wheel, standalone
+archive, or Homebrew formula. It contains the unchanged official
 `Qwen/Qwen3-Embedding-4B-GGUF` artifact
 `Qwen3-Embedding-4B-Q6_K.gguf` at revision
 `4eb3b8293ac9b642f61ece63459fae31e82d6669`, SHA-256
@@ -29,12 +29,13 @@ The included official tokenizer is pinned to
 `5cf2132abc99cad020ac570b19d031efec650f2b`, SHA-256
 `83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d`.
 
-The pack release includes the checked GGUF, a source-pinned macOS ARM64
+It includes the checked GGUF, a relocatable source-pinned macOS ARM64
 `llama.cpp` runtime, Apache-2.0 and runtime notices, a provenance record,
 runtime arguments, 2560-dimensional last-token pooling metadata, the query
 instruction/card/chunk versions, and public/synthetic batch, multilingual,
-code, long-input, finite-vector, and ranking conformance cases. It makes no M3
-Pro performance or private-repository relevance claim.
+code, long-input, finite-vector, and ranking conformance cases. Its release
+gate rejects Homebrew-linked and unresolved `@rpath` dependencies. It makes no
+M3 Pro performance or private-repository relevance claim.
 
 After installing a compatible Core release, use the controlled alias:
 

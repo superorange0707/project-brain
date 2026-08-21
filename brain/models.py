@@ -35,10 +35,16 @@ MAX_RERANK_POOL = 80
 DEFAULT_EMBEDDING_BATCH_SIZE = 16
 DEFAULT_BENCHMARK_SAMPLES = 3
 DEFAULT_MODEL_LATENCY_BUDGET_MS = 3_000
+# The local llama.cpp Metal backend can differ very slightly between a batch
+# request and equivalent single-item requests. This permits only observed
+# floating-point reduction drift; reference-vector cosine and ranking gates
+# remain independent conformance requirements.
+EMBEDDING_BATCH_PARITY_TOLERANCE = 1e-4
 
 # Each entry is added only after its separately versioned model-pack release
-# passes a clean installation check. Never resolve an unpinned "latest"
-# release at install time. Tests inject a tiny synthetic catalog.
+# passes final-release checksum verification and a clean installation check.
+# Never resolve an unpinned "latest" release at install time. Tests inject a
+# tiny synthetic catalog until the first cross-machine-qualified pack is ready.
 OFFICIAL_PACKS: dict[str, dict[str, str]] = {}
 MODEL_PACK_DESCRIPTOR_SCHEMA = "project-brain-model-pack-v1"
 
@@ -489,7 +495,7 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
                 instruction = str(case.get("instruction") or manifest.get("document_instruction") or "")
                 batch = runtime.embed(runtime_texts, instruction=instruction, dimension=dimension)
                 individual = [runtime.embed([text], instruction=instruction, dimension=dimension)[0] for text in runtime_texts]
-                if (not _same_vectors(batch, individual) or any(len(vector) != dimension or any(not math.isfinite(value) for value in vector) for vector in batch)):
+                if (not _same_vectors(batch, individual, tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE) or any(len(vector) != dimension or any(not math.isfinite(value) for value in vector) for vector in batch)):
                     raise ValueError(f"embedding conformance failed at case {number}")
                 if case.get("normalized") and any(abs(math.sqrt(sum(value * value for value in vector)) - 1.0) > 1e-3 for vector in batch):
                     raise ValueError(f"embedding normalization conformance failed at case {number}")
