@@ -106,7 +106,7 @@ def conformance(runtime: Path, model: Path, output: Path) -> None:
     command = [
         str(runtime), "--model", str(model), "--host", "127.0.0.1", "--port", str(port),
         "--api-key", key, "--offline", "--no-webui", "--embedding", "--pooling", "last",
-        "-ub", "8192", "--verbose-prompt",
+        "--ctx-size", "4096", "-ub", "512",
     ]
     with log.open("wb") as stderr:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stderr, stderr=stderr, start_new_session=True)
@@ -114,7 +114,14 @@ def conformance(runtime: Path, model: Path, output: Path) -> None:
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                raise RuntimeError("llama.cpp exited during pack conformance; see llama-server-build.log")
+                try:
+                    tail = log.read_text(encoding="utf-8", errors="replace")[-6000:]
+                except OSError:
+                    tail = "(llama.cpp log was unavailable)"
+                raise RuntimeError(
+                    "llama.cpp exited during pack conformance "
+                    f"(exit code {process.returncode}):\n{tail}"
+                )
             try:
                 with urlopen(endpoint + "/health", timeout=2) as response:
                     if response.status < 400:
@@ -273,7 +280,7 @@ def main() -> int:
         "runtime_revision": args.runtime_revision,
         "runtime_binary": RUNTIME_FILE,
         "model_file": MODEL_FILE,
-        "runtime_args": ["--pooling", "last", "-ub", "8192", "--verbose-prompt"],
+        "runtime_args": ["--pooling", "last", "--ctx-size", "4096", "-ub", "512"],
         "pooling": "last-token",
         "normalization": "none",
         "input_suffix": INPUT_SUFFIX,

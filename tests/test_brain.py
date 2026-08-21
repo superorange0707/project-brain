@@ -1055,6 +1055,7 @@ else:
             "runtime_name": "llama.cpp", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
             "installed_path": str(pack), "runtime_binary": "llama-server", "model_file": "model.gguf",
             "artifacts": {"llama-server": hashlib.sha256(binary.read_bytes()).hexdigest(), "model.gguf": hashlib.sha256(model.read_bytes()).hexdigest()},
+            "runtime_args": ["--ctx-size", "4096", "-ub", "512"],
             "test_only": True,
         }
         validate_manifest(manifest)
@@ -1069,6 +1070,8 @@ else:
             self.assertIn("--offline", command)
             self.assertIn("--no-webui", command)
             self.assertIn("--embedding", command)
+            self.assertIn("--ctx-size", command)
+            self.assertIn("4096", command)
             self.assertNotIn("--hf-repo", command)
             runtime.shutdown()
             kill.assert_called_once()
