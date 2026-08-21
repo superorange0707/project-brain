@@ -51,6 +51,9 @@ The Core catalog pins the release descriptor SHA-256. The installer verifies
 that descriptor, each GitHub Release part, and the final assembled model before
 installing the normal local pack layout. Hugging Face is only a packaging-time
 upstream source; enterprise runtime inference has no Hugging Face dependency.
+The published descriptor is
+[`semantic-pack-v1.0.2`](https://github.com/superorange0707/project-brain/releases/download/semantic-pack-v1.0.2/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json),
+SHA-256 `5c3e208a2af56f593bb782dfaed07956f3a95b27340e986fd91c1221d7392e52`.
 
 ## Pack layout and manifest
 

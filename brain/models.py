@@ -36,11 +36,16 @@ DEFAULT_EMBEDDING_BATCH_SIZE = 16
 DEFAULT_BENCHMARK_SAMPLES = 3
 DEFAULT_MODEL_LATENCY_BUDGET_MS = 3_000
 
-# The populated catalog is deliberately source-pinned in a Core release after a
-# separately versioned model-pack release has published its immutable descriptor.
-# Keeping this empty until then is safer than resolving an unpinned "latest"
-# release at install time.  Tests inject a tiny synthetic catalog.
-OFFICIAL_PACKS: dict[str, dict[str, str]] = {}
+# Each entry is added only after its separately versioned model-pack release
+# has published an immutable descriptor. Never resolve an unpinned "latest"
+# release at install time. Tests inject a tiny synthetic catalog.
+OFFICIAL_PACKS: dict[str, dict[str, str]] = {
+    "semantic": {
+        "pack_id": "qwen3-embedding-4b-q6k-darwin-arm64",
+        "descriptor_url": "https://github.com/superorange0707/project-brain/releases/download/semantic-pack-v1.0.2/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json",
+        "descriptor_sha256": "5c3e208a2af56f593bb782dfaed07956f3a95b27340e986fd91c1221d7392e52",
+    },
+}
 MODEL_PACK_DESCRIPTOR_SCHEMA = "project-brain-model-pack-v1"
 
 

@@ -57,7 +57,7 @@ from brain.catalog import current_generation
 from brain.catalog import connect as catalog_connect
 from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
-from brain.models import DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, rerank_candidates
+from brain.models import DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, rerank_candidates
 from brain.models import autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, runtime_for_pack, validate_manifest, verify_pack
 from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, build_semantic_index, chunk_source, search_semantic
 from brain.ops import gc
@@ -1694,6 +1694,13 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("semantic-pack-v*", workflow)
         self.assertNotIn("release.yml", workflow)
         self.assertIn("--minimum-brain-version 0.6.2", workflow)
+
+    def test_official_semantic_catalog_pins_the_published_descriptor(self) -> None:
+        self.assertEqual({
+            "pack_id": "qwen3-embedding-4b-q6k-darwin-arm64",
+            "descriptor_url": "https://github.com/superorange0707/project-brain/releases/download/semantic-pack-v1.0.2/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json",
+            "descriptor_sha256": "5c3e208a2af56f593bb782dfaed07956f3a95b27340e986fd91c1221d7392e52",
+        }, OFFICIAL_PACKS["semantic"])
 
     def test_standalone_release_builds_source_pinned_zoekt(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text(encoding="utf-8")
