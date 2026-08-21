@@ -739,6 +739,12 @@ else:
         self.assertTrue(verified["conformance"]["passed"])
         self.assertEqual("semantic", set_edition(self.settings, "semantic"))
         self.assertEqual("semantic", current_edition(self.settings))
+        with mock.patch("brain.semantic._usearch", return_value=None):
+            unavailable = capabilities(self.settings)
+            self.assertTrue(unavailable["embedding_pack"])
+            self.assertFalse(unavailable["embedding"])
+            with self.assertRaisesRegex(ValueError, "USearch"):
+                set_edition(self.settings, "semantic")
         report = benchmark_pack(self.settings, "test-embedding")
         self.assertTrue(report["batch_consistent"])
         self.assertEqual({"1", "8", "16"}, set(report["embedding_batches"]))

@@ -89,7 +89,8 @@ brew upgrade superorange0707/tap/project-brain
 
 The Homebrew package uses a prebuilt release: it does not compile Python or
 require Xcode. It includes the tested structural backend and pinned Zoekt search
-commands. The small,
+commands plus the local USearch vector backend required by an installed Semantic
+model pack. The small,
 separate [Homebrew tap](https://github.com/superorange0707/homebrew-tap) is
 Homebrew's standard index for third-party formulae; the application source stays
 in this repository.

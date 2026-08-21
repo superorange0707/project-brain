@@ -305,6 +305,10 @@ pack. Semantic indexing additionally uses the optional USearch extra:
 python -m pip install 'project-brain-context[semantic]'
 ```
 
+The Homebrew and standalone archives include this local vector backend, but do
+not include model weights. A plain Python Core installation reports the missing
+backend instead of allowing a partially functional Semantic edition.
+
 Pack installation is deliberately local-only:
 
 ```bash
