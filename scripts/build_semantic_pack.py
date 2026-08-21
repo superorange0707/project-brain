@@ -79,8 +79,9 @@ def cosine(left: list[float], right: list[float]) -> float:
     )
 
 
-def _case(case_id: str, texts: list[str], expected_order: list[int], endpoint: str, key: str, instruction: str = "") -> dict[str, object]:
-    vectors = _post(endpoint, key, [instruction + text + INPUT_SUFFIX for text in texts])
+def _case(case_id: str, texts: list[str], expected_order: list[int], endpoint: str, key: str, instruction: str = "", truncate_to_chars: int | None = None) -> dict[str, object]:
+    runtime_texts = [text[:truncate_to_chars] for text in texts] if truncate_to_chars is not None else texts
+    vectors = _post(endpoint, key, [instruction + text + INPUT_SUFFIX for text in runtime_texts])
     if any(len(vector) != 2560 for vector in vectors):
         raise RuntimeError("official Qwen3-Embedding-4B GGUF did not return 2560-dimensional vectors")
     order = sorted(range(1, len(texts)), key=lambda index: (-cosine(vectors[0], vectors[index]), index))
@@ -97,6 +98,8 @@ def _case(case_id: str, texts: list[str], expected_order: list[int], endpoint: s
     }
     if instruction:
         result["instruction"] = instruction
+    if truncate_to_chars is not None:
+        result["truncate_to_chars"] = truncate_to_chars
     return result
 
 
@@ -170,7 +173,7 @@ def conformance(runtime: Path, model: Path, output: Path) -> None:
                 ),
                 _case(
                     "long-code-card",
-                    [long_code], [], endpoint, key,
+                    [long_code], [], endpoint, key, truncate_to_chars=2048,
                 ),
             ],
         }

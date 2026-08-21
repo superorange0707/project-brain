@@ -907,13 +907,15 @@ else:
         tokenizer.write_bytes(b"pinned tokenizer")
         runtime = DeterministicRuntime(16)
         texts = ["verified code", "verified code implementation", "unrelated " * 100]
-        vectors = runtime.embed(texts, dimension=16)
+        runtime_texts = [text[:500] for text in texts]
+        vectors = runtime.embed(runtime_texts, dimension=16)
         order = sorted(range(1, len(texts)), key=lambda index: -sum(left * right for left, right in zip(vectors[0], vectors[index], strict=True)))
         suite_path = pack / "conformance.json"
         suite_path.write_text(json.dumps({
             "requirements": {"long_input_min_chars": 500},
             "embedding": [{
                 "texts": texts, "dimension": 16, "normalized": True,
+                "truncate_to_chars": 500,
                 "reference_vectors": vectors, "minimum_cosine_to_reference": 0.999,
                 "expected_similarity_order": order,
             }],

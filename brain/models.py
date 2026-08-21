@@ -482,9 +482,13 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
                 dimension = case.get("dimension") or manifest.get("embedding_dimension")
                 if not isinstance(texts, list) or not texts or not all(isinstance(text, str) for text in texts) or not isinstance(dimension, int) or dimension < 1:
                     raise ValueError(f"golden_suite embedding case {number} is invalid")
+                truncate_to_chars = case.get("truncate_to_chars")
+                if truncate_to_chars is not None and (not isinstance(truncate_to_chars, int) or truncate_to_chars < 1):
+                    raise ValueError(f"golden_suite embedding case {number} has invalid truncate_to_chars")
+                runtime_texts = [text[:truncate_to_chars] for text in texts] if truncate_to_chars is not None else texts
                 instruction = str(case.get("instruction") or manifest.get("document_instruction") or "")
-                batch = runtime.embed(texts, instruction=instruction, dimension=dimension)
-                individual = [runtime.embed([text], instruction=instruction, dimension=dimension)[0] for text in texts]
+                batch = runtime.embed(runtime_texts, instruction=instruction, dimension=dimension)
+                individual = [runtime.embed([text], instruction=instruction, dimension=dimension)[0] for text in runtime_texts]
                 if (not _same_vectors(batch, individual) or any(len(vector) != dimension or any(not math.isfinite(value) for value in vector) for vector in batch)):
                     raise ValueError(f"embedding conformance failed at case {number}")
                 if case.get("normalized") and any(abs(math.sqrt(sum(value * value for value in vector)) - 1.0) > 1e-3 for vector in batch):

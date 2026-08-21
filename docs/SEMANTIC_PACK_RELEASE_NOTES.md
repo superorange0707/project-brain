@@ -1,4 +1,4 @@
-# Project Brain Semantic Pack v1.0.4
+# Project Brain Semantic Pack v1.0.5
 
 This separately versioned macOS Apple Silicon model pack contains the official
 unchanged `Qwen/Qwen3-Embedding-4B-GGUF`
