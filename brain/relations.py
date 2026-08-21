@@ -45,7 +45,7 @@ def _files(repo: Repository, suffixes: set[str]) -> Iterable[Path]:
     for path in root.rglob("*") if root.is_dir() else []:
         if path.is_file() and path.suffix.lower() in suffixes and not any(
             part in {".git", "target", "build", "node_modules", ".venv"} for part in path.parts
-        ):
+        ) and path.name.lower() not in {".env", ".envrc", "credentials", "credentials.json", "service-account.json", "id_rsa", "id_ed25519", "keystore"} and path.suffix.lower() not in {".key", ".pem", ".p12", ".pfx", ".jks"}:
             yield path
 
 

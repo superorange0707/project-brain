@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 from datetime import UTC, datetime
@@ -137,8 +138,16 @@ def build_experience_index(settings: Settings, *, changed_only: bool = True) -> 
             continue
         commits: list[dict[str, Any]] = []
         if settings.experience_enabled and sha and (repo.path / ".git").exists():
+            history_range = sha
+            cached_commits: list[dict[str, Any]] = []
+            previous_sha = str(cached.get("sha") or "") if isinstance(cached, dict) else ""
+            if changed_only and previous_sha:
+                ancestor = _run(["git", "merge-base", "--is-ancestor", previous_sha, sha], repo.path)
+                if ancestor.returncode == 0:
+                    history_range = f"{previous_sha}..{sha}"
+                    cached_commits = list(cached.get("commits") or [])
             command = [
-                "git", "log", sha, f"-n{settings.experience_commit_limit}", "--date=short",
+                "git", "log", history_range, f"-n{settings.experience_commit_limit}", "--date=short",
                 "--pretty=format:%x1e%H%x1f%ad%x1f%s", "--name-status", "--find-renames",
                 "--diff-merges=first-parent",
             ]
@@ -148,7 +157,9 @@ def build_experience_index(settings: Settings, *, changed_only: bool = True) -> 
                 # ordinary commit paths even if they cannot render merge diffs.
                 result = _run(command[:-1], repo.path)
             if result.returncode == 0:
-                commits = _parse_log(result.stdout, pattern)
+                commits = _parse_log(result.stdout, pattern) + cached_commits
+                unique: dict[str, dict[str, Any]] = {str(item["sha"]): item for item in commits}
+                commits = list(unique.values())[: settings.experience_commit_limit]
         repositories[repo.name] = {"sha": sha, "commits": commits}
 
     grouped: dict[str, dict[str, Any]] = {}
@@ -343,6 +354,12 @@ def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -
             matched_files = actual & retrieved
             matched_repos = actual_repos & retrieved_repos
             matched_tests = actual_tests & retrieved
+            ordered_paths: list[str] = []
+            for context in sorted(directory.glob("context-*.md")):
+                ordered_paths.extend(f"{repo.strip()}:{path}" for repo, path in evidence_pattern.findall(context.read_text(encoding="utf-8", errors="replace")))
+            first_relevant = next((rank for rank, value in enumerate(ordered_paths[:10], 1) if value in actual), None)
+            dcg = sum(1 / math.log2(rank + 1) for rank, value in enumerate(ordered_paths[:10], 1) if value in actual)
+            ideal = sum(1 / math.log2(rank + 1) for rank in range(1, min(10, len(actual)) + 1))
             evaluations.append(
                 {
                     "ticket": ticket,
@@ -356,6 +373,10 @@ def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -
                     "file_recall": len(matched_files) / len(actual) if actual else None,
                     "repo_recall": len(matched_repos) / len(actual_repos) if actual_repos else None,
                     "test_recall": len(matched_tests) / len(actual_tests) if actual_tests else None,
+                    "mrr_at_10": 1 / first_relevant if first_relevant else 0.0,
+                    "ndcg_at_10": dcg / ideal if ideal else None,
+                    "changed_file_precision": len(matched_files) / len(retrieved) if retrieved else None,
+                    "duplicate_window_ratio": 1 - len(set(ordered_paths)) / len(ordered_paths) if ordered_paths else 0.0,
                     "missed_paths": sorted(actual - retrieved),
                 }
             )
@@ -367,6 +388,10 @@ def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -
         "repo_recall": aggregate("matched_repos", "actual_repos"),
         "file_recall": aggregate("matched_files", "actual_files"),
         "test_recall": aggregate("matched_tests", "actual_tests"),
+        "mrr_at_10": sum(float(item["mrr_at_10"]) for item in evaluations) / len(evaluations) if evaluations else None,
+        "ndcg_at_10": sum(float(item["ndcg_at_10"] or 0) for item in evaluations) / len(evaluations) if evaluations else None,
+        "changed_file_precision": sum(float(item["changed_file_precision"] or 0) for item in evaluations) / len(evaluations) if evaluations else None,
+        "duplicate_window_ratio": sum(float(item["duplicate_window_ratio"]) for item in evaluations) / len(evaluations) if evaluations else None,
     }
 
     def percent(value: float | None) -> str:
@@ -390,6 +415,10 @@ def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -
         f"Aggregate repository recall: {percent(summary['repo_recall'])}",
         f"Aggregate changed-file recall: {percent(summary['file_recall'])}",
         f"Aggregate changed-test recall: {percent(summary['test_recall'])}",
+        f"MRR@10: {percent(summary['mrr_at_10'])}",
+        f"nDCG@10: {percent(summary['ndcg_at_10'])}",
+        f"Changed-file precision: {percent(summary['changed_file_precision'])}",
+        f"Duplicate-window ratio: {percent(summary['duplicate_window_ratio'])}",
         "",
         "File recall measures whether investigation evidence included files later changed by a ticket-labelled commit. Related evidence may be valuable even when it was not changed, so precision is intentionally not claimed.",
         "",

@@ -47,7 +47,7 @@ configured repositories. You apply the final solution in your IDE.
 |---|---|
 | 🔒 **Safe source snapshots** | Fetches remote refs, but never pulls, checks out, resets, cleans, or edits a repository |
 | 🧭 **Multi-repository workflows** | Connects Maven, Kafka, Spring REST, and Feign evidence across repos |
-| 🤖 **Model-independent** | Works with Claude, ChatGPT, M365 Copilot, or any text model—no MCP required |
+| 🤖 **Three offline editions** | Core needs no model; optional audited local Semantic and Precision packs stay on-device |
 | 🖥️ **Local investigation cockpit** | Paste tickets and AI replies, preview every operation, inspect evidence, and copy results |
 | 📚 **Evidence-complete** | Retrieves production source, tests, config, relationships, and history |
 | 🧠 **Structural + exact** | Pinned code graph when bundled; deterministic exact/lexical fallback everywhere |
@@ -56,7 +56,14 @@ configured repositories. You apply the final solution in your IDE.
 | 🧩 **Local ticket experience** | Learns reusable repo/file/test patterns from ticket-labelled Git commits—without a model or upload |
 | 🧑‍💻 **Persistent M365 Agent** | Generates permanent Instructions and Knowledge so Copilot always knows when to use Brain or ask you directly |
 
-No vector database, hosted indexing service, or model/API credential.
+Core requires no vector database, hosted indexing service, model/API credential,
+or cloud service. Optional approved packs are installed from a local path or a
+hash-pinned approved release, checksum-verified, and may only use a loopback
+runtime; Project Brain never downloads weights while it runs.
+
+See [offline model-pack operations](docs/MODEL_PACKS.md) for the audited pack
+format, official-Qwen conversion provenance, local conformance, controlled
+installation, machine measurement, and autotuning workflow.
 
 ## Install
 
@@ -67,7 +74,8 @@ brew install superorange0707/tap/project-brain
 ```
 
 The Homebrew package uses a prebuilt release: it does not compile Python or
-require Xcode. It also includes the tested structural backend. The small,
+require Xcode. It includes the tested structural backend and pinned Zoekt search
+commands. The small,
 separate [Homebrew tap](https://github.com/superorange0707/homebrew-tap) is
 Homebrew's standard index for third-party formulae; the application source stays
 in this repository.
@@ -76,12 +84,12 @@ in this repository.
 
 Download the archive for your CPU from the
 [latest release](https://github.com/superorange0707/project-brain/releases/latest),
-extract it, and place both executables on `PATH`:
+extract it, and place all four executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.6.0-macos-arm64.tar.gz
+tar -xzf project-brain-v0.6.1-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
-install brain codebase-memory-mcp ~/.local/bin/
+install brain codebase-memory-mcp zoekt zoekt-index ~/.local/bin/
 ```
 
 The Python installs below require Python 3.11+ and use the exact/lexical fallback
@@ -90,19 +98,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.1"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.1"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.0/project_brain_context-0.6.0-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.1/project_brain_context-0.6.1-py3-none-any.whl
 ```
 
 Then verify:
@@ -270,7 +278,10 @@ The GUI is a thin, local layer over the same tested retrieval core as the CLI:
 - **Review changes** packages tracked diffs, developer notes, and observed test output; it never runs the command or claims success itself.
 - **Investigation history** reopens ticket, request, context, and feedback artifacts under `.runs/TICKET/`.
 
-There is no embedded model, MCP client, hosted service, or automatic code editor.
+There is no hosted model, automatic code editor, or autonomous coding loop.
+Core has no model requirement; optional audited offline Semantic and Precision
+packs only discover or reorder candidates, while pinned-snapshot verification
+remains the source of evidence.
 
 ## A context request
 
@@ -314,6 +325,7 @@ configuration keys and source literals instead of guessing.
 ## What it can explore
 
 - Safe fetch plus exact, immutable remote-commit snapshots
+- Incremental, blob-deduplicated SQLite trigram content and path indexing
 - Cross-repository literal and regular-expression search
 - Verified filename and repository-relative path search
 - Classes, interfaces, methods, functions, and lexical symbol fallback
@@ -321,6 +333,12 @@ configuration keys and source literals instead of guessing.
 - Static callers and likely outbound calls
 - Related unit and integration tests
 - Direct file and line-range retrieval
+- Ranked late source hydration with compact manifests for deferred candidates
+- Candidate expansion (`expand: [C12]`) without repeating broad retrieval
+- Atomic SQLite catalog generations, pinned sessions, trace JSON, storage status,
+  and safe generation GC
+- Optional local semantic cards/vector shards and local reranking contracts;
+  neither can become evidence without exact snapshot verification
 - Git pickaxe/history and optional working-tree diffs
 - Human project maps, glossaries, flows, and solved-ticket memory
 - Cross-repository ticket-labelled Git experience, historical patches, and
@@ -349,12 +367,13 @@ configuration keys and source literals instead of guessing.
                            verified evidence
 ```
 
-The bundled release uses `codebase-memory-mcp` for tree-sitter/Hybrid-LSP
-structural queries, indexed lazily only for repositories implicated by a symbol
-request, and Project Brain's deterministic scanners for cross-repo
-framework wiring. If the backend is absent or fails, `rg` or the standard-library
-scanner remains available. Every heuristic is labelled; this is useful static
-evidence, not a claim to compiler-perfect runtime behavior.
+Project Brain uses a local SQLite trigram generation for fixed-string and path
+candidates, and `codebase-memory-mcp` for tree-sitter/Hybrid-LSP structural
+queries in bundled releases. Cross-repository framework wiring remains
+deterministic. If an index or structural backend is absent, stale, or fails,
+`rg` or the standard-library scanner remains available. Every heuristic is
+labelled; this is useful static evidence, not a claim to compiler-perfect
+runtime behavior.
 
 ## Commands
 
@@ -364,14 +383,25 @@ brain demo              Create a safe four-repository example investigation
 brain sync              Safely fetch all repos and rebuild remote snapshots
 brain doctor            Check config, repositories, git, rg, and freshness
 brain status            Show project health and ticket sessions (optionally JSON)
+brain freshness         Compare source snapshots with the current index generation
+brain storage           Show local state usage and catalog health
+brain gc --dry-run      Preview old, unpinned generation cleanup
 brain refresh           Discover new repos, sync, and regenerate intelligence
-brain search            Search all configured repositories
-brain paths             Find verified repository-relative file paths
+brain index status      Show atomic generation and index freshness
+brain index rebuild     Rebuild lexical, semantic, or all local indexes
+brain search --explain  Search and show the deterministic query plan
+brain paths --explain   Find verified paths and show the backend plan
+brain explain           Compile a CONTEXT_REQUEST without searching
 brain symbol            Resolve symbol definitions with lexical fallback
 brain trace             Find static callers and likely outbound calls
 brain history           Search Git history
 brain experience        Inspect or rebuild local ticket-labelled Git experience
-brain evaluate          Compare past retrievals with later matching commits
+brain evaluate          Compare past retrievals with later commits or a local golden suite
+brain benchmark --machine Record a non-identifying local benchmark target profile
+brain edition           Inspect or set core, semantic, or precision capability profile
+brain capabilities      Show installed offline capabilities
+brain model             Install, verify, benchmark, autotune, or remove local model packs
+brain watch             Refresh selected snapshots at a fixed interval
 brain map               Generate Spring/Maven/project facts
 brain start             Start a ticket investigation
 brain continue          Route a complete AI reply and run only tool requests
@@ -395,9 +425,12 @@ Project Brain invokes `git fetch` using your existing Git configuration and SSH
 environment. For SSH fetches on macOS it explicitly passes `UseKeychain=no`; it
 never reads, stores, logs, or asks for a token, and never puts a remote URL in
 generated state. HTTPS remotes remain under Git's configured credential-helper
-policy. Project Brain makes no model/API requests. Generated context can still
-contain proprietary source or secrets already present in a repo. Review context
-before pasting or uploading it outside your organization.
+policy. Optional model packs may call only a separately supplied loopback
+runtime—never a hosted model/API. Managed llama.cpp packs recheck local artifact
+hashes, bind only `127.0.0.1`, disable their Web UI, use an ephemeral API key,
+and shut down at the end of the operation. Generated context can still contain proprietary
+source or secrets already present in a repo. Review context before pasting or
+uploading it outside your organization.
 
 `brain ui` binds to IPv4 loopback only, uses a random per-process API token,
 rejects non-local Host headers, limits request bodies, sends a restrictive browser
@@ -409,8 +442,8 @@ knowledge, and ticket runs are ignored by the tool repository's default
 `.gitignore`. Releases use GitHub/PyPI short-lived OIDC credentials—no publishing
 token belongs in this repository.
 
-The prebuilt archive includes the pinned open-source structural backend; see
-[third-party notices](THIRD_PARTY.md).
+The prebuilt archive includes the pinned open-source structural backend and
+Zoekt command pair; see [third-party notices](THIRD_PARTY.md).
 
 Historical patch excerpts are off by default. The explicit `brain experience
 QUERY --patches` mode skips known credential/key file types and redacts common

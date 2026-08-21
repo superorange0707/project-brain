@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import importlib.util
 import io
 import json
 import os
 import re
+import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -29,7 +34,11 @@ from brain.core import (
     parse_context_request,
     request_preview,
     request_repair_prompt,
+    read_source,
+    retrieve_context,
+    SearchHit,
     search,
+    session_state,
     simple_yaml_load,
     start_session,
     snapshot_indexes,
@@ -41,6 +50,17 @@ from brain import sync as sync_module
 from brain.sync import _ssh_endpoint, sync_repositories
 from brain.graph import graph_symbol_hits, index_graph
 from brain.experience import build_experience_index, evaluate_sessions, render_similar_cases, similar_cases
+from brain.metrics import benchmark_report, machine_profile
+from brain.metrics import trace_metadata
+from brain.catalog import current_generation
+from brain.catalog import connect as catalog_connect
+from brain.editions import current_edition, set_edition
+from brain.editions import capabilities
+from brain.models import DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, rerank_candidates
+from brain.models import autotune_pack, benchmark_pack, install_pack, install_pack_url, runtime_for_pack, validate_manifest, verify_pack
+from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, build_semantic_index, chunk_source, search_semantic
+from brain.ops import gc
+from brain.evaluation import evaluate_golden
 
 
 REQUEST = """
@@ -222,6 +242,12 @@ path = "batch-service"
         self.assertIn("implementations", request["symbols"][0]["include"])
         self.assertIn("jurisdiction changes", request["objective"])
 
+    def test_automatic_retrieval_excludes_sensitive_source_paths(self) -> None:
+        secret = self.root / "trading-service/src/main/resources/credentials.json"
+        secret.write_text('{"token":"do-not-index"}', encoding="utf-8")
+        self.assertEqual([], search(self.settings, "do-not-index", ["trading-service"], fixed=True))
+        self.assertEqual([], path_hits(self.settings, "credentials", ["trading-service"]))
+
     def test_request_validation_handles_markdown_fence(self) -> None:
         request = parse_context_request(REQUEST)
         self.assertEqual(1, request["version"])
@@ -335,6 +361,99 @@ else:
         _, updated = snapshot_indexes(self.settings, changed_only=True)
         self.assertEqual({"customer-service", "trading-service", "risk-service", "batch-service"}, set(updated))
         self.assertEqual({"customer-service", "trading-service", "risk-service", "batch-service"}, set(load_index_state(self.settings)))
+
+    def test_snapshot_index_serves_exact_content_and_path_queries_without_scanning(self) -> None:
+        for repo in self.settings.repositories:
+            repo.source_path = repo.path
+            repo.source_sha = f"snapshot-{repo.name}"
+        state, updated = snapshot_indexes(self.settings, changed_only=True)
+
+        self.assertEqual(set(state), set(updated))
+        self.assertTrue((self.settings.state_dir / "search.sqlite3").is_file())
+        self.assertTrue(all(item["backend"] == "sqlite fts5 trigram" for item in state.values()))
+        self.assertEqual(1, benchmark_report(self.settings)["events"]["index"]["samples"])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(0, main(["-c", str(self.config), "benchmark", "--json"]))
+        self.assertEqual(1, json.loads(output.getvalue())["events"]["index"]["samples"])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(0, main(["-c", str(self.config), "benchmark", "--machine", "--json"]))
+        machine = json.loads(output.getvalue())["machine"]
+        self.assertEqual(1, machine["schema_version"])
+        self.assertNotIn("hostname", machine)
+        self.assertTrue((self.settings.state_dir / "machine-profile.json").is_file())
+        with mock.patch("brain.core.search_repo", side_effect=AssertionError("scanner should not run")):
+            hits = search(self.settings, "JURISDICTION_CHANGED", fixed=True)
+            paths = path_hits(self.settings, "application.properties", ["trading-service"])
+        self.assertEqual({"customer-service", "trading-service"}, {hit.repo for hit in hits})
+        self.assertEqual(["src/main/resources/application.properties"], [hit.path for hit in paths])
+
+        self.assertEqual([], snapshot_indexes(self.settings, changed_only=True)[1])
+        self.settings.repo("trading-service").source_sha = "snapshot-trading-service-2"
+        self.assertEqual(["trading-service"], snapshot_indexes(self.settings, changed_only=True)[1])
+
+    def test_storage_guard_prevents_new_index_write_before_low_disk(self) -> None:
+        self.settings.minimum_free_disk_gb = 1_000_000
+        with self.assertRaisesRegex(OSError, "free-disk guard"):
+            snapshot_indexes(self.settings)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission model")
+    def test_brain_owned_state_directories_are_private(self) -> None:
+        for path in (self.settings.state_dir, self.settings.runs_dir, self.settings.generated_dir):
+            self.assertEqual(0, stat.S_IMODE(path.stat().st_mode) & 0o077)
+        self.assertFalse((self.settings.state_dir / "search.sqlite3").exists())
+
+    def test_git_manifest_indexes_only_new_blobs_and_hydrates_missing_snapshot_files(self) -> None:
+        repo = self.settings.repo("trading-service")
+        for other in self.settings.repositories:
+            if other is not repo:
+                other.source_path = other.path
+                other.source_sha = f"snapshot-{other.name}"
+        subprocess.run(["git", "init", "-q"], cwd=repo.path, check=True)
+        subprocess.run(["git", "config", "user.email", "brain@example.invalid"], cwd=repo.path, check=True)
+        subprocess.run(["git", "config", "user.name", "Project Brain Test"], cwd=repo.path, check=True)
+        hidden = repo.path / "hidden.md"
+        hidden.write_text("ONLY_IN_GIT_OBJECT\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo.path, check=True)
+        subprocess.run(["git", "commit", "-qm", "Initial snapshot"], cwd=repo.path, check=True)
+        repo.source_path = repo.path
+        repo.source_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo.path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        hidden.unlink()
+
+        state, _ = snapshot_indexes(self.settings, changed_only=True)
+        hits = search(self.settings, "ONLY_IN_GIT_OBJECT", ["trading-service"], fixed=True)
+        self.assertEqual("hidden.md", hits[0].path)
+        self.assertIn("ONLY_IN_GIT_OBJECT", read_source(self.settings, hits[0]).content)
+        self.assertGreater(state["trading-service"]["changed_blobs"], 1)
+
+        changed = repo.path / "src/main/java/demo/TradingEligibilityService.java"
+        changed.write_text(changed.read_text(encoding="utf-8") + "// one blob changed\n", encoding="utf-8")
+        subprocess.run(["git", "add", str(changed.relative_to(repo.path))], cwd=repo.path, check=True)
+        subprocess.run(["git", "commit", "-qm", "Change one file"], cwd=repo.path, check=True)
+        repo.source_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo.path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        state, updated = snapshot_indexes(self.settings, changed_only=True)
+        self.assertEqual(["trading-service"], updated)
+        self.assertEqual(1, state["trading-service"]["changed_blobs"])
+
+    def test_retrieval_hydrates_only_ranked_diverse_candidates(self) -> None:
+        self.settings.hydrate_limit = 1
+        request = parse_context_request("""CONTEXT_REQUEST:
+  objective: Locate representative classes without flooding context.
+  searches:
+    - query: class
+      repos: []
+  symbols: []
+  files: []
+  history: []
+""")
+        bundle = retrieve_context(self.settings, request)
+        self.assertEqual(1, len(bundle.evidence))
+        self.assertGreater(len(bundle.additional_candidates), 1)
 
     def test_context_end_to_end_contains_source_tests_and_unresolved(self) -> None:
         start_session(self.settings, "ABC-1", "Jurisdiction changes should recalculate eligibility immediately.")
@@ -559,6 +678,495 @@ else:
         status = json.loads(output.getvalue())
         self.assertEqual("demo", status["project"]["name"])
         self.assertEqual(4, status["summary"]["repositories"])
+
+    def test_generation_trace_candidate_expansion_and_semantic_chunk_contracts(self) -> None:
+        self.settings.hydrate_limit = 1
+        snapshot_indexes(self.settings)
+        self.assertIsNotNone(current_generation(self.settings))
+        start_session(self.settings, "ABC-EXPAND", "Inspect deferred evidence.")
+        request = """CONTEXT_REQUEST:
+  version: 2
+  objective: Find classes without hydrating every candidate.
+  searches:
+    - query: class
+      repos: []
+  paths: []
+  symbols: []
+  files: []
+  history: []
+  expand: []
+"""
+        _, _, number = create_context(self.settings, "ABC-EXPAND", request)
+        self.assertEqual(1, number)
+        self.assertTrue((self.settings.runs_dir / "ABC-EXPAND/trace-001.json").is_file())
+        state = json.loads((self.settings.runs_dir / "ABC-EXPAND/session.json").read_text(encoding="utf-8"))
+        candidate = next(iter(state["candidate_manifest"]))
+        expanded = request.replace("expand: []", f"expand: [{candidate}]")
+        content, _, number = create_context(self.settings, "ABC-EXPAND", expanded)
+        self.assertEqual(2, number)
+        self.assertIn(state["candidate_manifest"][candidate]["path"], content)
+        chunks = chunk_source("repo", "src/Example.py", "def hello():\n    return 'hello'\n")
+        self.assertEqual(chunks, chunk_source("repo", "src/Example.py", "def hello():\n    return 'hello'\n"))
+
+    def test_local_test_model_pack_is_verified_before_semantic_edition(self) -> None:
+        pack = self.root / "test-pack"
+        pack.mkdir()
+        suite = {"embedding": [{"id": "batch-normalized", "texts": ["verified code", "service test"], "dimension": 16, "normalized": True}]}
+        suite_path = pack / "conformance.json"
+        suite_path.write_text(json.dumps(suite), encoding="utf-8")
+        manifest = {
+            "pack_id": "test-embedding",
+            "capability": "embedding",
+            "model_family": "test",
+            "upstream_model": "test-only",
+            "upstream_revision": "1",
+            "license": "MIT",
+            "runtime_name": "deterministic-test",
+            "runtime_revision": "1",
+            "minimum_brain_version": "0.6.1",
+            "embedding_dimension": 16,
+            "test_only": True,
+            "golden_suite": "conformance.json",
+            "golden_suite_hash": hashlib.sha256(suite_path.read_bytes()).hexdigest(),
+            "artifacts": {"conformance.json": hashlib.sha256(suite_path.read_bytes()).hexdigest()},
+        }
+        (pack / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        install_pack(self.settings, pack)
+        with self.assertRaises(ValueError):
+            set_edition(self.settings, "semantic")
+        verified = verify_pack(self.settings, "test-embedding")
+        self.assertTrue(verified["conformance"]["passed"])
+        self.assertEqual("semantic", set_edition(self.settings, "semantic"))
+        self.assertEqual("semantic", current_edition(self.settings))
+        report = benchmark_pack(self.settings, "test-embedding")
+        self.assertTrue(report["batch_consistent"])
+        self.assertEqual({"1", "8", "16"}, set(report["embedding_batches"]))
+        self.assertTrue(report["conformance"]["passed"])
+        self.assertTrue((self.settings.generated_dir / "MODEL_BAKEOFF_REPORT.md").is_file())
+        tuning = autotune_pack(self.settings, "test-embedding", samples=1)
+        self.assertIn(tuning["recommendations"]["embedding_batch_size"], {1, 8, 16})
+        self.assertFalse(tuning["recommendations"]["embedding_resident"])
+        self.assertTrue((self.settings.state_dir / "model-tuning.json").is_file())
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(0, main(["-c", str(self.config), "model", "autotune", "test-embedding", "--samples", "1"]))
+        self.assertEqual("test-embedding", json.loads(output.getvalue())["pack_id"])
+
+    def test_remote_pack_install_requires_pinned_approved_source(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not approved"):
+            install_pack_url(self.settings, "https://example.invalid/pack.tar", "a" * 64)
+        with self.assertRaisesRegex(ValueError, "--sha256"):
+            install_pack_url(self.settings, "https://github.com/example/project/releases/download/v1/pack.tar", "not-a-digest")
+        profile = machine_profile(self.settings)
+        self.assertNotIn("hostname", profile)
+        self.assertIn("logical_cpu_count", profile)
+
+    def test_model_conformance_rejects_bad_reranker_golden(self) -> None:
+        pack = self.root / "bad-reranker-pack"
+        pack.mkdir()
+        suite_path = pack / "conformance.json"
+        suite_path.write_text(json.dumps({"reranker": [{"query": "verified", "documents": ["verified source", "unrelated note"], "expected_order": [1, 0]}]}), encoding="utf-8")
+        digest = hashlib.sha256(suite_path.read_bytes()).hexdigest()
+        (pack / "manifest.json").write_text(json.dumps({
+            "pack_id": "bad-reranker", "capability": "reranker", "model_family": "test",
+            "upstream_model": "test-only", "upstream_revision": "1", "license": "MIT",
+            "runtime_name": "deterministic-test", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "test_only": True, "golden_suite": "conformance.json", "golden_suite_hash": digest,
+            "artifacts": {"conformance.json": digest},
+        }), encoding="utf-8")
+        install_pack(self.settings, pack)
+        with self.assertRaisesRegex(ValueError, "reranker conformance failed"):
+            verify_pack(self.settings, "bad-reranker")
+
+    def test_reranker_benchmark_and_autotune_use_public_candidate_pools(self) -> None:
+        pack = self.root / "reranker-pack"
+        pack.mkdir()
+        suite_path = pack / "conformance.json"
+        suite_path.write_text(json.dumps({
+            "reranker": [{
+                "query": "verified code", "documents": ["verified code evidence", "unrelated deployment note"],
+                "expected_order": [0, 1],
+            }],
+        }), encoding="utf-8")
+        digest = hashlib.sha256(suite_path.read_bytes()).hexdigest()
+        (pack / "manifest.json").write_text(json.dumps({
+            "pack_id": "test-reranker", "capability": "reranker", "model_family": "test",
+            "upstream_model": "test-only", "upstream_revision": "1", "license": "MIT",
+            "runtime_name": "deterministic-test", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "test_only": True, "golden_suite": "conformance.json", "golden_suite_hash": digest,
+            "artifacts": {"conformance.json": digest},
+        }), encoding="utf-8")
+        install_pack(self.settings, pack)
+        report = benchmark_pack(self.settings, "test-reranker", samples=1)
+        self.assertEqual({"10", "20", "40", "80"}, set(report["reranker_candidate_pools"]))
+        tuning = autotune_pack(self.settings, "test-reranker", samples=1, latency_budget_ms=3_000)
+        self.assertIn(tuning["recommendations"]["reranker_candidate_pool"], {10, 20, 40, 80})
+        self.assertTrue((self.settings.generated_dir / "RERANKER_BAKEOFF_REPORT.md").is_file())
+
+    def test_production_pack_requires_reference_and_long_input_conformance(self) -> None:
+        pack = self.root / "production-conformance-pack"
+        pack.mkdir()
+        binary = pack / "llama-server"
+        binary.write_bytes(b"pinned local runtime")
+        model = pack / "model.gguf"
+        model.write_bytes(b"pinned local model")
+        tokenizer = pack / "tokenizer.json"
+        tokenizer.write_bytes(b"pinned tokenizer")
+        runtime = DeterministicRuntime(16)
+        texts = ["verified code", "verified code implementation", "unrelated " * 100]
+        vectors = runtime.embed(texts, dimension=16)
+        order = sorted(range(1, len(texts)), key=lambda index: -sum(left * right for left, right in zip(vectors[0], vectors[index], strict=True)))
+        suite_path = pack / "conformance.json"
+        suite_path.write_text(json.dumps({
+            "requirements": {"long_input_min_chars": 500},
+            "embedding": [{
+                "texts": texts, "dimension": 16, "normalized": True,
+                "reference_vectors": vectors, "minimum_cosine_to_reference": 0.999,
+                "expected_similarity_order": order,
+            }],
+        }), encoding="utf-8")
+        digest = hashlib.sha256(suite_path.read_bytes()).hexdigest()
+        (pack / "manifest.json").write_text(json.dumps({
+            "pack_id": "production-conformance", "capability": "embedding", "model_family": "approved",
+            "upstream_model": "approved-local", "upstream_revision": "1", "license": "Apache-2.0",
+            "runtime_name": "llama.cpp", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "runtime_binary": "llama-server", "model_file": "model.gguf", "embedding_dimension": 16,
+            "chunk_schema_version": CHUNK_SCHEMA_VERSION, "document_card_version": CARD_VERSION,
+            "weight_format": "GGUF", "quantization": "Q8_0", "weight_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+            "tokenizer_file": "tokenizer.json", "tokenizer_sha256": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "pooling": "mean", "normalization": "l2",
+            "query_instruction_version": "v1", "converter_revision": "llama.cpp@1",
+            "golden_suite": "conformance.json", "golden_suite_hash": digest,
+            "artifacts": {"llama-server": hashlib.sha256(binary.read_bytes()).hexdigest(), "model.gguf": hashlib.sha256(model.read_bytes()).hexdigest(), "tokenizer.json": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "conformance.json": digest},
+        }), encoding="utf-8")
+        install_pack(self.settings, pack)
+        with mock.patch("brain.models.runtime_for_pack", return_value=runtime):
+            verified = verify_pack(self.settings, "production-conformance")
+        self.assertTrue(verified["conformance"]["passed"])
+        installed = self.settings.state_dir / "models" / "production-conformance" / "installed.json"
+        incompatible = json.loads(installed.read_text(encoding="utf-8"))
+        incompatible["chunk_schema_version"] = "obsolete"
+        installed.write_text(json.dumps(incompatible), encoding="utf-8")
+        available = capabilities(self.settings)
+        self.assertFalse(available["embedding"])
+        self.assertIn("brain index rebuild --backend semantic", available["installed_packs"][0]["compatibility_error"])
+        with self.assertRaisesRegex(ValueError, "brain index rebuild --backend semantic"):
+            set_edition(self.settings, "semantic")
+
+    def test_production_pack_rejects_incomplete_conformance_suite(self) -> None:
+        pack = self.root / "incomplete-production-conformance-pack"
+        pack.mkdir()
+        binary = pack / "llama-server"
+        binary.write_bytes(b"pinned local runtime")
+        model = pack / "model.gguf"
+        model.write_bytes(b"pinned local model")
+        tokenizer = pack / "tokenizer.json"
+        tokenizer.write_bytes(b"pinned tokenizer")
+        suite_path = pack / "conformance.json"
+        suite_path.write_text(json.dumps({
+            "requirements": {"long_input_min_chars": 1},
+            "embedding": [{"texts": ["verified", "unrelated"], "dimension": 16}],
+        }), encoding="utf-8")
+        digest = hashlib.sha256(suite_path.read_bytes()).hexdigest()
+        (pack / "manifest.json").write_text(json.dumps({
+            "pack_id": "incomplete-production-conformance", "capability": "embedding", "model_family": "approved",
+            "upstream_model": "approved-local", "upstream_revision": "1", "license": "Apache-2.0",
+            "runtime_name": "llama.cpp", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "runtime_binary": "llama-server", "model_file": "model.gguf", "embedding_dimension": 16,
+            "chunk_schema_version": CHUNK_SCHEMA_VERSION, "document_card_version": CARD_VERSION,
+            "weight_format": "GGUF", "quantization": "Q8_0", "weight_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+            "tokenizer_file": "tokenizer.json", "tokenizer_sha256": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "pooling": "mean", "normalization": "l2",
+            "query_instruction_version": "v1", "converter_revision": "llama.cpp@1",
+            "golden_suite": "conformance.json", "golden_suite_hash": digest,
+            "artifacts": {"llama-server": hashlib.sha256(binary.read_bytes()).hexdigest(), "model.gguf": hashlib.sha256(model.read_bytes()).hexdigest(), "tokenizer.json": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "conformance.json": digest},
+        }), encoding="utf-8")
+        install_pack(self.settings, pack)
+        with mock.patch("brain.models.runtime_for_pack", return_value=DeterministicRuntime(16)), self.assertRaisesRegex(ValueError, "reference_vectors"):
+            verify_pack(self.settings, "incomplete-production-conformance")
+
+    @unittest.skipUnless(importlib.util.find_spec("usearch"), "requires optional semantic extra")
+    def test_verified_local_pack_builds_persistent_usearch_shards(self) -> None:
+        pack = self.root / "usearch-pack"
+        pack.mkdir()
+        (pack / "manifest.json").write_text(json.dumps({
+            "pack_id": "usearch-test-embedding", "capability": "embedding", "model_family": "test",
+            "upstream_model": "test-only", "upstream_revision": "1", "license": "MIT",
+            "runtime_name": "deterministic-test", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "embedding_dimension": 16, "test_only": True,
+        }), encoding="utf-8")
+        install_pack(self.settings, pack)
+        verify_pack(self.settings, "usearch-test-embedding")
+        built = build_semantic_index(self.settings)
+        self.assertEqual("usearch", built["backend"])
+        state = json.loads((self.settings.state_dir / "semantic-index.json").read_text(encoding="utf-8"))
+        self.assertTrue(all(Path(shard["path"]).is_file() for shard in state["shards"]))
+        self.assertTrue(search_semantic(self.settings, "eligibility", repos={"trading-service"}))
+
+    def test_mock_semantic_pipeline_is_snapshot_filtered(self) -> None:
+        def embed(cards: list[str]) -> list[list[float]]:
+            return [[float("eligibility" in card.lower()), float("risk" in card.lower()), 1.0] for card in cards]
+
+        built = build_semantic_index(self.settings, embed=embed, pack_id="mock-contract")
+        self.assertEqual("exact-mock", built["backend"])
+        results = search_semantic(self.settings, "eligibility", repos={"trading-service"}, embed=embed)
+        self.assertTrue(results)
+        self.assertTrue(all(item["repo"] == "trading-service" for item in results))
+        self.settings.repo("trading-service").source_sha = "different-snapshot"
+        self.assertEqual([], search_semantic(self.settings, "eligibility", repos={"trading-service"}, embed=embed))
+        self.settings.repo("trading-service").source_sha = "working-tree"
+        state_path = self.settings.state_dir / "semantic-index.json"
+        stale_schema = json.loads(state_path.read_text(encoding="utf-8"))
+        stale_schema["chunk_schema_version"] = "obsolete"
+        state_path.write_text(json.dumps(stale_schema), encoding="utf-8")
+        self.assertEqual([], search_semantic(self.settings, "eligibility", repos={"trading-service"}, embed=embed))
+
+    def test_local_reranker_only_reorders_bounded_nonprotected_candidates(self) -> None:
+        protected = SearchHit("trading-service", "src/Eligibility.java", 10, "class Eligibility", "definition", 100, ["symbol"])
+        first = SearchHit("trading-service", "README.md", 2, "release note", "code", 50, ["search"])
+        second = SearchHit("risk-service", "src/Risk.java", 8, "eligibility risk check", "code", 50, ["search"])
+        reranked = rerank_candidates(self.settings, "eligibility", [protected, first, second], runtime=DeterministicRuntime(), limit=1)
+        self.assertEqual(100, reranked[0].score)
+        self.assertEqual(50, reranked[2].score)
+        self.assertIn("local reranker", reranked[1].found_by)
+
+    def test_brain_owned_model_runtimes_shutdown_on_query_and_index_paths(self) -> None:
+        hit = SearchHit("trading-service", "README.md", 2, "eligibility evidence", "code", 50, ["search"])
+        reranker = mock.Mock()
+        reranker.rerank.return_value = [1.0]
+        with mock.patch("brain.models.active_pack", return_value={"pack_id": "reranker"}), mock.patch("brain.models.runtime_for_pack", return_value=reranker):
+            rerank_candidates(self.settings, "eligibility", [hit])
+        reranker.shutdown.assert_called_once()
+
+        state = {
+            "chunk_schema_version": CHUNK_SCHEMA_VERSION, "card_version": CARD_VERSION,
+            "backend": "exact-mock", "pack_id": "embedding", "dimension": 2, "stale": False,
+            "entries": [{"repo": "trading-service", "snapshot": "working-tree", "path": "README.md", "line": 1, "chunk_id": "one", "vector": [1.0, 0.0]}],
+            "shards": [],
+        }
+        (self.settings.state_dir / "semantic-index.json").write_text(json.dumps(state), encoding="utf-8")
+        embedding = mock.Mock()
+        embedding.embed.return_value = [[1.0, 0.0]]
+        with mock.patch("brain.semantic.active_pack", return_value={"pack_id": "embedding"}), mock.patch("brain.semantic.runtime_for_pack", return_value=embedding):
+            self.assertTrue(search_semantic(self.settings, "eligibility"))
+        embedding.shutdown.assert_called_once()
+
+        build_runtime = mock.Mock()
+        with mock.patch("brain.semantic.active_pack", return_value={"pack_id": "embedding", "embedding_dimension": 2}), mock.patch("brain.semantic.runtime_for_pack", return_value=build_runtime), mock.patch("brain.semantic._usearch", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "USearch"):
+                build_semantic_index(self.settings)
+        build_runtime.shutdown.assert_called_once()
+
+    def test_managed_llama_pack_executes_only_verified_loopback_artifacts(self) -> None:
+        pack = self.root / "managed-pack"
+        pack.mkdir()
+        binary = pack / "llama-server"
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o700)
+        model = pack / "model.gguf"
+        model.write_bytes(b"local model")
+        manifest = {
+            "pack_id": "managed-local", "capability": "embedding", "model_family": "test",
+            "upstream_model": "local", "upstream_revision": "1", "license": "MIT",
+            "runtime_name": "llama.cpp", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "installed_path": str(pack), "runtime_binary": "llama-server", "model_file": "model.gguf",
+            "artifacts": {"llama-server": hashlib.sha256(binary.read_bytes()).hexdigest(), "model.gguf": hashlib.sha256(model.read_bytes()).hexdigest()},
+            "test_only": True,
+        }
+        validate_manifest(manifest)
+        runtime = runtime_for_pack(manifest)
+        self.assertIsInstance(runtime, ManagedLlamaCppRuntime)
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch("brain.models.subprocess.Popen", return_value=process) as popen, mock.patch.object(LlamaCppRuntime, "health", return_value={"ok": True}), mock.patch("brain.models.os.killpg") as kill:
+            runtime.warmup()
+            command = popen.call_args.args[0]
+            self.assertIn("127.0.0.1", command)
+            self.assertIn("--offline", command)
+            self.assertIn("--no-webui", command)
+            self.assertIn("--embedding", command)
+            self.assertNotIn("--hf-repo", command)
+            runtime.shutdown()
+            kill.assert_called_once()
+
+    def test_production_llama_manifest_cannot_omit_owned_runtime_artifacts(self) -> None:
+        manifest = {
+            "pack_id": "missing-runtime", "capability": "embedding", "model_family": "test",
+            "upstream_model": "local", "upstream_revision": "1", "license": "MIT",
+            "runtime_name": "llama.cpp", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "artifacts": {"model.gguf": "abc", "conformance.json": "a" * 64}, "model_file": "model.gguf",
+            "golden_suite": "conformance.json", "golden_suite_hash": "a" * 64,
+        }
+        with self.assertRaises(ValueError):
+            validate_manifest(manifest)
+
+    def test_production_llama_manifest_cannot_delegate_to_runtime_url(self) -> None:
+        manifest = {
+            "pack_id": "delegated-runtime", "capability": "embedding", "model_family": "approved",
+            "upstream_model": "local", "upstream_revision": "1", "license": "MIT",
+            "runtime_name": "llama.cpp", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "runtime_url": "http://127.0.0.1:8080", "golden_suite": "conformance.json",
+            "golden_suite_hash": "a" * 64, "artifacts": {"conformance.json": "a" * 64},
+        }
+        with self.assertRaisesRegex(ValueError, "runtime_binary and model_file"):
+            validate_manifest(manifest)
+
+    def test_production_model_manifest_requires_checked_golden_suite(self) -> None:
+        manifest = {
+            "pack_id": "missing-golden", "capability": "embedding", "model_family": "approved",
+            "upstream_model": "local", "upstream_revision": "1", "license": "MIT",
+            "runtime_name": "llama.cpp", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "runtime_url": "http://127.0.0.1:8080", "artifacts": {"model.gguf": "a" * 64},
+        }
+        with self.assertRaisesRegex(ValueError, "golden_suite"):
+            validate_manifest(manifest)
+
+    def test_catalog_migrates_embedding_cache_and_gc_preserves_ticket_snapshot(self) -> None:
+        self.settings.state_dir.mkdir(parents=True, exist_ok=True)
+        database = self.settings.state_dir / "catalog.sqlite3"
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+            "INSERT INTO metadata VALUES ('schema_version', '1');"
+            "CREATE TABLE embedding_cache (cache_key TEXT PRIMARY KEY, pack_id TEXT, dimension INTEGER, vector_json TEXT, created_at TEXT);"
+        )
+        connection.close()
+        migrated = catalog_connect(self.settings)
+        self.assertIn("last_used_at", {row[1] for row in migrated.execute("PRAGMA table_info(embedding_cache)")})
+        migrated.close()
+
+        snapshots = self.settings.state_dir / "snapshots" / "trading-service"
+        old, middle, current = (snapshots / name for name in ("old", "middle", "current"))
+        for index, path in enumerate((old, middle, current)):
+            path.mkdir(parents=True)
+            os.utime(path, (100 + index, 100 + index))
+        self.settings.runs_dir.mkdir(parents=True, exist_ok=True)
+        (self.settings.runs_dir / "ABC-1").mkdir()
+        (self.settings.runs_dir / "ABC-1" / "session.json").write_text(json.dumps({"sources": {"trading-service": {"snapshot": str(old)}}}), encoding="utf-8")
+        report = gc(self.settings, dry_run=True, keep_recent=1)
+        self.assertIn(str(middle), [item["path"] for item in report["remove"]])
+        self.assertNotIn(str(old), [item["path"] for item in report["remove"]])
+        self.assertNotIn(str(current), [item["path"] for item in report["remove"]])
+
+    def test_golden_evaluation_replays_hand_labelled_local_cases(self) -> None:
+        snapshot_indexes(self.settings)
+        suite = Path(__file__).parent / "fixtures" / "golden_demo.json"
+        report = evaluate_golden(self.settings, suite, split="holdout")
+        self.assertEqual(1, report["summary"]["evaluated_cases"])
+        self.assertEqual(1.0, report["summary"]["file_recall_at_limit"])
+        self.assertIn("file_recall_at_5", report["summary"])
+        self.assertIn("precision_at_10", report["summary"])
+        self.assertIn("semantic_only_useful_hit_rate", report["summary"])
+        self.assertIn("total_ms", report["cases"][0])
+        self.assertIn("duplicate_ratio", report["cases"][0])
+        self.assertTrue((self.settings.state_dir / "golden-eval.json").is_file())
+
+    def test_zoekt_adapter_uses_only_current_snapshot_shard_and_filters_literal_matches(self) -> None:
+        from brain.backends import zoekt
+
+        repo = self.settings.repo("trading-service")
+        repo.source_sha = "snapshot-1"
+        shard = zoekt.shard_path(self.settings.state_dir, repo.name, repo.source_sha)
+        shard.mkdir(parents=True)
+        (shard / "brain-shard.json").write_text(json.dumps({"source_sha": repo.source_sha}), encoding="utf-8")
+        response = json.dumps({"FileName": "src/main/java/demo/EligibilityEvaluator.java", "Score": 5, "LineMatches": [{"LineNumber": 2, "LineStart": 0, "Line": base64.b64encode(b"interface EligibilityEvaluator {}\n").decode()}, {"LineNumber": 3, "LineStart": 0, "Line": base64.b64encode(b"unrelated\n").decode()}]})
+        available = zoekt.ZoektStatus(True, "zoekt", "zoekt-index")
+        with mock.patch("brain.backends.zoekt.status", return_value=available), mock.patch("brain.backends.zoekt.subprocess.run", return_value=subprocess.CompletedProcess([], 0, response, "")):
+            result = zoekt.search(self.settings, repo, "EligibilityEvaluator", fixed=True, max_results=20)
+        self.assertIsNotNone(result)
+        self.assertEqual([("src/main/java/demo/EligibilityEvaluator.java", 2, "interface EligibilityEvaluator {}", 5.0)], result[0])
+        with mock.patch("brain.backends.zoekt.status", return_value=available), mock.patch("brain.backends.zoekt.subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "corrupt shard")):
+            self.assertIsNone(zoekt.search(self.settings, repo, "EligibilityEvaluator", fixed=True, max_results=20))
+        repo.source_sha = "snapshot-2"
+        self.assertIsNone(zoekt.search(self.settings, repo, "EligibilityEvaluator", fixed=True, max_results=20))
+
+    def test_capabilities_counts_usearch_shard_entries(self) -> None:
+        (self.settings.state_dir / "semantic-index.json").parent.mkdir(parents=True, exist_ok=True)
+        (self.settings.state_dir / "semantic-index.json").write_text(json.dumps({
+            "backend": "usearch", "stale": False, "entries": [],
+            "shards": [{"entries": [{"chunk_id": "one"}, {"chunk_id": "two"}]}],
+        }), encoding="utf-8")
+        report = capabilities(self.settings)
+        self.assertEqual(2, report["semantic_chunks"])
+        self.assertEqual("usearch", report["semantic_backend"])
+
+    def test_trace_metadata_always_identifies_brain_version(self) -> None:
+        metadata = trace_metadata(self.settings)
+        self.assertRegex(str(metadata["brain_version"]), r"^\d+\.\d+\.\d+")
+        self.assertIn("corpus_signature", metadata)
+
+    def test_model_checksum_tampering_is_rejected_and_pack_removal_stales_semantics(self) -> None:
+        pack = self.root / "checked-pack"
+        pack.mkdir()
+        weights = pack / "weights.bin"
+        weights.write_bytes(b"checked")
+        (pack / "manifest.json").write_text(json.dumps({
+            "pack_id": "checked-test", "capability": "embedding", "model_family": "test",
+            "upstream_model": "test-only", "upstream_revision": "1", "license": "MIT",
+            "runtime_name": "deterministic-test", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "embedding_dimension": 16, "test_only": True,
+            "artifacts": {"weights.bin": hashlib.sha256(weights.read_bytes()).hexdigest()},
+        }), encoding="utf-8")
+        install_pack(self.settings, pack)
+        verify_pack(self.settings, "checked-test")
+        state = {"pack_id": "checked-test", "stale": False}
+        (self.settings.state_dir / "semantic-index.json").write_text(json.dumps(state), encoding="utf-8")
+        from brain.models import remove_pack
+
+        remove_pack(self.settings, "checked-test")
+        self.assertTrue(json.loads((self.settings.state_dir / "semantic-index.json").read_text(encoding="utf-8"))["stale"])
+
+        install_pack(self.settings, pack)
+        (self.settings.state_dir / "models" / "checked-test" / "weights.bin").write_bytes(b"tampered")
+        with self.assertRaises(ValueError):
+            verify_pack(self.settings, "checked-test")
+
+    def test_precision_reranker_failure_leaves_core_candidate_retrieval_usable(self) -> None:
+        snapshot_indexes(self.settings)
+        self.settings.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.settings.state_dir / "edition.json").write_text(json.dumps({"edition": "precision"}), encoding="utf-8")
+        request = {"objective": "Find eligibility", "searches": [{"query": "EligibilityEvaluator", "repos": ["trading-service"]}], "paths": [], "symbols": [], "files": [], "history": [], "expand": []}
+        with mock.patch("brain.models.rerank_candidates", side_effect=RuntimeError("timeout")):
+            bundle = retrieve_context(self.settings, request)
+        self.assertTrue(bundle.evidence)
+        self.assertIn("Local reranker failed; used semantic/lexical candidate ranking.", bundle.warnings)
+
+    def test_semantic_runtime_failure_leaves_core_candidate_retrieval_usable(self) -> None:
+        snapshot_indexes(self.settings)
+        (self.settings.state_dir / "edition.json").write_text(json.dumps({"edition": "semantic"}), encoding="utf-8")
+        request = {"objective": "Find eligibility", "searches": [{"query": "EligibilityEvaluator", "repos": ["trading-service"]}], "paths": [], "symbols": [], "files": [], "history": [], "expand": []}
+        with mock.patch("brain.semantic.search_semantic", side_effect=RuntimeError("embedding runtime exited")):
+            bundle = retrieve_context(self.settings, request)
+        self.assertTrue(bundle.evidence)
+        self.assertIn("Semantic runtime failed; used Core retrieval only.", bundle.warnings)
+
+    def test_missing_pinned_session_snapshot_is_rejected_before_retrieval(self) -> None:
+        start_session(self.settings, "PIN-1", "Keep the source pinned.")
+        state = session_state(self.settings, "PIN-1")
+        state["sources"]["trading-service"]["snapshot"] = str(self.settings.state_dir / "snapshots" / "trading-service" / "missing")
+        (self.settings.runs_dir / "PIN-1" / "session.json").write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(BrainError, "Pinned source snapshot"):
+            create_context(self.settings, "PIN-1", REQUEST)
+
+    def test_corrupt_optional_vector_shard_and_catalog_do_not_break_core_fallback(self) -> None:
+        shard = self.settings.state_dir / "semantic-shards" / "broken.usearch"
+        shard.parent.mkdir(parents=True)
+        shard.write_bytes(b"not a vector index")
+        (self.settings.state_dir / "semantic-index.json").write_text(json.dumps({
+            "backend": "usearch", "pack_id": "mock", "dimension": 3, "stale": False,
+            "shards": [{"repo": "trading-service", "snapshot": "working-tree", "path": str(shard), "entries": [{"path": "src/main/java/demo/EligibilityEvaluator.java", "line": 2, "chunk_id": "chunk"}]}],
+        }), encoding="utf-8")
+
+        class BrokenIndex:
+            @staticmethod
+            def restore(*args, **kwargs):
+                raise ValueError("corrupt")
+
+        with mock.patch("brain.semantic._usearch", return_value=(BrokenIndex, mock.Mock(asarray=lambda value, dtype: value))):
+            self.assertEqual([], search_semantic(self.settings, "eligibility", embed=lambda values: [[1.0, 0.0, 0.0]]))
+
+        (self.settings.state_dir / "catalog.sqlite3").write_bytes(b"corrupt catalog")
+        state, _ = snapshot_indexes(self.settings)
+        self.assertIn("Catalog generation unavailable", str(state["trading-service"].get("warning")))
+        self.assertTrue(search(self.settings, "EligibilityEvaluator", ["trading-service"], fixed=True))
 
 
 class ExperienceTest(unittest.TestCase):
@@ -962,6 +1570,15 @@ class GitSyncTest(unittest.TestCase):
 
 
 class ReleaseSafetyTest(unittest.TestCase):
+    def test_standalone_release_builds_source_pinned_zoekt(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn('go-version: "1.24.7"', workflow)
+        self.assertIn("github.com/sourcegraph/zoekt/cmd/zoekt@$ZOEKTVERSION", workflow)
+        self.assertIn("github.com/sourcegraph/zoekt/cmd/zoekt-index@$ZOEKTVERSION", workflow)
+        self.assertIn("v0.0.0-20251202141441-886b229dcd5e", workflow)
+        self.assertIn("zoekt-bin/zoekt zoekt-bin/zoekt-index package/", workflow)
+        self.assertNotIn("sourcegraph/zoekt/cmd/zoekt@latest", workflow)
+
     def test_repository_contains_no_credential_or_private_path_material(self) -> None:
         root = Path(__file__).resolve().parents[1]
         excluded = {".git", ".venv", "build", "dist", "__pycache__"}

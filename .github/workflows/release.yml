@@ -59,11 +59,25 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.7"
       - name: Build standalone Project Brain
         run: |
           python -m pip install . pyinstaller
           pyinstaller --clean --onefile --name brain --collect-data brain brain/standalone.py
           dist/brain --version
+      - name: Build pinned Zoekt command pair
+        env:
+          ZOEKTVERSION: v0.0.0-20251202141441-886b229dcd5e
+          GOBIN: ${{ github.workspace }}/zoekt-bin
+        run: |
+          go install "github.com/sourcegraph/zoekt/cmd/zoekt@$ZOEKTVERSION"
+          go install "github.com/sourcegraph/zoekt/cmd/zoekt-index@$ZOEKTVERSION"
+          test -x zoekt-bin/zoekt
+          test -x zoekt-bin/zoekt-index
+          cp "$(go env GOMODCACHE)/github.com/sourcegraph/zoekt@$ZOEKTVERSION/LICENSE" zoekt-bin/ZOEKt_LICENSE
+          printf '%s\n' "$ZOEKTVERSION" > zoekt-bin/ZOEKt_VERSION
       - name: Download pinned structural backend
         env:
           CBM_ASSET: ${{ matrix.cbm_asset }}
@@ -78,10 +92,12 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: |
           mkdir package
-          cp dist/brain cbm/codebase-memory-mcp package/
+          cp dist/brain cbm/codebase-memory-mcp zoekt-bin/zoekt zoekt-bin/zoekt-index package/
           cp LICENSE package/PROJECT_BRAIN_LICENSE
           cp cbm/LICENSE package/CODEBASE_MEMORY_LICENSE
           cp cbm/THIRD_PARTY_NOTICES.md package/CODEBASE_MEMORY_THIRD_PARTY_NOTICES.md
+          cp zoekt-bin/ZOEKt_LICENSE package/
+          cp zoekt-bin/ZOEKt_VERSION package/
           tar -czf "project-brain-${GITHUB_REF_NAME}-${PLATFORM}.tar.gz" -C package .
       - uses: actions/upload-artifact@v7
         with:
@@ -106,7 +122,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "Project Brain $GITHUB_REF_NAME"
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME"
 
   pypi:
     name: Publish to PyPI with OIDC

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -54,7 +55,9 @@ def _parser() -> argparse.ArgumentParser:
     demo.add_argument("path", nargs="?", default="project-brain-demo", help="new or empty target directory")
 
     commands.add_parser("doctor", help="check configuration and local capabilities")
-    commands.add_parser("index", help="index current source snapshots")
+    index = commands.add_parser("index", help="build or inspect local index generations")
+    index.add_argument("action", nargs="?", choices=("build", "status", "rebuild"), default="build")
+    index.add_argument("--backend", choices=("lexical", "semantic", "all"), default="lexical")
     sync = commands.add_parser("sync", help="fetch every repo and create read-only remote snapshots")
     sync.add_argument("--no-fetch", action="store_true", help="snapshot locally available commits only")
     sync.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="override one repository branch")
@@ -68,10 +71,12 @@ def _parser() -> argparse.ArgumentParser:
     search_parser.add_argument("query")
     search_parser.add_argument("--repo", action="append", default=[])
     search_parser.add_argument("--fixed", action="store_true", help="treat query as literal text")
+    search_parser.add_argument("--explain", action="store_true", help="show backend selection and deterministic query plan")
 
     paths = commands.add_parser("paths", help="find verified repository-relative file paths")
     paths.add_argument("query")
     paths.add_argument("--repo", action="append", default=[])
+    paths.add_argument("--explain", action="store_true", help="show backend selection and deterministic query plan")
 
     symbol = commands.add_parser("symbol", help="find symbol declarations with lexical fallback")
     symbol.add_argument("name")
@@ -90,7 +95,41 @@ def _parser() -> argparse.ArgumentParser:
     experience.add_argument("--rebuild", action="store_true", help="rescan configured Git history")
     experience.add_argument("--patches", action="store_true", help="include bounded historical patch excerpts")
     experience.add_argument("--json", action="store_true", help="print index or evaluation metadata")
-    commands.add_parser("evaluate", help="compare past retrieval evidence with later ticket commits")
+    evaluate = commands.add_parser("evaluate", help="compare retrieval with historical commits or a local golden suite")
+    evaluate.add_argument("--golden", help="local JSON/YAML hand-labelled replay suite")
+    evaluate.add_argument("--split", choices=("calibration", "validation", "holdout"))
+    evaluate.add_argument("--limit", type=int, default=20, help="maximum ranked files used for golden recall")
+    benchmark = commands.add_parser("benchmark", help="summarize recorded local index and retrieval latency")
+    benchmark.add_argument("--json", action="store_true", help="print machine-readable p50/p95 metrics")
+    benchmark.add_argument("--machine", action="store_true", help="record a non-identifying local machine profile for later comparison")
+
+    explain = commands.add_parser("explain", help="compile a CONTEXT_REQUEST without searching")
+    explain.add_argument("ticket", nargs="?", help="optional ticket label for command ergonomics")
+    explain_source = explain.add_mutually_exclusive_group(required=True)
+    explain_source.add_argument("--file")
+    explain_source.add_argument("--clipboard", action="store_true")
+    explain.add_argument("--json", action="store_true")
+
+    edition = commands.add_parser("edition", help="inspect or switch capability edition")
+    edition.add_argument("action", choices=("current", "set"))
+    edition.add_argument("value", nargs="?", choices=("core", "semantic", "precision"))
+    commands.add_parser("capabilities", help="show locally available retrieval capabilities")
+
+    model = commands.add_parser("model", help="manage auditable local model packs")
+    model.add_argument("action", choices=("list", "install", "verify", "benchmark", "autotune", "remove", "status"))
+    model.add_argument("value", nargs="?")
+    model.add_argument("--sha256", help="required SHA-256 for an approved HTTPS model-pack release")
+    model.add_argument("--samples", type=int, default=3, help="benchmark samples per public synthetic workload (1-10)")
+    model.add_argument("--latency-budget-ms", type=int, default=3000, help="Precision candidate-pool p95 budget for autotune")
+
+    commands.add_parser("freshness", help="compare pinned source snapshots and index state")
+    commands.add_parser("storage", help="show local Brain storage usage")
+    gc = commands.add_parser("gc", help="remove unpinned old index generations")
+    gc.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True)
+    gc.add_argument("--keep-recent", type=int, default=2)
+    watch = commands.add_parser("watch", help="refresh selected remote snapshots on a fixed interval")
+    watch.add_argument("--once", action="store_true", help="run one refresh and exit")
+    watch.add_argument("--interval", type=int, help="seconds between refreshes")
 
     start = commands.add_parser("start", help="start a ticket investigation")
     start.add_argument("ticket")
@@ -243,11 +282,16 @@ def _init(args: argparse.Namespace) -> int:
         "[search]",
         "max_results = 100",
         "path_result_limit = 12",
+        "candidate_limit = 500",
         "",
         "[context]",
         "source_window_lines = 150",
         "full_file_lines = 350",
-        "soft_target_chars = 500000",
+        "soft_target_chars = 120000",
+        "hard_context_chars = 180000",
+        "hydrate_limit = 18",
+        "max_regions_per_file = 2",
+        "max_regions_per_repo = 8",
         "",
         "[delivery]",
         "clipboard_chunk_chars = 180000",
@@ -260,6 +304,14 @@ def _init(args: argparse.Namespace) -> int:
         "",
         "[knowledge]",
         'path = "knowledge"',
+        "",
+        "[storage]",
+        "max_state_gb = 200",
+        "minimum_free_disk_gb = 200",
+        "",
+        "[models]",
+        "# Approved internal HTTPS hosts may be added here for one-time pack installation.",
+        "approved_install_hosts = []",
         "",
         "[experience]",
         "enabled = true",
@@ -384,8 +436,19 @@ def execute(args: argparse.Namespace) -> int:
         print(report, end="")
         return 0 if ok else 1
     if args.command == "index":
+        if args.action == "status":
+            from .ops import freshness
+
+            print(json.dumps(freshness(settings), indent=2))
+            return 0
+        if args.action == "rebuild" and args.backend in {"semantic", "all"}:
+            from .semantic import build_semantic_index
+
+            print(json.dumps(build_semantic_index(settings), indent=2))
+            if args.backend == "semantic":
+                return 0
         _, updated = snapshot_indexes(settings)
-        print("Snapshot updated: " + ", ".join(updated))
+        print("Search index updated: " + ", ".join(updated))
         _print_graph(index_graph(settings, changed_only=False))
         return 0
     if args.command == "sync":
@@ -418,9 +481,17 @@ def execute(args: argparse.Namespace) -> int:
         print(settings.generated_dir / "PROJECT_RELATIONSHIPS.md")
         return 0
     if args.command == "search":
+        if args.explain:
+            from .retrieval import compile_request, explain_plan
+
+            print(json.dumps(explain_plan(compile_request({"objective": args.query, "searches": [{"query": args.query, "repos": args.repo}]})), indent=2))
         _print_hits(search(settings, args.query, args.repo, fixed=args.fixed))
         return 0
     if args.command == "paths":
+        if args.explain:
+            from .retrieval import compile_request, explain_plan
+
+            print(json.dumps(explain_plan(compile_request({"objective": args.query, "paths": [{"query": args.query, "repos": args.repo}]})), indent=2))
         _print_hits(path_hits(settings, args.query, args.repo), "No matching repository paths.")
         return 0
     if args.command == "symbol":
@@ -444,6 +515,107 @@ def execute(args: argparse.Namespace) -> int:
         if not found:
             print("No matching history.")
         return 0
+    if args.command == "benchmark":
+        from .metrics import benchmark_report, write_machine_profile
+
+        report = benchmark_report(settings)
+        if args.machine:
+            profile = write_machine_profile(settings)
+            if args.json:
+                print(json.dumps({"machine": profile, "benchmark": report}, indent=2))
+            else:
+                print("Recorded local machine profile (no hostname, serial number, or paths):")
+                print(json.dumps(profile, indent=2))
+            return 0
+        if args.json:
+            print(json.dumps(report, indent=2))
+            return 0
+        if not report["samples"]:
+            print("No benchmark samples yet. Run brain index or complete a brain ctx request.")
+            return 0
+        print(f"Benchmark samples: {report['samples']}")
+        for event, values in report["events"].items():
+            print(f"\n[{event}] {values['samples']} samples")
+            for metric, timing in values["timings"].items():
+                print(f"{metric}: p50 {timing['p50']:.3f} ms, p95 {timing['p95']:.3f} ms, max {timing['max']:.3f} ms")
+        return 0
+    if args.command == "explain":
+        from .retrieval import compile_request, explain_plan
+
+        plan = request_preview(_request_text(args), settings)
+        report = {**explain_plan(compile_request(plan["request"])), "request_signature": plan["signature"]}
+        print(json.dumps(report, indent=2) if args.json else "\n".join(f"L{item['tier']} {item['kind']}: {item['value']} — {item['reason']}" for item in report["operations"]))
+        return 0
+    if args.command == "edition":
+        from .editions import current_edition, set_edition
+
+        if args.action == "set":
+            if not args.value:
+                raise BrainError("brain edition set requires core, semantic, or precision")
+            print(set_edition(settings, args.value))
+        else:
+            print(current_edition(settings))
+        return 0
+    if args.command == "capabilities":
+        from .editions import capabilities
+
+        print(json.dumps(capabilities(settings), indent=2))
+        return 0
+    if args.command == "model":
+        from .models import autotune_pack, benchmark_pack, install_pack, install_pack_url, installed_packs, remove_pack, verify_pack
+
+        if args.action in {"list", "status"}:
+            print(json.dumps(installed_packs(settings), indent=2))
+        elif args.action == "install":
+            if not args.value:
+                raise BrainError("brain model install requires a local pack path or approved HTTPS release URL")
+            if args.value.startswith("https://"):
+                if not args.sha256:
+                    raise BrainError("brain model install URL requires --sha256 from the approved release manifest")
+                print(json.dumps(install_pack_url(settings, args.value, args.sha256), indent=2))
+            elif "://" in args.value or args.value.startswith("github:"):
+                raise BrainError("model install accepts a local pack path or approved HTTPS release URL only")
+            else:
+                print(json.dumps(install_pack(settings, Path(args.value)), indent=2))
+        elif args.action == "verify":
+            if not args.value:
+                raise BrainError("brain model verify requires PACK")
+            print(json.dumps(verify_pack(settings, args.value), indent=2))
+        elif args.action == "benchmark":
+            if not args.value:
+                raise BrainError("brain model benchmark requires PACK")
+            print(json.dumps(benchmark_pack(settings, args.value, samples=args.samples), indent=2))
+        elif args.action == "autotune":
+            if not args.value:
+                raise BrainError("brain model autotune requires PACK")
+            print(json.dumps(autotune_pack(settings, args.value, samples=args.samples, latency_budget_ms=args.latency_budget_ms), indent=2))
+        else:
+            if not args.value:
+                raise BrainError("brain model remove requires PACK")
+            remove_pack(settings, args.value)
+            print(f"Removed local model pack {args.value}")
+        return 0
+    if args.command in {"freshness", "storage", "gc"}:
+        from .ops import freshness, gc, storage
+
+        if args.command == "freshness":
+            print(json.dumps(freshness(settings), indent=2))
+        elif args.command == "storage":
+            print(json.dumps(storage(settings), indent=2))
+        else:
+            print(json.dumps(gc(settings, dry_run=args.dry_run, keep_recent=max(1, args.keep_recent)), indent=2))
+        return 0
+    if args.command == "watch":
+        interval = max(10, args.interval or settings.watch_interval_seconds)
+        while True:
+            _, results, _ = _refresh_all(settings, fetch=True, discover=False)
+            _print_sync(results)
+            if args.once:
+                return 0
+            try:
+                time.sleep(interval)
+            except KeyboardInterrupt:
+                return 0
     if args.command == "experience":
         index = build_experience_index(settings, changed_only=not args.rebuild)
         if args.query:
@@ -463,6 +635,11 @@ def execute(args: argparse.Namespace) -> int:
             print(f"Indexed {len(index.get('cases') or [])} ticket cases from local Git history.")
         return 0
     if args.command == "evaluate":
+        if args.golden:
+            from .evaluation import evaluate_golden
+
+            print(json.dumps(evaluate_golden(settings, args.golden, split=args.split, limit=max(1, args.limit)), indent=2))
+            return 0
         report = evaluate_sessions(settings)
         print(settings.generated_dir / "EXPERIENCE_REPORT.md")
         print(f"Evaluated {report['evaluated_sessions']} sessions against {report['indexed_cases']} indexed ticket cases.")
@@ -676,7 +853,7 @@ def execute(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     try:
         return execute(_parser().parse_args(argv))
-    except (BrainError, OSError) as exc:
+    except (BrainError, OSError, ValueError, RuntimeError) as exc:
         print(f"brain: {exc}", file=sys.stderr)
         return 2
 

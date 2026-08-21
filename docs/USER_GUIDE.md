@@ -13,8 +13,9 @@ ticket investigations, configuration, command reference, and troubleshooting.
 - macOS, Linux, or Windows
 
 There are no Python package runtime dependencies. The prebuilt package includes
-the tested structural engine. When that engine or `rg` is unavailable, Project
-Brain uses its built-in scanner. Non-Git directories can still be searched.
+the tested structural engine and a pinned Zoekt command pair. When either engine
+or `rg` is unavailable, Project Brain uses its built-in scanner. Non-Git
+directories can still be searched.
 
 ## 2. Installation
 
@@ -32,12 +33,13 @@ toolchain. Homebrew maps `superorange0707/tap` to the separate
 
 Download the matching archive from the
 [latest release](https://github.com/superorange0707/project-brain/releases/latest),
-then keep `brain` and `codebase-memory-mcp` in the same directory on `PATH`.
+then keep `brain`, `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the
+same directory on `PATH`.
 
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.1"
 ```
 
 Upgrade later with:
@@ -49,7 +51,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.1"
 ```
 
 ### From a source checkout
@@ -187,11 +189,16 @@ generated_dir = "generated"
 [search]
 max_results = 100
 path_result_limit = 12
+candidate_limit = 500
 
 [context]
 source_window_lines = 150
 full_file_lines = 350
-soft_target_chars = 500000
+soft_target_chars = 120000
+hard_context_chars = 180000
+hydrate_limit = 18
+max_regions_per_file = 2
+max_regions_per_repo = 8
 
 [delivery]
 clipboard_chunk_chars = 180000
@@ -201,9 +208,18 @@ mode = "lazy"
 
 [sources]
 branch_priority = ["develop", "development"]
+fetch_scope = "selected" # selected | tracked | all-branches
+watch_interval_seconds = 180
 
 [knowledge]
 path = "knowledge"
+
+[storage]
+max_state_gb = 200
+minimum_free_disk_gb = 200
+
+[models]
+approved_install_hosts = [] # optional organization HTTPS pack hosts
 
 [experience]
 enabled = true
@@ -227,6 +243,7 @@ Project Brain also accepts legacy `config.yml` and `config.yaml` files.
 
 - `max_results`: maximum matches gathered per operation.
 - `path_result_limit`: maximum verified filename/path matches read per repository.
+- `candidate_limit`: maximum ranked metadata candidates considered before source hydration.
 
 ### Experience settings
 
@@ -243,11 +260,27 @@ Project Brain also accepts legacy `config.yml` and `config.yaml` files.
 
 - `source_window_lines`: source lines around a hit in a large file.
 - `full_file_lines`: files up to this size are included in full.
-- `soft_target_chars`: emits a warning above this size; evidence is not discarded.
+- `soft_target_chars`: emits a warning above this size.
+- `hard_context_chars`: source-hydration budget; lower-ranked candidates remain as a compact manifest.
+- `hydrate_limit`: maximum source regions hydrated by a normal request.
+- `max_regions_per_file` / `max_regions_per_repo`: diversity limits that stop one file or repository from consuming the context.
 
 ### Delivery settings
 
 - `clipboard_chunk_chars`: maximum size of each Claude clipboard part.
+
+### Storage settings
+
+- `max_state_gb`: maximum state/index/model-pack bytes Project Brain may own;
+  set `0` to disable this quota.
+- `minimum_free_disk_gb`: refuse a new index or model-pack write that would
+  reduce free disk below this reserve; set `0` to disable the reserve.
+
+### Model-pack installation settings
+
+- `approved_install_hosts`: optional exact host names or parent domains allowed
+  for a one-time HTTPS pack download. GitHub Release URLs are also accepted only
+  with an explicit SHA-256. These settings never enable hosted inference.
 
 ### Source branch settings
 
@@ -256,6 +289,121 @@ Project Brain also accepts legacy `config.yml` and `config.yaml` files.
 - `repositories.branch`: optional permanent override for a special repo.
 - `--branch REPO=BRANCH`: temporary override accepted by `brain sync`,
   `brain refresh`, and `brain start`; useful for a ticket's feature branch.
+- `fetch_scope`: defaults to `selected`, which fetches only the chosen source
+  branch when it can be identified locally. Use `all-branches` only when a
+  workspace deliberately needs every remote branch.
+- `watch_interval_seconds`: polling cadence for `brain watch` (minimum 10).
+
+### Editions and local model packs
+
+`brain edition current` starts at `core`. Core has no model requirement and
+always retains SQLite/ripgrep fallbacks. `brain edition set semantic` requires a
+verified local embedding pack; `precision` also requires a verified reranker
+pack. Semantic indexing additionally uses the optional USearch extra:
+
+```bash
+python -m pip install 'project-brain-context[semantic]'
+```
+
+Pack installation is deliberately local-only:
+
+```bash
+brain model install /approved-share/qwen-embedding-pack.tar
+brain model verify approved-qwen-embedding
+brain model benchmark approved-qwen-embedding
+brain model autotune approved-qwen-embedding --latency-budget-ms 3000
+brain edition set semantic
+brain capabilities
+```
+
+The manifest records model/revision/license/runtime/checksum provenance. Every
+production embedding or reranker pack must include a hash-pinned local JSON
+`golden_suite` (also listed in `artifacts`); `brain model verify` runs it before
+marking the pack usable. Embedding cases check finite dimensions, batch parity,
+normalization, reference-vector cosine parity, and expected similarity order;
+production suites also declare and exercise a minimum long-input length.
+Reranker cases pin an expected document order and must produce the same scores
+for batch and one-document calls. A minimal embedding case looks like:
+
+```json
+{
+  "requirements": {"long_input_min_chars": 4096},
+  "embedding": [{
+    "texts": ["ticket query", "relevant code", "...long negative example..."],
+    "dimension": 2,
+    "normalized": true,
+    "reference_vectors": [[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]],
+    "minimum_cosine_to_reference": 0.98,
+    "expected_similarity_order": [1, 2]
+  }]
+}
+```
+
+The reference-vector arrays must have the declared dimension; real pack vectors
+use the selected embedding dimension. A
+managed `llama.cpp` pack declares both `runtime_binary` and `model_file` in its
+checksummed `artifacts` mapping. Brain rechecks those hashes before launch, then
+starts a short-lived server on `127.0.0.1` with an ephemeral API key,
+`--offline`, and no Web UI; it terminates the process after the operation. A
+production pack cannot delegate to `runtime_url`: it must own those verified
+local artifacts so Brain can audit and terminate the runtime. `runtime_url` is
+reserved for test-only loopback conformance fixtures.
+Runtime instances that Brain starts for semantic indexing/search or precision
+reranking are closed on both success and failure paths; Core continues without
+them if an optional model operation fails.
+Production embedding packs also declare the current `chunk_schema_version` and
+`document_card_version`. A pack from an incompatible schema is disabled with an
+explicit recovery path: install a compatible pack, then run `brain index rebuild
+--backend semantic`; Core retrieval remains available throughout.
+No model download, hosted telemetry, or cloud inference is performed by Project
+Brain while it runs. `brain model benchmark` writes a public-synthetic
+conformance and local latency report, not a claim that a model has passed your
+holdout evaluation. `brain model autotune` stores only local recommendations for
+the exact verified pack: embedding batch size, reranker candidate/batch limit,
+one query worker, and the current short-lived-runtime policy. It does not invent
+M3 Pro numbers or make a model resident. See [offline model packs](MODEL_PACKS.md)
+for official-Qwen provenance, reproducible reranker conversion, controlled HTTPS
+installation, and the required manifest fields.
+
+### Golden replay evaluation
+
+Keep a sanitized local JSON or YAML suite outside version control when ticket
+details are private. Each case has an `id`, one of `calibration`, `validation`,
+or `holdout` as `split`, a normal request mapping, and explicit expected paths:
+
+```json
+{
+  "cases": [{
+    "id": "sanitized-eligibility",
+    "split": "holdout",
+    "request": {"objective": "Find the evaluator", "searches": [{"query": "recalculate", "repos": ["trading-service"]}]},
+    "expect": {
+      "production_files": ["trading-service:src/main/java/demo/EligibilityEvaluator.java"],
+      "test_config_files": ["trading-service:src/test/java/demo/CustomerChangedListenerTest.java"],
+      "false_positive_files": ["trading-service:README.md"]
+    }
+  }]
+}
+```
+
+Run `brain evaluate --golden /secure/path/suite.json --split holdout`. The
+result stores only case IDs, suite hash, and aggregate metrics in
+`state/golden-eval.json`; it does not copy request text into telemetry. Metrics
+include repository Recall@5/10, file Recall@5/10/20, test recall, MRR@10,
+nDCG@10, precision@5/10, context characters, duplicate ratio, candidate/
+hydration/total latency, process peak RSS, and semantic-only useful-hit rate
+when Semantic candidates are present. The last two are local diagnostic signals,
+not a claim about a private corpus or a standalone semantic evidence path.
+
+### Optional Zoekt local shards
+
+If an approved local installation supplies both `zoekt` and `zoekt-index`, a
+normal `brain index rebuild --backend lexical` creates a shard under the local
+state directory for each repository snapshot. Exact and regular-expression
+search uses that shard first and verifies literal lines before they become a
+candidate. If either executable, a current shard, or a compatible query is
+missing, Project Brain uses SQLite FTS5 or ripgrep automatically. `brain index
+status` and `brain freshness` report whether Zoekt is currently available.
 
 ## 5. Teach the Brain your domain
 
@@ -614,12 +762,37 @@ runtime workflows with source and target file/line evidence. `refresh` first
 fetches and snapshots all repositories, then rebuilds both maps and the structural
 index.
 
+### Local text and path index
+
+`brain refresh` and `brain index` publish a real SQLite FTS5 trigram search
+generation under `state/`. Files are keyed by Git blob SHA, so identical content
+is stored and indexed once even when it appears in several snapshots or paths.
+The update is one SQLite transaction: readers see the previous complete
+generation or the new complete generation, never a partial refresh.
+
+Fixed-string source queries and path queries use this index first. Regex,
+missing/stale index, and non-Git working-tree queries retain the `rg`/built-in
+scanner fallback. Candidate metadata is merged, ranked, and diversity-limited
+before source is read. Run `brain benchmark` (or `brain benchmark --json`) to
+inspect locally recorded index/retrieval p50 and p95 latency.
+
+Run `brain benchmark --machine` on each intended target host to persist a
+non-identifying local profile (OS, architecture, logical CPUs, and memory only).
+It intentionally excludes hostname, serial number, repository paths, and
+environment variables. With approved packs installed, `brain model benchmark`
+measures embedding batches of 1/8/16 or reranker candidate pools of 10/20/40/80
+using only public synthetic cards. `brain model autotune PACK` then stores the
+observed recommendation in private Brain state for the exact pack. Run private
+ticket replay and final M3 Pro measurements later on that machine; neither is
+required to use or validate Core locally.
+
 ### Structural backend
 
 Homebrew and standalone packages include the tested `codebase-memory-mcp` v0.10.5
-binary. Project Brain calls its local JSON CLI for structural symbol and call-path
-queries and stores its cache under Brain's ignored `state/` directory. It never
-runs the backend installer or changes Claude, Codex, or other agent configuration.
+binary and a source-pinned Zoekt command pair. Project Brain calls the structural
+backend's local JSON CLI for symbol and call-path queries and Zoekt only for local
+immutable shards; it stores both caches under Brain's ignored `state/` directory.
+It never runs an installer or changes Claude, Codex, or other agent configuration.
 The default `graph.mode = "lazy"` indexes only repositories identified by exact
 symbol evidence. Run `brain index` for an eager full-workspace graph, or set
 `graph.enabled = false` when deterministic lexical analysis is sufficient.
@@ -724,11 +897,21 @@ remain in control. For SSH on macOS, Project Brain adds `UseKeychain=no`; HTTPS
 remotes remain subject to Git's configured credential-helper policy. Project
 Brain never stores credentials or remote URLs.
 
+An optional approved model pack may communicate only with a local loopback
+runtime. Pack installation accepts an already-local pack or a one-time,
+SHA-256-pinned GitHub Release/configured approved HTTPS source; it validates
+archive paths and checksums. Runtime never downloads weights or sends
+source/query telemetry to a hosted inference service.
+
 The local cockpit binds only to IPv4 loopback, requires a random per-process token
 for every API call, rejects non-local Host headers, limits request bodies, and
 blocks framing and external page connections with browser security headers. It
 does not expose a generic file endpoint: session artifacts are resolved from an
 allowlist and cannot escape `.runs/TICKET/`.
+
+On macOS and Linux, Brain creates its state, session, and generated-handoff
+directories with owner-only (`0700`) permissions. Keep any separately exported
+handoffs under your organisation's required access controls.
 
 It does read source and can place that source on your clipboard or in Markdown.
 Treat context packs with the same confidentiality as the repositories they came
@@ -767,12 +950,13 @@ known neighboring symbols. Dynamic behavior may not have a static call site.
 
 Narrow repository lists and request objectives. Increase
 `clipboard_chunk_chars` for a frontend that accepts larger pastes. Project Brain
-warns at the soft target but never silently removes evidence.
+warns at the soft target, hydrates source only up to the configured limits, and
+lists lower-ranked verified candidates as metadata for explicit follow-up.
 
 ### `rg` missing
 
-The built-in scanner remains functional. Install ripgrep for much faster searches
-on large repositories.
+Indexed fixed-string and path search remains available. The built-in scanner is
+used for fallbacks; install ripgrep for faster regex and non-indexed searches.
 
 ### A repository says `fetch-failed`
 

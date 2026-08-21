@@ -1,0 +1,26 @@
+{
+  "name": "sanitized-demo-regression",
+  "cases": [
+    {
+      "id": "eligibility-recalculation",
+      "split": "holdout",
+      "request": {
+        "objective": "Find eligibility recalculation production and test evidence.",
+        "searches": [
+          {"query": "recalculate", "repos": ["trading-service"]}
+        ]
+      },
+      "expect": {
+        "production_files": [
+          "trading-service:src/main/java/demo/EligibilityEvaluator.java"
+        ],
+        "test_config_files": [
+          "trading-service:src/test/java/demo/CustomerChangedListenerTest.java"
+        ],
+        "false_positive_files": [
+          "risk-service:src/main/java/demo/RiskController.java"
+        ]
+      }
+    }
+  ]
+}

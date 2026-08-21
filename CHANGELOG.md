@@ -2,6 +2,76 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.6.1] - 2026-08-21
+
+### Added
+
+- Add stable retrieval contracts, deterministic narrow-first query planning and
+  rank fusion, streaming bounded `rg` fallback, and a trace JSON artifact for
+  every context request.
+- Add catalog schema/version checks, atomic generation pointers, session
+  generation pinning, generation-aware status/freshness/storage/GC commands,
+  and changed-range ticket-history refreshes.
+- Add Core/Semantic/Precision capability profiles, local-only verified model
+  pack management, deterministic semantic-card chunking, vector-shard snapshot
+  filtering, and conformance/bakeoff report commands.
+- Add local hand-labelled golden replay evaluation with calibration/validation/
+  holdout splits, suite hashing, ranking metrics, and no request text telemetry.
+- Add an optional Zoekt local-shard adapter with snapshot checks and deterministic
+  SQLite/ripgrep fallback, plus LRU-bounded vector/query caches and session-pinned
+  snapshot storage GC.
+- Build source-pinned `zoekt` and `zoekt-index` commands into the standalone
+  release archive, preserving upstream license and revision provenance.
+- Require production model conformance suites to cover reference-vector cosine
+  and similarity-order parity, batch/single reranker parity, and a declared
+  long-input exercise.
+- Reject incompatible verified embedding-pack/card schemas with an explicit
+  semantic-index rebuild path, while retaining Core retrieval as the fallback.
+- Always shut down Brain-owned embedding and reranker runtimes after semantic
+  indexing, semantic search, and precision reranking, including failed calls.
+- Add `brain benchmark --machine`, public-synthetic model batch/candidate-pool
+  measurements, and `brain model autotune` profiles that apply only to the exact
+  verified local pack.
+- Add a complete offline pack guide covering official-Qwen provenance,
+  reproducible reranker conversion, conformance, and target-machine validation.
+- Require production pack provenance for model/tokenizer artifacts, format,
+  quantization, pooling, normalization, instructions, converter, and semantic
+  card/chunk versions.
+
+### Fixed
+
+- Decode the current Zoekt JSONL base64 line representation before literal
+  verification, so real local-shard matches are not dropped.
+
+### Security
+
+- Restrict model runtime endpoints to loopback; permit one-time pack staging
+  only from GitHub Release or configured HTTPS hosts with a caller-provided
+  SHA-256; validate archive paths and checksum-verify all declared artifacts.
+- Create Brain-owned state, session, and generated-handoff directories with
+  owner-only permissions on POSIX hosts.
+- Require production managed llama.cpp packs to contain checksummed runtime and
+  model artifacts; recheck them before local offline launch and always shut down
+  the pack-owned process. Reject `runtime_url` delegation for production packs,
+  so an unverified external daemon cannot substitute its binary or weights.
+
+### Core retrieval additions
+
+- Build an atomic SQLite FTS5 trigram generation for exact content and path
+  retrieval, with file membership keyed to Git blob SHA and content-hash fallback
+  for non-Git sources.
+- Record local index and retrieval timings and summarize p50/p95 latency with
+  `brain benchmark`.
+- Preserve non-hydrated ranked candidates as compact candidate IDs in context.
+
+### Core retrieval changes
+
+- Resolve common symbol, caller, implementation, and test candidates from one
+  indexed literal search plus deterministic line verification.
+- Merge overlapping hits, apply file/repository diversity, and rank candidates
+  before reading source. New workspaces hydrate at most 18 source regions by
+  default while retaining `rg` and the built-in scanner as fallbacks.
+
 ## [0.6.0] - 2026-08-17
 
 ### Added

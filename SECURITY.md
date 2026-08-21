@@ -29,6 +29,16 @@ Project Brain is designed as a local, read-only retrieval tool:
 - Its only normal network operation is `git fetch origin`, delegated to the
   user's installed Git and credential helper.
 - It does not execute code from target repositories.
+- Optional model packs are accepted from a local path or staged once from a
+  GitHub Release/configured approved HTTPS host only with a caller-supplied
+  SHA-256. They validate archive paths and declared checksums and may connect
+  only to a loopback runtime.
+  Pack-owned llama.cpp processes recheck every declared artifact before launch,
+  bind `127.0.0.1` on an ephemeral port, use a process-local API key, disable
+  the Web UI, use offline mode, and are terminated by Brain after use.
+- Model runtime never downloads weights or sends source/query telemetry to
+  hosted model services. A user-invoked, hash-pinned pack installation is the
+  only model-related network operation and is not a runtime dependency.
 - It does not edit, clean, reset, checkout, build, or commit target repositories.
 - Subprocesses use argument arrays rather than a shell.
 - Direct file requests are constrained to configured repository roots.
@@ -87,3 +97,7 @@ ephemeral repository `GITHUB_TOKEN` with scoped permissions.
 
 Maintainers should require manual approval on the `pypi` environment and carefully
 review changes to `.github/workflows/release.yml`.
+
+Standalone builds pin the Go toolchain and Zoekt module revision, compile only
+the local `zoekt`/`zoekt-index` commands, include the upstream Apache-2.0 license
+and recorded revision, and publish a SHA-256 manifest for every final archive.

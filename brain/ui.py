@@ -99,6 +99,11 @@ def _sessions(settings: Settings) -> list[dict[str, Any]]:
 
 
 def project_status(settings: Settings) -> dict[str, Any]:
+    from .catalog import current_generation
+    from .editions import capabilities, current_edition
+    from .metrics import benchmark_report
+    from .ops import storage
+
     sources = load_source_state(settings)
     indexes = load_index_state(settings)
     graph_path = settings.state_dir / "graphs.json"
@@ -150,6 +155,13 @@ def project_status(settings: Settings) -> dict[str, Any]:
         },
         "repositories": repositories,
         "sessions": _sessions(settings),
+        "retrieval": {
+            "edition": current_edition(settings),
+            "generation": (current_generation(settings) or {}).get("generation"),
+            "capabilities": capabilities(settings),
+            "benchmark": benchmark_report(settings),
+            "storage": storage(settings),
+        },
     }
 
 

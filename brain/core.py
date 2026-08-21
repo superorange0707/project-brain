@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import ast
+import contextvars
 import hashlib
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
+import time
 import tomllib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -18,6 +21,8 @@ from typing import Any, Iterable
 
 
 IGNORED_DIRS = {".git", ".idea", ".venv", "node_modules", "target", "build", "dist"}
+SENSITIVE_FILE_NAMES = {".env", ".envrc", "credentials", "credentials.json", "service-account.json", "id_rsa", "id_ed25519", "keystore"}
+SENSITIVE_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".jks"}
 DISCOVERY_IGNORED_DIRS = IGNORED_DIRS | {".runs", ".codex", ".agents", "state", "generated", "knowledge"}
 PROTOCOL_VERSION = 1
 CODE_SUFFIXES = {
@@ -67,17 +72,27 @@ class Settings:
     max_results: int = 100
     source_window_lines: int = 150
     full_file_lines: int = 350
-    soft_target_chars: int = 500_000
+    soft_target_chars: int = 120_000
+    hard_context_chars: int = 180_000
     clipboard_chunk_chars: int = 180_000
     graph_enabled: bool = True
     graph_lazy: bool = True
     branch_priority: list[str] = field(default_factory=lambda: ["develop", "development"])
+    sync_fetch_scope: str = "selected"
+    watch_interval_seconds: int = 180
     path_result_limit: int = 12
+    candidate_limit: int = 500
+    hydrate_limit: int = 18
+    max_regions_per_file: int = 2
+    max_regions_per_repo: int = 8
+    max_state_gb: int = 200
+    minimum_free_disk_gb: int = 200
     experience_enabled: bool = True
     ticket_pattern: str = r"(?<![A-Z0-9])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Z0-9])"
     experience_commit_limit: int = 1000
     experience_similar_cases: int = 5
     experience_patch_chars: int = 0
+    model_install_hosts: list[str] = field(default_factory=list)
 
     def repos(self, names: Iterable[str] | None = None) -> list[Repository]:
         wanted = set(names or [])
@@ -186,6 +201,9 @@ class ContextBundle:
     experience: str = ""
     unresolved: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    additional_candidates: list[SearchHit] = field(default_factory=list)
+    metrics: dict[str, int | float] = field(default_factory=dict)
+    trace: dict[str, Any] = field(default_factory=dict)
 
 
 def run(args: list[str], cwd: Path | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -201,6 +219,15 @@ def run(args: list[str], cwd: Path | None = None, input_text: str | None = None)
         )
     except OSError as exc:
         raise BrainError(f"Could not run {args[0]}: {exc}") from exc
+
+
+_ACTIVE_RETRIEVAL_TRACE: contextvars.ContextVar[Any | None] = contextvars.ContextVar("brain_retrieval_trace", default=None)
+
+
+def _record_backend(name: str, elapsed_ms: float, **values: int | bool) -> None:
+    trace = _ACTIVE_RETRIEVAL_TRACE.get()
+    if trace is not None:
+        trace.add_backend(name, elapsed_ms, **values)
 
 
 def _scalar(value: str) -> Any:
@@ -347,6 +374,13 @@ def find_config(explicit: str | None = None, start: Path | None = None) -> Path:
     raise BrainError("No brain.toml/config.yml found. Run `brain init` first.")
 
 
+def ensure_private_directory(path: Path) -> None:
+    """Create Brain-owned state with owner-only permissions on POSIX hosts."""
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        path.chmod(0o700)
+
+
 def load_settings(path: str | Path | None = None) -> Settings:
     config_path = find_config(str(path) if path else None)
     data = _load_data(config_path)
@@ -382,13 +416,21 @@ def load_settings(path: str | Path | None = None) -> Settings:
     delivery = data.get("delivery") or {}
     graph = data.get("graph") or {}
     sources = data.get("sources") or {}
+    storage = data.get("storage") or {}
     experience = data.get("experience") or {}
+    models = data.get("models") or {}
     branch_priority = sources.get("branch_priority", ["develop", "development"])
     if not isinstance(branch_priority, list):
         raise BrainError("sources.branch_priority must be a list")
     graph_mode = str(graph.get("mode") or "lazy")
     if graph_mode not in {"lazy", "eager"}:
         raise BrainError("graph.mode must be lazy or eager")
+    fetch_scope = str(sources.get("fetch_scope") or "selected")
+    if fetch_scope not in {"selected", "tracked", "all-branches"}:
+        raise BrainError("sources.fetch_scope must be selected, tracked, or all-branches")
+    install_hosts = models.get("approved_install_hosts", [])
+    if not isinstance(install_hosts, list) or not all(isinstance(host, str) and host.strip() for host in install_hosts):
+        raise BrainError("models.approved_install_hosts must be a list of host names")
 
     def local(value: str) -> Path:
         candidate = Path(value).expanduser()
@@ -406,22 +448,34 @@ def load_settings(path: str | Path | None = None) -> Settings:
         max_results=int(search.get("max_results") or 100),
         source_window_lines=int(context.get("source_window_lines") or 150),
         full_file_lines=int(context.get("full_file_lines") or 350),
-        soft_target_chars=int(context.get("soft_target_chars") or 500_000),
+        soft_target_chars=int(context.get("soft_target_chars") or 120_000),
+        hard_context_chars=max(10_000, int(context.get("hard_context_chars") or 180_000)),
         clipboard_chunk_chars=int(delivery.get("clipboard_chunk_chars") or 180_000),
         graph_enabled=bool(graph.get("enabled", True)),
         graph_lazy=graph_mode == "lazy",
         branch_priority=[str(value).strip() for value in branch_priority if str(value).strip()],
+        sync_fetch_scope=fetch_scope,
+        watch_interval_seconds=max(10, int(sources.get("watch_interval_seconds") or 180)),
         path_result_limit=max(1, int(search.get("path_result_limit") or 12)),
+        candidate_limit=max(1, int(search.get("candidate_limit") or 500)),
+        hydrate_limit=max(1, int(context.get("hydrate_limit") or 18)),
+        max_regions_per_file=max(1, int(context.get("max_regions_per_file") or 2)),
+        max_regions_per_repo=max(1, int(context.get("max_regions_per_repo") or 8)),
+        max_state_gb=max(0, int(storage["max_state_gb"])) if "max_state_gb" in storage else 200,
+        minimum_free_disk_gb=max(0, int(storage["minimum_free_disk_gb"])) if "minimum_free_disk_gb" in storage else 200,
         experience_enabled=bool(experience.get("enabled", True)),
         ticket_pattern=str(experience.get("ticket_pattern") or r"(?<![A-Z0-9])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Z0-9])"),
         experience_commit_limit=max(1, int(experience.get("commit_limit") or 1000)),
         experience_similar_cases=max(1, int(experience.get("similar_cases") or 5)),
         experience_patch_chars=max(0, int(experience.get("patch_chars") or 0)),
+        model_install_hosts=[host.lower().strip() for host in install_hosts],
     )
     try:
         re.compile(settings.ticket_pattern)
     except re.error as exc:
         raise BrainError(f"Invalid experience.ticket_pattern: {exc}") from exc
+    for directory in (settings.state_dir, settings.runs_dir, settings.generated_dir):
+        ensure_private_directory(directory)
     _attach_source_snapshots(settings)
     return settings
 
@@ -462,6 +516,8 @@ def _walk_files(root: Path) -> Iterable[Path]:
         base = Path(directory)
         for name in names:
             path = base / name
+            if name.lower() in SENSITIVE_FILE_NAMES or path.suffix.lower() in SENSITIVE_SUFFIXES:
+                continue
             if path.suffix.lower() in CODE_SUFFIXES or name in {
                 "Dockerfile", "Jenkinsfile", "Makefile", "Procfile", "build.gradle", "gradlew", "mvnw", "pom.xml"
             }:
@@ -493,48 +549,55 @@ def search_repo(repo: Repository, pattern: str, *, fixed: bool = False, max_resu
     root = repo.scan_path
     if not root.is_dir():
         return []
-    if not shutil.which("rg"):
-        return _python_search(repo, pattern, fixed, max_results)
-    args = ["rg", "--json", "--line-number", "--color", "never"]
-    if fixed:
-        args.append("--fixed-strings")
-    args.extend(["-e", pattern, str(root)])
-    result = run(args)
-    if result.returncode not in {0, 1}:
-        raise BrainError(f"rg failed in {repo.name}: {result.stderr.strip()}")
-    hits: list[SearchHit] = []
-    for line in result.stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") != "match":
-            continue
-        data = event["data"]
-        absolute = Path(data["path"]["text"])
-        try:
-            relative = absolute.relative_to(root)
-        except ValueError:
-            relative = absolute
-        hits.append(SearchHit(
-            repo=repo.name,
-            path=str(relative),
-            line=int(data["line_number"]),
-            text=data["lines"]["text"].rstrip("\n"),
-            score=95 if fixed else 80,
-            found_by=["ripgrep literal" if fixed else "ripgrep regex"],
-        ))
-        if len(hits) >= max_results:
-            break
-    return hits
+    from .backends.ripgrep import search as ripgrep_search
+
+    result = ripgrep_search(root, pattern, fixed=fixed, max_results=max_results)
+    if result is None:
+        started = time.perf_counter()
+        hits = _python_search(repo, pattern, fixed, max_results)
+        _record_backend("python-fallback", (time.perf_counter() - started) * 1000, files=len(hits), raw_hits=len(hits))
+        return hits
+    rows, stats = result
+    _record_backend(
+        "ripgrep",
+        float(stats["elapsed_ms"]),
+        subprocesses=int(stats["subprocesses"]),
+        bytes_scanned=int(stats["bytes_scanned"]),
+        files=len({path for path, _, _ in rows}),
+        raw_hits=int(stats["raw_hits"]),
+    )
+    return [
+        SearchHit(repo.name, path, line, text, score=95 if fixed else 80, found_by=["ripgrep literal" if fixed else "ripgrep regex"])
+        for path, line, text in rows
+    ]
 
 
 def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None, *, fixed: bool = False) -> list[SearchHit]:
+    from .index import query_index
+    from .backends.zoekt import search as zoekt_search
+
     selected = settings.repos(repos)
     hits: list[SearchHit] = []
     for repo in selected:
         # A busy first repository must not hide evidence in later repositories.
-        hits.extend(search_repo(repo, pattern, fixed=fixed, max_results=settings.max_results))
+        zoekt = zoekt_search(settings, repo, pattern, fixed=fixed, max_results=settings.max_results)
+        if zoekt is not None:
+            rows, stats = zoekt
+            _record_backend("zoekt", float(stats["elapsed_ms"]), raw_hits=int(stats["raw_hits"]), cache_hit=True)
+            hits.extend(
+                SearchHit(repo.name, path, line, text, score=90 + min(9, score), found_by=["zoekt local shard"])
+                for path, line, text, score in rows
+            )
+            continue
+        indexed = query_index(settings, repo, pattern, max_results=settings.max_results) if fixed else None
+        if indexed is None:
+            hits.extend(search_repo(repo, pattern, fixed=fixed, max_results=settings.max_results))
+        else:
+            _record_backend("sqlite-fts5", 0.0, raw_hits=len(indexed), cache_hit=True)
+            hits.extend(
+                SearchHit(repo.name, path, line, text, score=95, found_by=["sqlite trigram index"])
+                for path, line, text in indexed
+            )
     return hits[: settings.max_results * max(1, len(selected))]
 
 
@@ -545,14 +608,19 @@ def path_hits(settings: Settings, query: str, repos: Iterable[str] | None = None
         raise BrainError("Path query is empty")
     tokens = [value for value in re.findall(r"[a-z0-9_.-]+", needle) if len(value) > 1]
     hits: list[SearchHit] = []
+    from .index import query_paths
+
     for repo in settings.repos(repos):
         root = repo.scan_path
         matches: list[SearchHit] = []
-        for path in _walk_files(root) if root.is_dir() else []:
-            relative = str(path.relative_to(root))
+        indexed = query_paths(settings, repo, needle, limit=settings.path_result_limit)
+        paths = indexed if indexed is not None else (
+            (str(path.relative_to(root)) for path in _walk_files(root)) if root.is_dir() else []
+        )
+        for relative in paths:
             lowered = relative.lower()
-            basename = path.name.lower()
-            stem = path.stem.lower()
+            basename = Path(relative).name.lower()
+            stem = Path(relative).stem.lower()
             if needle in {lowered, basename, stem}:
                 score = 100
             elif needle in lowered:
@@ -577,7 +645,8 @@ def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = No
         rf"|\b{escaped}\s*[:=]\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)"
         rf"|\b(?:public|protected|private|static|final|abstract|synchronized|native\s+)*[A-Za-z_$][\w$<>, ?\[\].]*\s+{escaped}\s*\("
     )
-    hits = search(settings, declaration, scope)
+    declaration_re = re.compile(declaration)
+    hits = [hit for hit in search(settings, name, scope, fixed=True) if declaration_re.search(hit.text)]
     for hit in hits:
         hit.kind = "definition"
         hit.score = 100
@@ -606,20 +675,21 @@ def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = No
 def implementation_hits(settings: Settings, name: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
     short = name.rsplit(".", 1)[-1]
     pattern = rf"\b(?:implements|extends)\s+[^{{\n]*\b{re.escape(short)}\b|:\s*[^{{=\n]*\b{re.escape(short)}\b"
-    hits = search(settings, pattern, repos)
+    matcher = re.compile(pattern)
+    hits = [hit for hit in search(settings, short, repos, fixed=True) if matcher.search(hit.text)]
     for hit in hits:
         hit.kind = "implementation"
-        hit.score = 90
+        hit.score = 98
         hit.found_by.append("implementation fallback")
     return hits
 
 
 def test_hits(settings: Settings, name: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
-    candidates = search(settings, rf"\b{re.escape(name.rsplit('.', 1)[-1])}\b", repos)
+    candidates = search(settings, name.rsplit('.', 1)[-1], repos, fixed=True)
     tests = [hit for hit in candidates if re.search(r"(^|/)(test|tests|src/test)/|(?:Test|Tests|IT|Spec)\.", hit.path, re.I)]
     for hit in tests:
         hit.kind = "test"
-        hit.score = 85
+        hit.score = 97
         hit.found_by.append("test discovery")
     return tests
 
@@ -628,9 +698,19 @@ def read_source(settings: Settings, hit: SearchHit, *, full: bool = False, lines
     repo = settings.repo(hit.repo)
     root = repo.scan_path.resolve()
     path = (root / hit.path).resolve()
-    if not path.is_relative_to(root) or not path.is_file():
+    if not path.is_relative_to(root):
         raise BrainError(f"Unsafe or missing file: {hit.repo}:{hit.path}")
-    content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if path.name.lower() in SENSITIVE_FILE_NAMES or path.suffix.lower() in SENSITIVE_SUFFIXES:
+        raise BrainError(f"Sensitive source path is excluded from automatic retrieval: {hit.repo}:{hit.path}")
+    if path.is_file():
+        source = path.read_text(encoding="utf-8", errors="replace")
+    else:
+        from .index import read_indexed_file
+
+        source = read_indexed_file(settings, repo, hit.path)
+        if source is None:
+            raise BrainError(f"Unsafe or missing file: {hit.repo}:{hit.path}")
+    content = source.splitlines()
     if lines:
         start, end = max(1, lines[0]), min(len(content), lines[1])
     elif full or len(content) <= settings.full_file_lines:
@@ -646,7 +726,8 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
 
     scope = list(repos or [])
     name = query.rsplit(".", 1)[-1]
-    uses = search(settings, rf"\b{re.escape(name)}\s*\(", scope)
+    invocation = re.compile(rf"\b{re.escape(name)}\s*\(")
+    uses = [hit for hit in search(settings, name, scope, fixed=True) if invocation.search(hit.text)]
     inbound: list[SearchHit] = []
     definitions: list[SearchHit] = []
     declaration = re.compile(rf"\b(?:def|fn|func|function|fun|[A-Za-z_$][\w$<>, ?\[\]]+)\s+{re.escape(name)}\s*\(")
@@ -657,7 +738,7 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
             definitions.append(hit)
         else:
             hit.kind = "caller"
-            hit.score = 90
+            hit.score = 96
             inbound.append(hit)
     graph_scope = scope or sorted({hit.repo for hit in definitions + inbound})
     graph_hits, graph_relationships = graph_trace(settings, query, graph_scope)
@@ -800,10 +881,10 @@ def _request_body(text: str) -> dict[str, Any]:
         raise BrainError("CONTEXT_REQUEST must be a YAML mapping or JSON object")
     request = loaded["CONTEXT_REQUEST"]
     version = request.get("version", loaded.get("version", PROTOCOL_VERSION))
-    if version != PROTOCOL_VERSION:
-        raise BrainError(f"Unsupported CONTEXT_REQUEST version {version!r}; this build supports version {PROTOCOL_VERSION}")
-    request["version"] = PROTOCOL_VERSION
-    for key in ("searches", "paths", "symbols", "files", "history"):
+    if version not in {1, 2}:
+        raise BrainError(f"Unsupported CONTEXT_REQUEST version {version!r}; this build supports versions 1 and 2")
+    request["version"] = version
+    for key in ("searches", "paths", "symbols", "files", "history", "expand"):
         value = request.get(key, [])
         if value is None:
             request[key] = []
@@ -847,6 +928,9 @@ def parse_context_request(text: str) -> dict[str, Any]:
         if not isinstance(item, dict) or not str(item.get("query") or "").strip():
             raise BrainError(f"history[{index}].query is required")
         _requested_repos(item)
+    for index, item in enumerate(request["expand"]):
+        if not re.fullmatch(r"C[1-9][0-9]*", str(item)):
+            raise BrainError(f"expand[{index}] must be a candidate id such as C12")
     return request
 
 
@@ -878,12 +962,17 @@ def request_preview(text: str, settings: Settings | None = None) -> dict[str, An
         actions.append({"kind": "file", "value": value, "repos": [str(item["repo"]) ]})
     for item in request["history"]:
         actions.append({"kind": "history", "value": str(item["query"]), "repos": repos_for(item)})
+    for item in request["expand"]:
+        actions.append({"kind": "expand", "value": str(item), "repos": []})
 
     if not actions:
         raise BrainError("CONTEXT_REQUEST contains no repository operations")
     signature = hashlib.sha256(
         json.dumps(sorted(actions, key=lambda item: json.dumps(item, sort_keys=True)), sort_keys=True).encode("utf-8")
     ).hexdigest()
+    from .retrieval import compile_request, explain_plan
+
+    planner = explain_plan(compile_request(request))
     return {
         "valid": True,
         "protocol_version": PROTOCOL_VERSION,
@@ -899,6 +988,7 @@ def request_preview(text: str, settings: Settings | None = None) -> dict[str, An
             "files": len(request["files"]),
             "history": len(request["history"]),
         },
+        "planner": planner,
         "normalized_json": json.dumps({"CONTEXT_REQUEST": request}, indent=2, ensure_ascii=False) + "\n",
     }
 
@@ -936,8 +1026,6 @@ def _direct_file(settings: Settings, item: dict[str, Any]) -> Evidence | None:
     path = (root / relative).resolve()
     if not path.is_relative_to(root):
         raise BrainError(f"Unsafe file path: {repo.name}:{relative}")
-    if not path.is_file():
-        return None
     requested = item.get("lines")
     line_range: tuple[int, int] | None = None
     if requested:
@@ -946,22 +1034,10 @@ def _direct_file(settings: Settings, item: dict[str, Any]) -> Evidence | None:
             raise BrainError(f"Invalid line range `{requested}`; use 10-40")
         line_range = int(match.group(1)), int(match.group(2))
     hit = SearchHit(repo.name, str(path.relative_to(root)), line_range[0] if line_range else 1, "", "requested file", 100, ["direct file request"])
-    return read_source(settings, hit, full=line_range is None, lines=line_range)
-
-
-def _deduplicate(evidence: list[Evidence]) -> list[Evidence]:
-    merged: dict[tuple[str, str, int, int], Evidence] = {}
-    for item in evidence:
-        key = item.repo, item.path, item.line_start, item.line_end
-        existing = merged.get(key)
-        if existing:
-            existing.score = max(existing.score, item.score)
-            existing.found_by = sorted(set(existing.found_by + item.found_by))
-            if item.kind not in existing.kind:
-                existing.kind += f", {item.kind}"
-        else:
-            merged[key] = item
-    return sorted(merged.values(), key=lambda item: (-item.score, item.repo, item.path, item.line_start))
+    try:
+        return read_source(settings, hit, full=line_range is None, lines=line_range)
+    except BrainError:
+        return None
 
 
 def working_tree_diffs(settings: Settings, repos: Iterable[str] | None = None) -> list[Evidence]:
@@ -990,7 +1066,16 @@ def working_tree_diffs(settings: Settings, repos: Iterable[str] | None = None) -
 
 
 def retrieve_context(settings: Settings, request: dict[str, Any], *, include_diff: bool = False) -> ContextBundle:
+    started = time.perf_counter()
     bundle = ContextBundle(str(request["objective"]).strip())
+    from .retrieval.models import RetrievalTrace
+
+    trace = RetrievalTrace()
+    _ACTIVE_RETRIEVAL_TRACE.set(trace)
+    from .retrieval import compile_request
+
+    compiled_plan = compile_request(request)
+    candidates: list[SearchHit] = []
     for item in request["searches"]:
         query = str(item["query"])
         repos = _requested_repos(item)
@@ -1002,8 +1087,32 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
                 hits = []
         if not hits:
             bundle.unresolved.append(f"Search `{query}` returned no code matches in {repos or ['all repositories']}")
-        bundle.evidence.extend(read_source(settings, hit) for hit in hits)
+        candidates.extend(hits)
         bundle.evidence.extend(knowledge_hits(settings, query))
+
+    # Semantic retrieval is optional candidate recall. It never creates evidence
+    # itself and a missing/stale shard leaves the Core answer untouched.
+    try:
+        from .editions import current_edition
+
+        edition = current_edition(settings)
+        if edition in {"semantic", "precision"}:
+            from .semantic import search_semantic
+
+            semantic = search_semantic(settings, bundle.objective, repos={repo.name for repo in settings.repositories})
+            if semantic:
+                candidates.extend(
+                    SearchHit(
+                        str(item["repo"]), str(item["path"]), int(item["line"]), "", "semantic candidate",
+                        round(50 + float(item.get("score") or 0) * 50, 3),
+                        ["local semantic index"],
+                    )
+                    for item in semantic
+                )
+            else:
+                bundle.warnings.append("Semantic index is unavailable or stale; used Core retrieval only.")
+    except (OSError, ValueError, RuntimeError):
+        bundle.warnings.append("Semantic runtime failed; used Core retrieval only.")
 
     for item in request["paths"]:
         query = str(item["query"])
@@ -1011,7 +1120,7 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
         hits = path_hits(settings, query, repos)
         if not hits:
             bundle.unresolved.append(f"Path search `{query}` returned no matches in {repos or ['all repositories']}")
-        bundle.evidence.extend(read_source(settings, hit) for hit in hits)
+        candidates.extend(hits)
 
     for item in request["symbols"]:
         name = str(item["name"])
@@ -1020,13 +1129,13 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
         definitions = symbol_hits(settings, name, repos)
         if "definition" in include:
             if definitions:
-                bundle.evidence.extend(read_source(settings, hit) for hit in definitions)
+                candidates.extend(definitions)
             else:
                 bundle.unresolved.append(f"Definition for `{name}` was not found")
         if include & {"callers", "callees"}:
             traced, relationships = trace_symbol(settings, name, repos)
             if traced:
-                bundle.evidence.extend(read_source(settings, hit) for hit in traced)
+                candidates.extend(traced)
             if relationships:
                 bundle.relationships.extend(relationships)
             else:
@@ -1034,13 +1143,13 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
         if "implementations" in include:
             implementations = implementation_hits(settings, name, repos)
             if implementations:
-                bundle.evidence.extend(read_source(settings, hit) for hit in implementations)
+                candidates.extend(implementations)
             else:
                 bundle.unresolved.append(f"No implementations found for `{name}`")
         if "tests" in include:
             tests = test_hits(settings, name, repos)
             if tests:
-                bundle.evidence.extend(read_source(settings, hit) for hit in tests)
+                candidates.extend(tests)
             else:
                 bundle.unresolved.append(f"No tests referencing `{name}` were found")
 
@@ -1048,6 +1157,7 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
         evidence = _direct_file(settings, item)
         if evidence:
             bundle.evidence.append(evidence)
+            trace.bytes_read += len(evidence.content.encode("utf-8", errors="replace"))
         else:
             bundle.unresolved.append(f"Requested file `{item['repo']}:{item['path']}` was not found")
 
@@ -1082,7 +1192,10 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
     related = related_relationships(
         settings,
         relationship_queries,
-        {(item.repo, item.path) for item in bundle.evidence if item.repo not in {"external", "knowledge"}},
+        {
+            *((item.repo, item.path) for item in candidates),
+            *((item.repo, item.path) for item in bundle.evidence if item.repo not in {"external", "knowledge"}),
+        },
     )
     for relationship in related:
         line = (
@@ -1095,30 +1208,76 @@ def retrieve_context(settings: Settings, request: dict[str, Any], *, include_dif
             if not match:
                 continue
             repo_name, path, line_number = match.group(1), match.group(2), int(match.group(3))
-            try:
-                evidence = read_source(
-                    settings,
-                    SearchHit(
-                        repo_name,
-                        path,
-                        line_number,
-                        "",
-                        "contract relationship",
-                        92,
-                        [f"{relationship.kind} contract graph"],
-                    ),
+            candidates.append(
+                SearchHit(
+                    repo_name,
+                    path,
+                    line_number,
+                    "",
+                    "contract relationship",
+                    92,
+                    [f"{relationship.kind} contract graph"],
                 )
-            except BrainError:
-                continue
-            bundle.evidence.append(evidence)
+            )
 
-    bundle.evidence = _deduplicate(bundle.evidence)
+    candidate_ms = (time.perf_counter() - started) * 1000
+    hydrate_started = time.perf_counter()
+    from .query import merge_evidence, select_candidates
+
+    # Precision is deliberately a bounded ranking pass over candidate snippets.
+    # It neither hydrates extra source nor creates evidence; any local runtime
+    # failure must leave the Core ranking path usable.
+    try:
+        from .editions import current_edition
+
+        if current_edition(settings) == "precision":
+            from .models import rerank_candidates
+
+            requested = [name for name in ("searches", "paths", "symbols", "files", "history") if request.get(name)]
+            rerank_query = bundle.objective + ("\nRequested evidence: " + ", ".join(requested) if requested else "")
+            candidates = rerank_candidates(settings, rerank_query, candidates)
+    except (OSError, ValueError, RuntimeError):
+        bundle.warnings.append("Local reranker failed; used semantic/lexical candidate ranking.")
+
+    selected, omitted = select_candidates(settings, candidates)
+    source_budget = max(10_000, settings.hard_context_chars - 40_000)
+    source_chars = sum(len(item.content) for item in bundle.evidence)
+    for hit in selected:
+        try:
+            evidence = read_source(settings, hit)
+        except BrainError:
+            bundle.warnings.append(f"Candidate source disappeared before hydration: {hit.repo}:{hit.path}")
+            continue
+        if source_chars and source_chars + len(evidence.content) > source_budget:
+            omitted.append(hit)
+            continue
+        bundle.evidence.append(evidence)
+        source_chars += len(evidence.content)
+        trace.bytes_read += len(evidence.content.encode("utf-8", errors="replace"))
+    bundle.additional_candidates = sorted(
+        omitted, key=lambda item: (-item.score, item.repo, item.path, item.line)
+    )
+
+    bundle.evidence = merge_evidence(bundle.evidence)
     state = load_index_state(settings)
     for repo in settings.repositories:
         current = repo.source_sha or git_head(repo)
         indexed = (state.get(repo.name) or {}).get("sha")
         if indexed and current and indexed != current:
             bundle.warnings.append(f"Index for {repo.name} is stale: indexed {indexed[:12]}, source {current[:12]}.")
+    bundle.metrics = {
+        "candidate_ms": round(candidate_ms, 3),
+        "hydrate_ms": round((time.perf_counter() - hydrate_started) * 1000, 3),
+        "total_ms": round((time.perf_counter() - started) * 1000, 3),
+        "candidates": len(candidates),
+        "hydrated_regions": len(bundle.evidence),
+        "deferred_candidates": len(bundle.additional_candidates),
+    }
+    trace.unique_candidates = len(candidates)
+    trace.hydrated_regions = len(bundle.evidence)
+    bundle.trace = trace.as_dict()
+    bundle.trace["planner"] = {"operations": len(compiled_plan.operations), "stop_reason": compiled_plan.stop_reason}
+    _ACTIVE_RETRIEVAL_TRACE.set(None)
     return bundle
 
 
@@ -1175,6 +1334,22 @@ def pack_context(
     if warnings:
         output.extend(["", "## Warnings", ""])
         output.extend(f"- {warning}" for warning in warnings)
+    try:
+        from .catalog import current_generation
+        from .editions import current_edition
+
+        generation = current_generation(settings) or {}
+        output.extend([
+            "",
+            "## Retrieval contract",
+            "",
+            f"- Edition: `{current_edition(settings)}`",
+            f"- Generation: `{generation.get('generation', 'fallback')}`",
+            "- Evidence is read and verified from the pinned source snapshot; indexes and models only supply candidates or rank signals.",
+            f"- Candidate planner: `{bundle.trace.get('planner', {}).get('operations', 0)}` operations; `{bundle.trace.get('planner', {}).get('stop_reason', 'fixed safe plan')}`.",
+        ])
+    except OSError:
+        pass
     if progress:
         output.extend([
             "",
@@ -1236,13 +1411,28 @@ def pack_context(
             "", f"Kind: {item.kind}  ", f"Found by: {found}", "",
             f"```{_language(item.path)}", item.content, "```", "",
         ])
+    if bundle.additional_candidates:
+        output.extend([
+            "## Additional verified candidates",
+            "",
+            f"{len(bundle.additional_candidates)} ranked candidates were kept as metadata instead of hydrating more source.",
+            "Request a candidate path directly if its source is needed.",
+            "",
+        ])
+        output.extend(
+            f"- `C{index}` `{item.repo}:{item.path}:{item.line}` — {item.kind} — score {item.score}"
+            for index, item in enumerate(bundle.additional_candidates[:50], 1)
+        )
+        if len(bundle.additional_candidates) > 50:
+            output.append(f"- {len(bundle.additional_candidates) - 50} lower-ranked candidates remain in the local index.")
+        output.append("")
     if bundle.history:
         output.extend(["## Git history", "", *bundle.history, ""])
     output.extend(["## Unresolved", ""])
     output.extend(f"- {item}" for item in bundle.unresolved) if bundle.unresolved else output.append("- None")
     text = "\n".join(output).rstrip() + "\n"
     if len(text) > settings.soft_target_chars:
-        text += f"\n> Context size warning: {len(text):,} characters exceeds the soft target of {settings.soft_target_chars:,}. No evidence was discarded.\n"
+        text += f"\n> Context size warning: {len(text):,} characters exceeds the soft target of {settings.soft_target_chars:,}. Lower-ranked source candidates were not hydrated.\n"
     return text
 
 
@@ -1258,21 +1448,89 @@ def load_index_state(settings: Settings) -> dict[str, Any]:
 
 
 def snapshot_indexes(settings: Settings, changed_only: bool = False) -> tuple[dict[str, Any], list[str]]:
-    settings.state_dir.mkdir(parents=True, exist_ok=True)
-    state = load_index_state(settings)
-    updated: list[str] = []
-    for repo in settings.repositories:
-        sha = repo.source_sha or git_head(repo)
-        previous = (state.get(repo.name) or {}).get("sha")
-        if not changed_only or repo.name not in state or sha != previous:
+    """Build the real local search index; kept as the public name for compatibility."""
+    from .index import build_index_generation, write_state
+    from .ops import ensure_write_capacity
+
+    ensure_write_capacity(settings)
+    started = time.perf_counter()
+    try:
+        state, updated = build_index_generation(
+            settings,
+            changed_only=changed_only,
+            suffixes=CODE_SUFFIXES,
+            ignored_dirs=IGNORED_DIRS,
+        )
+    except sqlite3.Error as exc:
+        previous = load_index_state(settings)
+        state = {}
+        updated = []
+        for repo in settings.repositories:
+            sha = repo.source_sha or git_head(repo)
+            old_sha = (previous.get(repo.name) or {}).get("sha")
+            if not changed_only or repo.name not in previous or old_sha != sha:
+                updated.append(repo.name)
             state[repo.name] = {
                 "sha": sha,
-                "ref": repo.source_ref,
                 "indexed_at": datetime.now(UTC).isoformat(),
-                "backend": "deterministic multi-repo scanner",
+                "backend": "scanner fallback",
+                "warning": f"SQLite search index unavailable ({type(exc).__name__})",
+                "files": 0,
             }
-            updated.append(repo.name)
-    (settings.state_dir / "indexes.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    for repo in settings.repositories:
+        item = state.get(repo.name)
+        if isinstance(item, dict):
+            item["ref"] = repo.source_ref
+    try:
+        from .backends.zoekt import build as build_zoekt
+
+        zoekt = build_zoekt(settings, [settings.repo(name) for name in updated])
+        for name, details in zoekt.items():
+            if isinstance(state.get(name), dict):
+                state[name]["zoekt"] = details
+    except OSError:
+        zoekt = {}
+    try:
+        from .catalog import current_generation, publish_generation
+
+        existing_generation = current_generation(settings)
+        backends = ["sqlite-fts5"] + (["zoekt"] if zoekt else [])
+        generation = publish_generation(settings, state, backends=backends) if updated or existing_generation is None else existing_generation
+        from .catalog import record_index_catalog
+
+        if updated:
+            record_index_catalog(settings, state)
+        for item in state.values():
+            if isinstance(item, dict):
+                item["generation"] = generation["generation"]
+    except (OSError, sqlite3.Error) as exc:
+        for item in state.values():
+            if isinstance(item, dict):
+                item.setdefault("warning", f"Catalog generation unavailable ({type(exc).__name__})")
+    write_state(settings, state)
+    from .metrics import record_metric
+
+    record_metric(
+        settings,
+        "index",
+        total_ms=round((time.perf_counter() - started) * 1000, 3),
+        updated_repos=len(updated),
+        indexed_files=sum(
+            int(state[name].get("files") or 0)
+            for name in updated
+            if isinstance(state.get(name), dict)
+        ),
+        changed_blobs=sum(
+            int(state[name].get("changed_blobs") or 0)
+            for name in updated
+            if isinstance(state.get(name), dict)
+        ),
+        bytes_indexed=sum(
+            int(state[name].get("bytes_indexed") or 0)
+            for name in updated
+            if isinstance(state.get(name), dict)
+        ),
+    )
     return state, updated
 
 
@@ -1409,6 +1667,13 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
             },
         }
     )
+    try:
+        from .catalog import current_generation
+
+        generation = current_generation(settings)
+        state["generation"] = generation.get("generation") if generation else None
+    except OSError:
+        state["generation"] = None
     save_session(settings, ticket, state)
     return content, start_path
 
@@ -1429,20 +1694,36 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
             )
     for repo in settings.repositories:
         source = (state.get("sources") or {}).get(repo.name) or {}
-        snapshot = Path(str(source.get("snapshot") or ""))
-        if snapshot.is_dir() and snapshot.is_relative_to(settings.state_dir):
+        raw_snapshot = str(source.get("snapshot") or "")
+        snapshot = Path(raw_snapshot)
+        if raw_snapshot and (not snapshot.is_dir() or not snapshot.is_relative_to(settings.state_dir)):
+            raise BrainError(f"Pinned source snapshot for {repo.name} is unavailable; refresh/start a new ticket instead of mixing commits")
+        if raw_snapshot:
             repo.source_path = snapshot
             repo.source_ref = str(source.get("ref") or "") or None
             repo.source_sha = str(source.get("sha") or "") or None
             repo.source_status = str(source.get("status") or "session snapshot")
             repo.source_fetched = bool(source.get("fetched"))
             repo.source_warning = str(source.get("warning") or "") or None
+    if request.get("expand"):
+        manifest = state.get("candidate_manifest") or {}
+        for candidate_id in request["expand"]:
+            candidate = manifest.get(candidate_id)
+            if not isinstance(candidate, dict):
+                raise BrainError(f"Candidate {candidate_id} is not available in this pinned session")
+            request["files"].append({
+                "repo": candidate["repo"],
+                "path": candidate["path"],
+                "lines": f"{candidate['line']}-{candidate['line']}",
+            })
     number = int(state.get("requests") or 0) + 1
     request_path = directory / f"request-{number:03d}.yml"
     path = directory / f"context-{number:03d}.md"
     try:
         bundle = retrieve_context(settings, request, include_diff=include_diff)
-        bundle.evidence = _deduplicate(bundle.evidence + _external_evidence(settings, ticket))
+        from .query import merge_evidence
+
+        bundle.evidence = merge_evidence(bundle.evidence + _external_evidence(settings, ticket))
         evidence_keys = {
             hashlib.sha256(
                 f"{item.repo}\0{item.path}\0{item.line_start}\0{item.line_end}\0{item.content}".encode("utf-8")
@@ -1463,6 +1744,11 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
             "coverage": coverage,
         }
         content = pack_context(settings, ticket, number, bundle, progress)
+        from .metrics import record_metric, record_trace
+
+        record_metric(settings, "retrieve", **bundle.metrics, context_chars=len(content))
+        bundle.trace["context_chars"] = len(content)
+        record_trace(settings, ticket, number, bundle.trace)
         request_path.write_text(request_text.rstrip() + "\n", encoding="utf-8")
         path.write_text(content, encoding="utf-8")
         state["requests"] = number
@@ -1470,6 +1756,10 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
         state["no_progress_rounds"] = no_progress_rounds
         state["evidence_keys"] = sorted(known_keys | evidence_keys)
         state["coverage"] = coverage
+        state["candidate_manifest"] = {
+            f"C{index}": {"repo": item.repo, "path": item.path, "line": item.line}
+            for index, item in enumerate(bundle.additional_candidates[:50], 1)
+        }
         history = list(state.get("request_history") or [])
         history.append({
             "number": number,

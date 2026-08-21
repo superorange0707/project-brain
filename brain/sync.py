@@ -290,7 +290,20 @@ def sync_repositories(
         requested_branch: str | None,
     ) -> tuple[subprocess.CompletedProcess | None, bool]:
         fetch_args = ["fetch", "--prune", "--quiet", "origin"]
-        remote_branch = _remote_branch_name(requested_branch)
+        current_ref, _ = _remote_ref(repo, settings.branch_priority, requested_branch)
+        remote_branch = _remote_branch_name(requested_branch) or _remote_branch_name(current_ref)
+        # A local/bare origin can be interrogated without a second network/auth
+        # round trip, so honour the configured development-branch priority while
+        # still fetching only one branch.
+        remote_url = _git_text(repo, "remote", "get-url", "origin")
+        if not requested_branch and remote_url and Path(remote_url).expanduser().exists():
+            for branch in settings.branch_priority:
+                probe = _git(repo, "ls-remote", "--heads", "origin", branch, timeout=30)
+                if probe.returncode == 0 and str(probe.stdout).strip():
+                    remote_branch = branch
+                    break
+        if settings.sync_fetch_scope == "all-branches":
+            remote_branch = None
         if remote_branch:
             fetch_args.append(f"+refs/heads/{remote_branch}:refs/remotes/origin/{remote_branch}")
         if not endpoint:
