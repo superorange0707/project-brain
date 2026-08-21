@@ -19,6 +19,15 @@ CHUNK_SCHEMA_VERSION = "1"
 CARD_VERSION = "1"
 DENY_NAMES = {".env", ".envrc", "id_rsa", "id_ed25519", "keystore", "credentials", "credentials.json", "service-account.json"}
 DENY_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks"}
+# Dependency locks are neither authored code nor useful semantic evidence. They
+# can also contain a single machine-generated line too large for a local model
+# context window, so keep them out of semantic cards while Core path/lexical
+# retrieval remains available.
+DEPENDENCY_LOCK_NAMES = {"uv.lock", "poetry.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock", "go.sum"}
+SEMANTIC_CHILD_LINES = 80
+SEMANTIC_CARD_CODE_CHARS = 2_048
+SEMANTIC_IDENTIFIER_CHARS = 256
+SEMANTIC_EMBEDDING_BATCH_CHARS = 4_096
 SYMBOL = re.compile(r"(?m)^\s*(?:class|interface|record|enum|def|function|fun|func)\s+([A-Za-z_$][\w$]*)")
 
 
@@ -35,7 +44,7 @@ class Chunk:
 
 
 def _excluded(path: Path, content: bytes) -> bool:
-    return path.name.lower() in DENY_NAMES or path.suffix.lower() in DENY_SUFFIXES or len(content) > 3_000_000 or b"\0" in content[:8192]
+    return path.name.lower() in DENY_NAMES | DEPENDENCY_LOCK_NAMES or path.suffix.lower() in DENY_SUFFIXES or len(content) > 3_000_000 or b"\0" in content[:8192]
 
 
 def _language(path: str) -> str:
@@ -52,15 +61,21 @@ def chunk_source(repo: str, path: str, content: str, *, blob_sha: str | None = N
     chunks: list[Chunk] = []
     for index, (start, symbol) in enumerate(markers):
         end = markers[index + 1][0] - 1 if index + 1 < len(markers) else len(lines)
-        for child_start in range(start, max(end, start) + 1, 220):
-            child_end = min(end, child_start + 219)
+        for child_start in range(start, max(end, start) + 1, SEMANTIC_CHILD_LINES):
+            child_end = min(end, child_start + SEMANTIC_CHILD_LINES - 1)
             code = "\n".join(lines[child_start - 1:child_end])
+            # Structural regions remain primary. This final cap only protects a
+            # pathological long source line from exceeding the local runtime's
+            # context window; normal oversized symbols are split by line range.
+            if len(code) > SEMANTIC_CARD_CODE_CHARS:
+                code = code[:SEMANTIC_CARD_CODE_CHARS] + "\n[semantic card code capped]"
             kind = "symbol" if symbol != "file" else "file"
-            identity = f"{blob_sha}\0{CHUNK_SCHEMA_VERSION}\0{child_start}\0{child_end}\0{symbol}\0{CARD_VERSION}"
+            identity = f"{blob_sha}\0{CHUNK_SCHEMA_VERSION}\0{child_start}\0{child_end}\0{symbol}\0{SEMANTIC_CHILD_LINES}\0{SEMANTIC_CARD_CODE_CHARS}\0{CARD_VERSION}"
             chunk_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            identifiers = " ".join(sorted(set(re.findall(r'[A-Za-z_][A-Za-z0-9_]*', code)))[:40])[:SEMANTIC_IDENTIFIER_CHARS]
             card = "\n".join([
                 f"Repository: {repo}", f"Path: {path}", f"Language: {_language(path)}", f"Kind: {kind}",
-                f"Symbol: {symbol}", f"Identifiers: {' '.join(sorted(set(re.findall(r'[A-Za-z_][A-Za-z0-9_]*', code)))[:40])}",
+                f"Symbol: {symbol}", f"Identifiers: {identifiers}",
                 "Code:", code,
             ])
             chunks.append(Chunk(chunk_id, blob_sha, path, child_start, child_end, kind, symbol, card))
@@ -96,6 +111,23 @@ def _usearch() -> tuple[Any, Any] | None:
     return Index, numpy
 
 
+def _bounded_embedding_batches(chunks: list[Chunk], indexes: list[int], batch_size: int) -> Iterable[list[int]]:
+    """Keep model requests bounded by both candidate count and card input size."""
+    cursor = 0
+    while cursor < len(indexes):
+        batch: list[int] = []
+        chars = 0
+        while cursor < len(indexes) and len(batch) < batch_size:
+            index = indexes[cursor]
+            card_chars = len(chunks[index].card)
+            if batch and chars + card_chars > SEMANTIC_EMBEDDING_BATCH_CHARS:
+                break
+            batch.append(index)
+            chars += card_chars
+            cursor += 1
+        yield batch
+
+
 def _cache_vectors(settings: Settings, pack_id: str, chunks: list[Chunk], *, dimension: int, embed: Callable[[list[str]], list[list[float]]], batch_size: int = 0) -> list[list[float]]:
     """Reuse vectors by stable chunk identity without persisting query/source text."""
     from .catalog import connect
@@ -122,8 +154,7 @@ def _cache_vectors(settings: Settings, pack_id: str, chunks: list[Chunk], *, dim
             missing.append(index)
         if missing:
             batch_size = max(1, batch_size or len(missing))
-            for start in range(0, len(missing), batch_size):
-                batch = missing[start:start + batch_size]
+            for batch in _bounded_embedding_batches(chunks, missing, batch_size):
                 computed = embed([chunks[index].card for index in batch])
                 if len(computed) != len(batch) or any(len(vector) != dimension for vector in computed):
                     raise RuntimeError("embedding runtime returned an unexpected vector dimension")

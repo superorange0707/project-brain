@@ -59,7 +59,7 @@ from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
 from brain.models import EMBEDDING_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
 from brain.models import autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, runtime_for_pack, validate_manifest, verify_pack
-from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, build_semantic_index, chunk_source, search_semantic
+from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, Chunk, SEMANTIC_CARD_CODE_CHARS, _bounded_embedding_batches, _excluded, build_semantic_index, chunk_source, search_semantic
 from brain.ops import gc
 from brain.evaluation import evaluate_golden
 
@@ -709,6 +709,26 @@ else:
         chunks = chunk_source("repo", "src/Example.py", "def hello():\n    return 'hello'\n")
         self.assertEqual(chunks, chunk_source("repo", "src/Example.py", "def hello():\n    return 'hello'\n"))
 
+    def test_semantic_cards_exclude_machine_generated_dependency_locks(self) -> None:
+        self.assertTrue(_excluded(Path("uv.lock"), b"version = 1\n"))
+        self.assertTrue(_excluded(Path("package-lock.json"), b'{"lockfileVersion": 3}'))
+        self.assertFalse(_excluded(Path("src/app.py"), b"def retrieve():\n    return True\n"))
+
+    def test_semantic_cards_split_structural_regions_and_cap_pathological_lines(self) -> None:
+        content = "\n".join(f"line_{index} = {index}" for index in range(200))
+        chunks = chunk_source("repo", "src/generated.py", content)
+        self.assertEqual(3, len(chunks))
+        self.assertEqual((1, 80), (chunks[0].start_line, chunks[0].end_line))
+        self.assertEqual((161, 200), (chunks[-1].start_line, chunks[-1].end_line))
+        pathological = chunk_source("repo", "src/config.py", "x = '" + "a" * (SEMANTIC_CARD_CODE_CHARS + 1) + "'")
+        self.assertIn("[semantic card code capped]", pathological[0].card)
+        self.assertLessEqual(len(pathological[0].card), SEMANTIC_CARD_CODE_CHARS + 500)
+
+    def test_semantic_embedding_batches_bound_card_count_and_total_input(self) -> None:
+        chunks = [Chunk(str(index), "blob", "path", 1, 1, "file", "file", "x" * size) for index, size in enumerate((2_500, 2_500, 1_500, 1_500))]
+        self.assertEqual([[0], [1, 2], [3]], list(_bounded_embedding_batches(chunks, [0, 1, 2, 3], 8)))
+        self.assertEqual([[2, 3]], list(_bounded_embedding_batches(chunks, [2, 3], 2)))
+
     def test_local_test_model_pack_is_verified_before_semantic_edition(self) -> None:
         pack = self.root / "test-pack"
         pack.mkdir()
@@ -1070,6 +1090,7 @@ else:
             "installed_path": str(pack), "runtime_binary": "llama-server", "model_file": "model.gguf",
             "artifacts": {"llama-server": hashlib.sha256(binary.read_bytes()).hexdigest(), "model.gguf": hashlib.sha256(model.read_bytes()).hexdigest()},
             "runtime_args": ["--ctx-size", "4096", "-ub", "512"],
+            "request_timeout_seconds": 12,
             "test_only": True,
         }
         validate_manifest(manifest)
@@ -1087,8 +1108,32 @@ else:
             self.assertIn("--ctx-size", command)
             self.assertIn("4096", command)
             self.assertNotIn("--hf-repo", command)
+            self.assertEqual(12.0, runtime.client.timeout_seconds)
             runtime.shutdown()
             kill.assert_called_once()
+
+    def test_managed_llama_runtime_restarts_once_after_a_transport_disconnect(self) -> None:
+        runtime = ManagedLlamaCppRuntime({})
+        client = mock.Mock()
+        client.embed.side_effect = [ConnectionResetError("local server restarted"), [[1.0, 0.0]]]
+        with mock.patch.object(runtime, "_start", return_value=client) as start, mock.patch.object(runtime, "shutdown") as shutdown:
+            self.assertEqual([[1.0, 0.0]], runtime.embed(["public synthetic card"], dimension=2))
+        self.assertEqual(2, start.call_count)
+        shutdown.assert_called_once()
+
+    def test_managed_llama_runtime_restarts_after_its_request_budget(self) -> None:
+        runtime = ManagedLlamaCppRuntime({"capability": "embedding", "max_requests_per_runtime": 2})
+        runtime.client = mock.Mock()
+        runtime.process = mock.Mock()
+        runtime.process.poll.return_value = None
+        runtime.request_count = 2
+        new_process = mock.Mock()
+        new_process.poll.return_value = None
+        with mock.patch.object(runtime, "shutdown") as shutdown, mock.patch("brain.models._check_pack_integrity"), mock.patch("brain.models._pack_file", return_value=Path("/tmp/verified-artifact")), mock.patch("brain.models.os.access", return_value=True):
+            with mock.patch("brain.models.subprocess.Popen", return_value=new_process) as popen, mock.patch.object(LlamaCppRuntime, "health", return_value={"ok": True}):
+                runtime._start()
+        shutdown.assert_called_once()
+        popen.assert_called_once()
 
     def test_production_llama_manifest_cannot_omit_owned_runtime_artifacts(self) -> None:
         manifest = {
@@ -1712,8 +1757,17 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("-DLLAMA_OPENSSL=OFF", workflow)
         self.assertIn("otool -L", workflow)
 
-    def test_official_catalog_does_not_resolve_a_pack_before_cross_machine_qualification(self) -> None:
-        self.assertEqual({}, OFFICIAL_PACKS)
+    def test_official_catalog_pins_the_cross_machine_qualified_semantic_release(self) -> None:
+        self.assertEqual(
+            {
+                "semantic": {
+                    "pack_id": "qwen3-embedding-4b-q6k-darwin-arm64",
+                    "descriptor_url": "https://github.com/superorange0707/project-brain/releases/download/semantic-pack-v1.0.6/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json",
+                    "descriptor_sha256": "cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc",
+                }
+            },
+            OFFICIAL_PACKS,
+        )
 
     def test_semantic_pack_builder_uses_a_strong_cross_machine_reference_threshold(self) -> None:
         builder = (Path(__file__).resolve().parents[1] / "scripts/build_semantic_pack.py").read_text(encoding="utf-8")

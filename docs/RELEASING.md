@@ -23,8 +23,12 @@ follow-up; do not put a personal token in source or a release artifact.
 
 ## Semantic model-pack release
 
-The first Core-catalogued official Semantic pack is published by an independent
-`semantic-pack-v*` tag. The workflow runs only on macOS Apple Silicon and:
+The first Core-catalogued official Semantic pack,
+[v1.0.6](https://github.com/superorange0707/project-brain/releases/tag/semantic-pack-v1.0.6),
+was published by an independent `semantic-pack-v*` tag. Its immutable
+descriptor SHA-256 is
+`cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`.
+The workflow runs only on macOS Apple Silicon and:
 
 1. downloads the exact official Qwen GGUF and tokenizer revisions and verifies
    their upstream SHA-256 values;

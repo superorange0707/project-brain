@@ -15,7 +15,7 @@ This guide is for a release engineer or organization-controlled pack builder. It
 
 Qwen is the present implementation choice, not an architectural requirement: the manifest carries family, runtime, source revision, and capability. The official Qwen weights are the source of truth. When Qwen publishes the selected embedding model as an official GGUF, use that artifact directly rather than converting it again. Qwen documents both its official GGUF releases and local conversion path; its embedding repository also publishes the official embedding/reranking evaluation contract. See the [Qwen llama.cpp guide](https://github.com/QwenLM/Qwen3/blob/main/docs/source/run_locally/llama.cpp.md), [Qwen quantization guide](https://github.com/QwenLM/Qwen3/blob/main/docs/source/quantization/llama.cpp.md), and [Qwen3 Embedding evaluation repository](https://github.com/QwenLM/Qwen3-Embedding/tree/main/evaluation).
 
-## Official Semantic pack
+## Official Semantic pack v1.0.6
 
 The first Core-catalogued Project Brain Semantic release is a separately
 versioned macOS Apple Silicon pack, not part of the Core wheel, standalone
@@ -29,6 +29,9 @@ The included official tokenizer is pinned to
 `5cf2132abc99cad020ac570b19d031efec650f2b`, SHA-256
 `83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d`.
 
+The immutable [v1.0.6 pack release](https://github.com/superorange0707/project-brain/releases/tag/semantic-pack-v1.0.6)
+is selected through its [descriptor](https://github.com/superorange0707/project-brain/releases/download/semantic-pack-v1.0.6/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json),
+whose SHA-256 is `cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`.
 It includes the checked GGUF, a relocatable source-pinned macOS ARM64
 `llama.cpp` runtime, Apache-2.0 and runtime notices, a provenance record,
 runtime arguments, 2560-dimensional last-token pooling metadata, the query

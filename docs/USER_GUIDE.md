@@ -320,11 +320,14 @@ brain edition set semantic
 brain capabilities
 ```
 
-On macOS Apple Silicon, the separately released official Semantic pack has a
-short controlled install path. This download happens once from a Project Brain
-GitHub Release; its descriptor, every release part, and the assembled GGUF are
-checked before the local pack is registered. It never contacts Hugging Face or
-any hosted model service while indexing or querying.
+On macOS Apple Silicon, the separately released official
+[Semantic pack v1.0.6](https://github.com/superorange0707/project-brain/releases/tag/semantic-pack-v1.0.6)
+has a short controlled install path. Its descriptor SHA-256 is
+`cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`.
+This download happens once from a Project Brain GitHub Release; its descriptor,
+every release part, and the assembled GGUF are checked before the local pack is
+registered. It never contacts Hugging Face or any hosted model service while
+indexing or querying.
 
 ```bash
 python -m pip install 'project-brain-context[semantic]'

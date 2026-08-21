@@ -35,6 +35,7 @@ MAX_RERANK_POOL = 80
 DEFAULT_EMBEDDING_BATCH_SIZE = 16
 DEFAULT_BENCHMARK_SAMPLES = 3
 DEFAULT_MODEL_LATENCY_BUDGET_MS = 3_000
+DEFAULT_RUNTIME_MAX_REQUESTS = 64
 # The local llama.cpp Metal backend can differ very slightly between a batch
 # request and equivalent single-item requests. This permits only observed
 # floating-point reduction drift; reference-vector cosine and ranking gates
@@ -43,9 +44,17 @@ EMBEDDING_BATCH_PARITY_TOLERANCE = 1e-4
 
 # Each entry is added only after its separately versioned model-pack release
 # passes final-release checksum verification and a clean installation check.
-# Never resolve an unpinned "latest" release at install time. Tests inject a
-# tiny synthetic catalog until the first cross-machine-qualified pack is ready.
-OFFICIAL_PACKS: dict[str, dict[str, str]] = {}
+# Never resolve an unpinned "latest" release at install time.
+OFFICIAL_PACKS: dict[str, dict[str, str]] = {
+    "semantic": {
+        "pack_id": "qwen3-embedding-4b-q6k-darwin-arm64",
+        "descriptor_url": (
+            "https://github.com/superorange0707/project-brain/releases/download/"
+            "semantic-pack-v1.0.6/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json"
+        ),
+        "descriptor_sha256": "cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc",
+    },
+}
 MODEL_PACK_DESCRIPTOR_SCHEMA = "project-brain-model-pack-v1"
 
 
@@ -187,10 +196,14 @@ class ManagedLlamaCppRuntime:
         self.manifest = manifest
         self.process: subprocess.Popen[bytes] | None = None
         self.client: LlamaCppRuntime | None = None
+        self.request_count = 0
 
     def _start(self) -> LlamaCppRuntime:
-        if self.client is not None:
+        max_requests = max(1, int(self.manifest.get("max_requests_per_runtime") or DEFAULT_RUNTIME_MAX_REQUESTS))
+        if self.client is not None and self.process is not None and self.process.poll() is None and self.request_count < max_requests:
             return self.client
+        if self.client is not None:
+            self.shutdown()
         _check_pack_integrity(self.manifest)
         binary = _pack_file(self.manifest, self.manifest.get("runtime_binary"), "runtime_binary")
         model = _pack_file(self.manifest, self.manifest.get("model_file"), "model_file")
@@ -219,10 +232,14 @@ class ManagedLlamaCppRuntime:
             raise RuntimeError("model pack runtime_args may not override Project Brain local runtime controls")
         command.extend(runtime_args)
         self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            request_timeout_seconds = min(300.0, max(5.0, float(self.manifest.get("request_timeout_seconds") or 30.0)))
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("model pack request_timeout_seconds must be numeric") from error
         self.client = LlamaCppRuntime(
             f"http://127.0.0.1:{port}",
             api_key=key,
-            timeout_seconds=2.0,
+            timeout_seconds=request_timeout_seconds,
             input_suffix=str(self.manifest.get("input_suffix") or ""),
         )
         deadline = time.monotonic() + min(120.0, max(1.0, float(self.manifest.get("startup_timeout_seconds") or 30)))
@@ -240,10 +257,28 @@ class ManagedLlamaCppRuntime:
         raise RuntimeError("pack-owned llama.cpp runtime did not become healthy before timeout")
 
     def embed(self, texts: list[str], instruction: str = "", dimension: int | None = None) -> list[list[float]]:
-        return self._start().embed(texts, instruction, dimension)
+        for attempt in range(2):
+            try:
+                value = self._start().embed(texts, instruction, dimension)
+                self.request_count += 1
+                return value
+            except OSError:
+                self.shutdown()
+                if attempt:
+                    raise
+        raise AssertionError("unreachable")
 
     def rerank(self, query: str, documents: list[str], instruction: str = "") -> list[float]:
-        return self._start().rerank(query, documents, instruction)
+        for attempt in range(2):
+            try:
+                value = self._start().rerank(query, documents, instruction)
+                self.request_count += 1
+                return value
+            except OSError:
+                self.shutdown()
+                if attempt:
+                    raise
+        raise AssertionError("unreachable")
 
     def warmup(self) -> None:
         self._start().health()
@@ -253,6 +288,7 @@ class ManagedLlamaCppRuntime:
 
     def shutdown(self) -> None:
         process, self.process, self.client = self.process, None, None
+        self.request_count = 0
         if process is None or process.poll() is not None:
             return
         try:

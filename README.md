@@ -61,10 +61,12 @@ or cloud service. Optional approved packs are installed from a local path or a
 hash-pinned approved release, checksum-verified, and may only use a loopback
 runtime; Project Brain never downloads weights while it runs.
 
-The first Core-catalogued Semantic pack will be separately released for Apple
-Silicon. It uses the unchanged official Qwen3-Embedding-4B Q6_K GGUF, is
-installed only from a Project Brain-controlled GitHub Release descriptor, and
-remains entirely offline once installed. It is not bundled into Core or
+The first Core-catalogued [Semantic pack v1.0.6](https://github.com/superorange0707/project-brain/releases/tag/semantic-pack-v1.0.6)
+is separately released for Apple Silicon. It uses the unchanged official
+Qwen3-Embedding-4B Q6_K GGUF, is installed only from a Project Brain-controlled
+GitHub Release descriptor (SHA-256
+`cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`),
+and remains entirely offline once installed. It is not bundled into Core or
 Homebrew.
 
 An official pack enters a Core catalog only after its exact descriptor, release
