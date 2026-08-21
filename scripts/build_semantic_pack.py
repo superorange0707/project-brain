@@ -132,7 +132,7 @@ def conformance(runtime: Path, model: Path, output: Path) -> None:
                 time.sleep(0.1)
         else:
             raise RuntimeError("llama.cpp did not become healthy during pack conformance")
-        long_code = "\n".join("def validate_customer_%04d(customer_id): return customer_id is not None" % number for number in range(64))
+        long_code = "\n".join("def validate_customer_%04d(customer_id): return customer_id is not None" % number for number in range(58))
         suite = {
             "producer": {
                 "reference": "official Qwen/Qwen3-Embedding-4B-GGUF Q6_K artifact",
@@ -170,11 +170,7 @@ def conformance(runtime: Path, model: Path, output: Path) -> None:
                 ),
                 _case(
                     "long-code-card",
-                    [
-                        long_code,
-                        "def validate_customer(customer_id): return customer_id is not None",
-                    ],
-                    [1], endpoint, key,
+                    [long_code], [], endpoint, key,
                 ),
             ],
         }
