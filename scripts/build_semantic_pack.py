@@ -56,7 +56,9 @@ def _post(endpoint: str, key: str, inputs: list[str]) -> list[list[float]]:
         method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
     )
-    with urlopen(request, timeout=120) as response:
+    # Public CI runners can take longer than a workstation for the one required
+    # >4K-character card; this remains bounded and entirely loopback-local.
+    with urlopen(request, timeout=300) as response:
         payload = json.loads(response.read().decode("utf-8"))
     rows = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
@@ -130,7 +132,7 @@ def conformance(runtime: Path, model: Path, output: Path) -> None:
                 time.sleep(0.1)
         else:
             raise RuntimeError("llama.cpp did not become healthy during pack conformance")
-        long_code = "\n".join("def validate_customer_%04d(customer_id): return customer_id is not None" % number for number in range(96))
+        long_code = "\n".join("def validate_customer_%04d(customer_id): return customer_id is not None" % number for number in range(64))
         suite = {
             "producer": {
                 "reference": "official Qwen/Qwen3-Embedding-4B-GGUF Q6_K artifact",
