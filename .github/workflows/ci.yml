@@ -63,6 +63,6 @@ jobs:
       - name: Build and run standalone CLI
         run: |
           python -m pip install . pyinstaller
-          pyinstaller --clean --onefile --name brain --collect-data brain brain/standalone.py
+          pyinstaller --clean --onefile --name brain --collect-data brain --collect-all truststore brain/standalone.py
           dist/brain --version
           dist/brain --help

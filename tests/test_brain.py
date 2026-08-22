@@ -9,14 +9,17 @@ import os
 import re
 import sqlite3
 import stat
+import ssl
 import subprocess
 import tarfile
 import tempfile
 import time
+import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
+from urllib.error import URLError
 
 from brain.cli import main
 from brain.agent import archive_final_solution, create_m365_agent_kit, response_preview
@@ -28,6 +31,7 @@ from brain.core import (
     create_feedback,
     deliver,
     discover_and_configure_repositories,
+    doctor,
     generate_map,
     load_settings,
     load_index_state,
@@ -58,7 +62,7 @@ from brain.catalog import connect as catalog_connect
 from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
 from brain.models import EMBEDDING_BATCH_PARITY_TOLERANCE, RERANKER_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
-from brain.models import autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, runtime_for_pack, validate_manifest, verify_pack
+from brain.models import _open_model_download, autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, model_download_ssl_context, runtime_for_pack, validate_manifest, verify_pack
 from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, Chunk, SEMANTIC_CARD_CODE_CHARS, _bounded_embedding_batches, _excluded, build_semantic_index, chunk_source, search_semantic
 from brain.ops import gc
 from brain.evaluation import evaluate_golden
@@ -842,6 +846,80 @@ else:
         self.assertNotIn("hostname", profile)
         self.assertIn("logical_cpu_count", profile)
 
+    def test_model_download_uses_system_trust_with_hostname_verification(self) -> None:
+        context = ssl.create_default_context()
+        with mock.patch.dict(os.environ, {"SSL_CERT_FILE": ""}), mock.patch("brain.models.truststore") as truststore_module:
+            truststore_module.SSLContext.return_value = context
+            actual, source = model_download_ssl_context(self.settings)
+        self.assertIs(context, actual)
+        self.assertEqual("system trust", source)
+        truststore_module.SSLContext.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
+        self.assertTrue(actual.check_hostname)
+        self.assertEqual(ssl.CERT_REQUIRED, actual.verify_mode)
+
+    def test_model_download_adds_configured_ca_bundle_without_disclosing_its_path(self) -> None:
+        bundle = self.root / "enterprise-root.pem"
+        bundle.write_text("public test fixture", encoding="utf-8")
+
+        class Context:
+            check_hostname = False
+            verify_mode = ssl.CERT_NONE
+
+            def __init__(self) -> None:
+                self.loaded: list[str] = []
+
+            def load_verify_locations(self, *, cafile: str) -> None:
+                self.loaded.append(cafile)
+
+        context = Context()
+        self.settings.model_ca_bundle = bundle
+        with mock.patch("brain.models.truststore") as truststore_module:
+            truststore_module.SSLContext.return_value = context
+            _, source = model_download_ssl_context(self.settings)
+        self.assertEqual([str(bundle)], context.loaded)
+        self.assertIn("configured CA bundle", source)
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(ssl.CERT_REQUIRED, context.verify_mode)
+        environment_context = Context()
+        self.settings.model_ca_bundle = None
+        with mock.patch.dict(os.environ, {"SSL_CERT_FILE": str(bundle)}), mock.patch("brain.models.truststore") as truststore_module:
+            truststore_module.SSLContext.return_value = environment_context
+            _, source = model_download_ssl_context(self.settings)
+        self.assertEqual([str(bundle)], environment_context.loaded)
+        self.assertIn("SSL_CERT_FILE", source)
+        with mock.patch("brain.models.model_download_ssl_context", return_value=(context, "system trust + configured CA bundle")):
+            report, ok = doctor(self.settings)
+        self.assertTrue(ok)
+        self.assertIn("Model-download TLS", report)
+        self.assertIn("configured CA bundle", report)
+        self.assertNotIn(str(bundle), report)
+
+    def test_model_download_rejects_untrusted_certificate_without_insecure_retry(self) -> None:
+        from urllib.request import Request
+
+        request = Request("https://github.com/example/project/releases/download/v1/descriptor.json")
+        with mock.patch("brain.models.model_download_ssl_context", return_value=(ssl.create_default_context(), "system trust")), mock.patch(
+            "brain.models.urlopen", side_effect=URLError(ssl.SSLCertVerificationError(1, "untrusted"))
+        ) as opener:
+            with self.assertRaisesRegex(ValueError, "certificate verification failed"):
+                _open_model_download(self.settings, request, timeout=1)
+        self.assertEqual(1, opener.call_count)
+        self.assertTrue(opener.call_args.kwargs["context"].check_hostname)
+        self.assertEqual(ssl.CERT_REQUIRED, opener.call_args.kwargs["context"].verify_mode)
+
+    def test_local_model_install_never_opens_a_download_connection(self) -> None:
+        pack = self.root / "local-only-pack"
+        pack.mkdir()
+        (pack / "manifest.json").write_text(json.dumps({
+            "pack_id": "local-only", "capability": "test", "model_family": "test",
+            "upstream_model": "public-fixture", "upstream_revision": "1", "license": "MIT",
+            "runtime_name": "deterministic-test", "runtime_revision": "1", "minimum_brain_version": "0.6.1",
+            "test_only": True,
+        }), encoding="utf-8")
+        with mock.patch("brain.models._open_model_download", side_effect=AssertionError("network was used")):
+            installed = install_pack(self.settings, pack)
+        self.assertEqual("local-only", installed["pack_id"])
+
     def test_release_descriptor_install_and_verify_assembles_a_pinned_pack(self) -> None:
         model = b"official-weight-part-one-and-two"
         suite = json.dumps({
@@ -892,6 +970,10 @@ else:
             descriptor["metadata"]["url"]: metadata,
             **{part["url"]: content for part, content in zip(descriptor["model"]["parts"], parts, strict=True)},
         }
+        redirects = {
+            descriptor["metadata"]["url"]: "https://release-assets.githubusercontent.com/project-brain/metadata.tar.gz",
+            **{part["url"]: f"https://objects.githubusercontent.com/project-brain/{index}" for index, part in enumerate(descriptor["model"]["parts"])},
+        }
 
         class Response(io.BytesIO):
             def __init__(self, url: str, content: bytes):
@@ -900,7 +982,7 @@ else:
                 self.headers = {"Content-Length": str(len(content))}
 
             def geturl(self) -> str:
-                return self.url
+                return redirects.get(self.url, self.url)
 
             def __enter__(self):
                 return self
@@ -908,7 +990,9 @@ else:
             def __exit__(self, *_):
                 self.close()
 
-        def download(request, timeout=0):
+        def download(request, timeout=0, context=None):
+            self.assertIsNotNone(context)
+            self.assertTrue(context.check_hostname)
             return Response(request.full_url, payloads[request.full_url])
 
         descriptor_url = "https://github.com/example/project/releases/download/v1/descriptor.json"
@@ -918,6 +1002,14 @@ else:
         self.assertEqual(model, (self.settings.state_dir / "models" / "synthetic-semantic" / "model.gguf").read_bytes())
         self.assertTrue(os.access(self.settings.state_dir / "models" / "synthetic-semantic" / "llama-server", os.X_OK))
         self.assertTrue(verify_pack(self.settings, "synthetic-semantic")["verified"])
+        with mock.patch("brain.models.urlopen", side_effect=download), self.assertRaisesRegex(ValueError, "descriptor SHA-256"):
+            install_release_descriptor(self.settings, descriptor_url, "0" * 64)
+        bad_descriptor = json.loads(descriptor_bytes)
+        bad_descriptor["metadata"]["sha256"] = "0" * 64
+        bad_descriptor_bytes = json.dumps(bad_descriptor, separators=(",", ":")).encode("utf-8")
+        payloads[descriptor_url] = bad_descriptor_bytes
+        with mock.patch("brain.models.urlopen", side_effect=download), self.assertRaisesRegex(ValueError, "release artifact SHA-256"):
+            install_release_descriptor(self.settings, descriptor_url, hashlib.sha256(bad_descriptor_bytes).hexdigest())
 
     def test_cli_official_semantic_alias_uses_the_controlled_catalog(self) -> None:
         output = io.StringIO()
@@ -1775,6 +1867,13 @@ class GitSyncTest(unittest.TestCase):
 
 
 class ReleaseSafetyTest(unittest.TestCase):
+    def test_cli_version_matches_distribution_metadata(self) -> None:
+        from brain import __version__
+
+        root = Path(__file__).resolve().parents[1]
+        metadata = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["project"]["version"], __version__)
+
     def test_homebrew_formula_is_rendered_only_from_final_release_checksums(self) -> None:
         root = Path(__file__).resolve().parents[1]
         spec = importlib.util.spec_from_file_location("update_homebrew_formula", root / "scripts/update_homebrew_formula.py")

@@ -2,6 +2,10 @@
 
 Project Brain Core releases and model packs are separate artifacts. Neither the
 Core wheel/standalone archives nor the Homebrew formula contain model weights.
+Core release validation must also include the packaged `truststore` dependency:
+the standalone binary uses native macOS Keychain trust (and platform OpenSSL
+trust on Linux) for one-time verified model-pack downloads. Do not replace it
+with an insecure context or a Project Brain-managed corporate CA bundle.
 
 ## Core release and Homebrew
 

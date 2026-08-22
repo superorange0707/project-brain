@@ -93,6 +93,7 @@ class Settings:
     experience_similar_cases: int = 5
     experience_patch_chars: int = 0
     model_install_hosts: list[str] = field(default_factory=list)
+    model_ca_bundle: Path | None = None
 
     def repos(self, names: Iterable[str] | None = None) -> list[Repository]:
         wanted = set(names or [])
@@ -431,6 +432,9 @@ def load_settings(path: str | Path | None = None) -> Settings:
     install_hosts = models.get("approved_install_hosts", [])
     if not isinstance(install_hosts, list) or not all(isinstance(host, str) and host.strip() for host in install_hosts):
         raise BrainError("models.approved_install_hosts must be a list of host names")
+    ca_bundle = models.get("ca_bundle")
+    if ca_bundle is not None and (not isinstance(ca_bundle, str) or not ca_bundle.strip()):
+        raise BrainError("models.ca_bundle must be a non-empty CA bundle path when configured")
 
     def local(value: str) -> Path:
         candidate = Path(value).expanduser()
@@ -469,6 +473,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         experience_similar_cases=max(1, int(experience.get("similar_cases") or 5)),
         experience_patch_chars=max(0, int(experience.get("patch_chars") or 0)),
         model_install_hosts=[host.lower().strip() for host in install_hosts],
+        model_ca_bundle=local(ca_bundle.strip()) if isinstance(ca_bundle, str) else None,
     )
     try:
         re.compile(settings.ticket_pattern)
@@ -1536,6 +1541,7 @@ def snapshot_indexes(settings: Settings, changed_only: bool = False) -> tuple[di
 
 def doctor(settings: Settings) -> tuple[str, bool]:
     from .graph import TESTED_BACKEND_VERSION, backend_version
+    from .models import model_download_trust_status
 
     output = ["PROJECT BRAIN", "", "Dependencies", ""]
     ok = True
@@ -1544,6 +1550,9 @@ def doctor(settings: Settings) -> tuple[str, bool]:
         status = "OK" if present else ("MISSING" if required else "OPTIONAL — built-in fallback active")
         output.append(f"{command:<24}{status}")
         ok = ok and (bool(present) or not required)
+    trust_status, trust_ok = model_download_trust_status(settings)
+    output.extend(["", "Model-download TLS", "", f"trust store{'':<13}{trust_status}"])
+    ok = ok and trust_ok
     output.extend(["", "Repositories", ""])
     for repo in settings.repositories:
         exists = repo.path.is_dir()

@@ -1,6 +1,6 @@
 # Project Brain milestone readiness report
 
-**Snapshot:** 2026-08-22 · **Local build candidate:** 0.6.4 (Precision pack release engineering)
+**Snapshot:** 2026-08-22 · **Local build candidate:** 0.6.5 (enterprise TLS compatibility)
 
 This report separates completed, locally tested engineering from validations
 that must run later on the target machine or private local data. It contains no
@@ -25,7 +25,7 @@ intentional local-only validation steps, not engineering blockers.
 | M10–M14 | COMPLETE | Local-only llama.cpp adapter, checksum/provenance manifest, pack-owned loopback lifecycle, conformance gates for official-reference vectors/order/long input/batch parity, bounded protected reranking, 10/20/40/80 public-synthetic reranker benchmarks, per-pack autotuning, and Semantic/Precision-to-Core fallback. |
 | M15 | COMPLETE | One Core codebase with capability profiles, schema incompatibility recovery guidance, controlled local/GitHub-Release/approved-internal pack installation, wheel/sdist build, notices, source-pinned Zoekt release workflow, and a descriptor-pinned official Semantic-pack catalog entry. |
 | M16 | COMPLETE | Status/freshness/storage/GC/watch/benchmark/explain commands, pinned-artifact GC protection, pre-write disk guard, local machine-profile capture, and machine-readable model tuning profile. |
-| M17 | COMPLETE | Sensitive-path exclusion, owner-only Brain state/session/output directories on POSIX, loopback-only UI/runtime boundaries, checksum/path-traversal protection, catalog/vector corruption fallback, stale-session protection, and low-disk fault injection. |
+| M17 | COMPLETE | Sensitive-path exclusion, owner-only Brain state/session/output directories on POSIX, loopback-only UI/runtime boundaries, checksum/path-traversal protection, catalog/vector corruption fallback, stale-session protection, low-disk fault injection, and native system-CA model-download trust with fail-closed hostname/certificate validation. |
 
 ## Completed local verification for this snapshot
 
@@ -54,20 +54,20 @@ brain model autotune PACK --latency-budget-ms 3000
 
 | Item | Status | What remains |
 | --- | --- | --- |
-| Official Qwen3-Reranker-4B Q6_K Precision pack | COMPLETE | Public `precision-pack-v1.0.2` contains the official-source-derived Q6_K GGUF (SHA-256 `2fd4a7bbb61400e65bb3849f8d367759232be2206e1bb467b2b3d7ff42e79aeb`), Apache-2.0 notices, provenance, pinned local runtime, and public/synthetic official-reference conformance. Its descriptor SHA-256 is `9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`; the compatible Core catalog entry is pending this release candidate's final Core publication. |
-| Official Qwen3-Embedding-4B Q6_K Semantic pack | COMPLETE | Public `semantic-pack-v1.0.6` contains the unchanged official Q6_K GGUF, provenance, notices, static local runtime, checksums, and public/synthetic conformance. A clean temporary installation verified the published descriptor, parts, assembled GGUF, runtime conformance, and a 583-card persistent USearch refresh. Core 0.6.3 pins descriptor SHA-256 `cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`. |
+| Official Qwen3-Reranker-4B Q6_K Precision pack | COMPLETE | Public `precision-pack-v1.0.2` contains the official-source-derived Q6_K GGUF (SHA-256 `2fd4a7bbb61400e65bb3849f8d367759232be2206e1bb467b2b3d7ff42e79aeb`), Apache-2.0 notices, provenance, pinned local runtime, and public/synthetic official-reference conformance. Its descriptor SHA-256 is `9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`; Core `v0.6.4` pins the catalog entry. |
+| Official Qwen3-Embedding-4B Q6_K Semantic pack | COMPLETE | Public `semantic-pack-v1.0.6` contains the unchanged official Q6_K GGUF, provenance, notices, static local runtime, checksums, and public/synthetic conformance. A clean temporary installation verified the published descriptor, parts, assembled GGUF, runtime conformance, and a 583-card persistent USearch refresh. Core `v0.6.4` pins descriptor SHA-256 `cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`. |
 | Company model approval | EXTERNAL POLICY DECISION | The organization chooses which official-source artifact is approved. Project Brain has no bypass mechanism and remains useful as Core without it. |
 | Apple M3 Pro / 36 GB measurements | DEFERRED TO TARGET MACHINE | Run the supplied local commands to record embedding p50/p95, batch throughput, 10/20/40/80 rerank latency, retrieval timing, and process/child peak memory. No unverified M3 numbers are claimed here. |
 | Linux x86_64 measurements | DEFERRED TO TARGET MACHINE | Run the same local benchmark commands on the selected Linux host. |
 | Time-split ticket replay and real enterprise Recall/MRR/nDCG | DEFERRED TO PRIVATE LOCAL DATA | Use the existing local golden/replay and historical Git evaluation infrastructure with private labels retained on the work machine. No private corpus is requested or committed. |
 | Public GitHub v0.6.1 release and Homebrew upgrade | COMPLETE | v0.6.1 is published. The official tap points at its final four-platform SHA-256 artifacts; `brew update`, a real 0.6.0→0.6.1 upgrade, formula test, and strict online audit have passed. |
-| Public GitHub v0.6.3 Core release | COMPLETE | The public GitHub Release contains final checksum-published wheel/sdist and four standalone assets. GitHub CI passed Python 3.11–3.14 with the Semantic extra, distribution install, and standalone smoke checks. The official tap was rendered from the published SHA256SUMS, strictly audited, and a real 0.6.1→0.6.3 Homebrew upgrade plus formula test passed. |
+| Public GitHub v0.6.4 Core release | COMPLETE | The public GitHub Release contains final checksum-published wheel/sdist and four standalone assets. GitHub CI passed Python 3.11–3.14 with the Semantic extra, distribution install, and standalone smoke checks. The official tap was rendered from the published SHA256SUMS, strictly audited, and a real Homebrew upgrade plus formula test passed. |
 
 ## Publication state audit
 
-- `v0.6.3` is the current published Core release. Its Homebrew formula was
+- `v0.6.4` is the current published Core release. Its Homebrew formula was
   rendered only from final GitHub Release SHA-256 values; `brew update`, strict
-  audit, a real 0.6.1→0.6.3 upgrade, and formula test passed. The `v0.6.2` tag
+  audit, a real Homebrew upgrade, and formula test passed. The `v0.6.2` tag
   was never released: its CI/release-workflow defects were discovered before
   any artifact or tap mutation.
 - The local development host is Apple Silicon with 32 GB memory, not the stated

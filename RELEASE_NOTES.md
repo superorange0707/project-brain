@@ -1,16 +1,17 @@
-# Project Brain v0.6.4
+# Project Brain v0.6.5
 
-Project Brain v0.6.4 catalogs the independently released offline Precision
-pack without changing the Core product boundary. The Qwen3-Reranker-4B Q6_K
-weight is never bundled into Core or Homebrew. `brain model install precision`
-pins Precision pack v1.0.2 descriptor SHA-256
-`9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`.
+Project Brain v0.6.5 fixes enterprise TLS compatibility for one-time Semantic
+and Precision model-pack downloads. The packaged downloader now uses native
+operating-system trust through `truststore`: the macOS Keychain on macOS and
+platform OpenSSL trust on Linux. A corporate inspection root already trusted by
+the operating system is therefore recognized by the standalone/Homebrew binary.
 
-The Precision pack workflow checks exact official source weights/tokenizer,
-uses a pinned llama.cpp conversion/quantization toolchain, and compares public
-synthetic results with the official Qwen Transformers reranker before it can
-publish a Q6_K model pack. The installed local verifier repeats order, bounded
-score delta, long-input, batch/single, and 10/20/40/80 candidate-pool checks.
+TLS certificate and hostname verification remain mandatory. `brain doctor`
+reports the safe trust mode without disclosing certificate material, CA paths,
+proxy credentials, or environment values. Administrators may add a local PEM
+bundle through `models.ca_bundle` or the standard `SSL_CERT_FILE` when policy
+requires it; the approved-host and descriptor/release-part/assembled-model
+SHA-256 gates remain unchanged.
 
 ## Release qualification
 
@@ -19,9 +20,8 @@ score delta, long-input, batch/single, and 10/20/40/80 candidate-pool checks.
 - Core requires no model, hosted index, API key, or cloud service.
 - This release does not ship model weights and does not turn Project Brain into
   a coding agent or source-editing tool.
-- `brain model install precision` remains intentionally unavailable until the
-  immutable model-pack release and post-release clean installation are verified
-  and its descriptor is pinned in the Core catalog.
+- The independent Semantic and Precision model packs remain hash-pinned,
+  separately released artifacts; Core and Homebrew never bundle their weights.
 
 ## Deliberately not claimed
 
@@ -30,9 +30,8 @@ score delta, long-input, batch/single, and 10/20/40/80 candidate-pool checks.
 - No private-enterprise repository, ticket-replay, Recall, MRR, nDCG, or
   target-machine benchmark results are claimed.
 - The release makes no Qwen3-Reranker-4B target-machine performance claim.
-  Precision remains unavailable until its separately verified reranker pack is
-  installed. Organization approval remains a local policy decision;
-  Core stays fully usable without model packs.
+  Organization approval remains a local policy decision; Core stays fully
+  usable without model packs.
 
 See `MILESTONE_REPORT.md` and `docs/MODEL_PACKS.md` in the tagged source for the
 verified scope, offline-pack procedure, and target-machine/private-data follow-up.

@@ -2,6 +2,21 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.6.5] - 2026-08-22
+
+### Fixed
+
+- Use the native operating-system trust store for one-time model-pack downloads:
+  the macOS Keychain through `truststore` and platform OpenSSL trust on Linux.
+  Enterprise TLS-inspection roots already trusted by the OS now work in the
+  standalone/Homebrew binary without weakening certificate or hostname checks.
+- Honor an administrator-supplied `models.ca_bundle` or standard
+  `SSL_CERT_FILE` as an additive local CA source, without logging certificate
+  contents, paths, proxy credentials, or environment values.
+- Add safe model-download trust diagnostics to `brain doctor`; redirect host,
+  descriptor, release-part, and assembled-artifact SHA-256 gates remain
+  mandatory.
+
 ## [0.6.3] - 2026-08-21
 
 ### Fixed

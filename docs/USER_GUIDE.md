@@ -39,7 +39,7 @@ same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.3"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.5"
 ```
 
 Upgrade later with:
@@ -51,7 +51,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.3"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.5"
 ```
 
 ### From a source checkout
@@ -220,6 +220,8 @@ minimum_free_disk_gb = 5
 
 [models]
 approved_install_hosts = [] # optional organization HTTPS pack hosts
+# Optional PEM bundle added to OS trust for model downloads. SSL_CERT_FILE also works.
+# ca_bundle = "/path/to/enterprise-ca.pem"
 
 [experience]
 enabled = true
@@ -281,6 +283,11 @@ Project Brain also accepts legacy `config.yml` and `config.yaml` files.
 - `approved_install_hosts`: optional exact host names or parent domains allowed
   for a one-time HTTPS pack download. GitHub Release URLs are also accepted only
   with an explicit SHA-256. These settings never enable hosted inference.
+- `ca_bundle`: optional local PEM CA bundle added to the operating-system-backed
+  download trust context for one-time model downloads. This is for an
+  enterprise-managed root that is not visible to the system store; it never
+  disables certificate or hostname verification. The standard `SSL_CERT_FILE`
+  environment variable is also honored without logging its value.
 
 ### Source branch settings
 
@@ -1019,6 +1026,35 @@ then rerun `brain sync`. Project Brain does not start an agent, access Keychain,
 or persist SSH keys itself. Use
 `brain init --no-fetch`, `brain refresh --no-fetch`, or `brain start --no-sync`
 when offline.
+
+### Model-pack download fails with a certificate error
+
+Project Brain keeps TLS certificate and hostname verification enabled. On macOS
+the Homebrew and standalone binaries use the macOS Keychain through
+`truststore`; on Linux they use the platform OpenSSL trust store. Run
+`brain doctor` to see the active mode without printing certificate contents,
+paths, proxy credentials, or environment values.
+
+If `curl` trusts the approved Project Brain GitHub Release through corporate TLS
+inspection, a current Project Brain release should do the same. Ask IT to trust
+the enterprise root in the operating-system store; do not use `--insecure` or
+download a model outside the verified installer. If policy requires an explicit
+PEM bundle, use one of these local-only options:
+
+```bash
+SSL_CERT_FILE=/approved/path/enterprise-ca.pem brain model install semantic
+```
+
+```toml
+[models]
+ca_bundle = "/approved/path/enterprise-ca.pem"
+```
+
+The configured PEM is added to the download trust context and its path or
+contents are not reported by `brain doctor`. Project Brain still enforces the
+approved redirect hosts plus descriptor, release-part, and assembled-model
+SHA-256 checks. A missing, invalid, untrusted, or hostname-mismatched
+certificate fails closed.
 
 ## 15. Updating and uninstalling
 

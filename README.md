@@ -16,7 +16,7 @@ cloud indexing, API keys, or giving an agent permission to edit your code.
 
 [![CI](https://github.com/superorange0707/project-brain/actions/workflows/ci.yml/badge.svg)](https://github.com/superorange0707/project-brain/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Zero runtime dependencies](https://img.shields.io/badge/runtime_dependencies-0-2ea44f)](pyproject.toml)
+[![Small runtime footprint](https://img.shields.io/badge/runtime_dependencies-1-2ea44f)](pyproject.toml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [Quick start](#quick-start) · [Local cockpit](#local-investigation-cockpit) · [How it works](#how-it-works) · [User guide](docs/USER_GUIDE.md) · [Security](SECURITY.md)
@@ -60,6 +60,12 @@ Core requires no vector database, hosted indexing service, model/API credential,
 or cloud service. Optional approved packs are installed from a local path or a
 hash-pinned approved release, checksum-verified, and may only use a loopback
 runtime; Project Brain never downloads weights while it runs.
+
+One-time model-pack downloads use the operating system's verified trust policy:
+the macOS Keychain through `truststore`, and platform OpenSSL trust on Linux.
+This includes enterprise roots already trusted by the operating system; TLS and
+hostname verification stay enabled. See [corporate TLS troubleshooting](docs/USER_GUIDE.md#model-pack-download-fails-with-a-certificate-error) for the
+safe `SSL_CERT_FILE` and `models.ca_bundle` fallback options.
 
 The first Core-catalogued [Semantic pack v1.0.6](https://github.com/superorange0707/project-brain/releases/tag/semantic-pack-v1.0.6)
 is separately released for Apple Silicon. It uses the unchanged official
@@ -123,7 +129,7 @@ Download the archive for your CPU from the
 extract it, and place all four executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.6.3-macos-arm64.tar.gz
+tar -xzf project-brain-v0.6.5-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp zoekt zoekt-index ~/.local/bin/
 ```
@@ -134,19 +140,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.3"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.5"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.3"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.5"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.3/project_brain_context-0.6.3-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.5/project_brain_context-0.6.5-py3-none-any.whl
 ```
 
 Then verify:

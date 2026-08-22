@@ -8,11 +8,13 @@ import secrets
 import signal
 import shutil
 import socket
+import ssl
 import subprocess
 import tarfile
 import tempfile
 import time
 from platform import machine, system
+from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from dataclasses import dataclass
@@ -21,6 +23,11 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
     from .core import Settings
+
+try:
+    import truststore
+except ImportError:  # pragma: no cover - package releases declare this dependency
+    truststore = None
 
 REQUIRED_MANIFEST_FIELDS = {
     "pack_id", "capability", "model_family", "upstream_model", "upstream_revision", "license",
@@ -68,6 +75,10 @@ OFFICIAL_PACKS: dict[str, dict[str, str]] = {
     },
 }
 MODEL_PACK_DESCRIPTOR_SCHEMA = "project-brain-model-pack-v1"
+MODEL_DOWNLOAD_TLS_ERROR = (
+    "model download TLS certificate verification failed; certificate and hostname verification remain enabled. "
+    "Run 'brain doctor' and ensure the enterprise root is trusted by the operating system or configure models.ca_bundle."
+)
 
 
 def _version(value: str) -> tuple[int, ...]:
@@ -661,6 +672,64 @@ def _valid_sha256(value: str) -> bool:
     return len(value) == 64 and all(char in "0123456789abcdef" for char in value.lower())
 
 
+def model_download_ssl_context(settings: Settings) -> tuple[ssl.SSLContext, str]:
+    """Return a verified context backed by OS trust, plus a safe diagnostic label.
+
+    `truststore` uses the macOS Keychain through Security.framework and the
+    platform OpenSSL store elsewhere. An administrator-supplied PEM bundle is
+    additive, never a replacement for TLS or hostname verification.
+    """
+    try:
+        context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT) if truststore is not None else None
+    except (OSError, ssl.SSLError, ValueError):
+        context = None
+    if context is None:
+        context = ssl.create_default_context()
+        source = "Python platform trust fallback"
+    else:
+        source = "system trust"
+    configured_bundle = settings.model_ca_bundle
+    environment_bundle = os.environ.get("SSL_CERT_FILE")
+    bundle = configured_bundle or (Path(environment_bundle).expanduser() if environment_bundle else None)
+    if bundle is not None:
+        if not bundle.is_file():
+            label = "models.ca_bundle" if configured_bundle else "SSL_CERT_FILE"
+            raise ValueError(f"{label} does not name a readable CA bundle")
+        try:
+            context.load_verify_locations(cafile=str(bundle))
+        except (OSError, ssl.SSLError) as error:
+            label = "models.ca_bundle" if configured_bundle else "SSL_CERT_FILE"
+            raise ValueError(f"{label} CA bundle could not be loaded") from error
+        source += " + configured CA bundle" if configured_bundle else " + SSL_CERT_FILE"
+    # Be explicit about both guarantees even when the underlying constructor
+    # already sets them, so a future context implementation cannot relax them.
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return context, source
+
+
+def model_download_trust_status(settings: Settings) -> tuple[str, bool]:
+    """Provide doctor with a useful trust diagnostic without exposing CA paths."""
+    try:
+        _, source = model_download_ssl_context(settings)
+    except (OSError, ssl.SSLError, ValueError) as error:
+        return f"ERROR — {error}; TLS downloads will fail closed", False
+    return f"OK — {source}; certificate and hostname verification enabled", True
+
+
+def _open_model_download(settings: Settings, request: Request, timeout: float):
+    """Open a one-time model-pack download with verified platform trust."""
+    context, _ = model_download_ssl_context(settings)
+    try:
+        return urlopen(request, timeout=timeout, context=context)
+    except ssl.SSLCertVerificationError as error:
+        raise ValueError(MODEL_DOWNLOAD_TLS_ERROR) from error
+    except URLError as error:
+        if isinstance(error.reason, ssl.SSLCertVerificationError):
+            raise ValueError(MODEL_DOWNLOAD_TLS_ERROR) from error
+        raise
+
+
 def _approved_pack_url(settings: Settings, source_url: str, *, final: bool = False) -> None:
     parsed = urlparse(source_url)
     host = (parsed.hostname or "").lower()
@@ -693,7 +762,7 @@ def install_pack_url(settings: Settings, source_url: str, expected_sha256: str) 
     staged: Path | None = None
     try:
         request = Request(source_url, headers={"User-Agent": "Project-Brain-model-pack/1"})
-        with urlopen(request, timeout=60) as response:
+        with _open_model_download(settings, request, timeout=60) as response:
             _approved_pack_url(settings, response.geturl(), final=True)
             try:
                 projected_bytes = int(response.headers.get("Content-Length") or 0)
@@ -759,7 +828,7 @@ def _download_verified_artifact(
     source_url = str(artifact["url"])
     _approved_pack_url(settings, source_url)
     request = Request(source_url, headers={"User-Agent": "Project-Brain-model-pack/1"})
-    with urlopen(request, timeout=120) as response:
+    with _open_model_download(settings, request, timeout=120) as response:
         _approved_pack_url(settings, response.geturl(), final=True)
         try:
             content_length = int(response.headers.get("Content-Length") or 0)
@@ -805,7 +874,7 @@ def install_release_descriptor(settings: Settings, descriptor_url: str, expected
     try:
         descriptor_path = temporary / "descriptor.json"
         request = Request(descriptor_url, headers={"User-Agent": "Project-Brain-model-pack/1"})
-        with urlopen(request, timeout=60) as response:
+        with _open_model_download(settings, request, timeout=60) as response:
             _approved_pack_url(settings, response.geturl(), final=True)
             digest = hashlib.sha256()
             with descriptor_path.open("wb") as handle:

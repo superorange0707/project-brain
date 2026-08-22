@@ -65,7 +65,7 @@ jobs:
       - name: Build standalone Project Brain
         run: |
           python -m pip install ".[semantic]" pyinstaller
-          pyinstaller --clean --onefile --name brain --collect-data brain --collect-all usearch brain/standalone.py
+          pyinstaller --clean --onefile --name brain --collect-data brain --collect-all usearch --collect-all truststore brain/standalone.py
           dist/brain --version
       - name: Build pinned Zoekt command pair
         env:

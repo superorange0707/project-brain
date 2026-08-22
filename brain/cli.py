@@ -312,6 +312,8 @@ def _init(args: argparse.Namespace) -> int:
         "[models]",
         "# Approved internal HTTPS hosts may be added here for one-time pack installation.",
         "approved_install_hosts = []",
+        "# Optional PEM bundle added to model-download system trust. SSL_CERT_FILE also works.",
+        "# ca_bundle = \"/path/to/enterprise-ca.pem\"",
         "",
         "[experience]",
         "enabled = true",

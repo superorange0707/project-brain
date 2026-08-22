@@ -192,9 +192,6 @@ brain model autotune precision
 brain edition set precision
 ```
 
-Until that catalog entry exists, `brain model install precision` intentionally
-fails rather than resolving an unpinned or mutable model asset.
-
 An approved GitHub Release asset can be staged once only when its expected hash is supplied. It is an installation operation, not a runtime dependency:
 
 ```bash
@@ -209,3 +206,26 @@ approved_install_hosts = ["models.example.internal"]
 ```
 
 The downloader accepts only credential-free HTTPS, approved hosts, a declared content length, and a caller-provided SHA-256. It does not support Hugging Face as a Project Brain runtime source. Precision automatically falls back to Semantic, then Core, if verification, startup, health, timeout, or reranking fails; the deterministic verified-evidence path remains authoritative.
+
+### Corporate TLS inspection
+
+Model installation preserves full TLS certificate and hostname verification. The
+Core downloader uses native operating-system trust through `truststore`: the
+macOS Keychain on macOS and platform OpenSSL trust on Linux. Therefore an
+enterprise inspection root already trusted by the operating system is consumed
+without adding that certificate to Project Brain or committing it to a pack.
+
+`brain doctor` reports whether installation is using system trust or an
+explicit bundle, without exposing CA contents, the bundle path, proxy
+credentials, or environment values. If enterprise policy requires a local PEM
+fallback, set the standard `SSL_CERT_FILE` for the command or add the following
+to the local workspace configuration:
+
+```toml
+[models]
+ca_bundle = "/approved/path/enterprise-ca.pem"
+```
+
+The bundle is added to the download trust context; it never enables insecure TLS, suppresses
+hostname checks, expands approved redirect hosts, or bypasses descriptor and
+artifact SHA-256 verification.
