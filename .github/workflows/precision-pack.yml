@@ -1,8 +1,7 @@
 name: Publish Precision model pack
 
 on:
-  push:
-    tags: ["precision-pack-v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read

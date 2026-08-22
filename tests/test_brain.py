@@ -1835,7 +1835,8 @@ class ReleaseSafetyTest(unittest.TestCase):
     def test_precision_pack_workflow_uses_official_source_conversion_and_local_conformance(self) -> None:
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/precision-pack.yml").read_text(encoding="utf-8")
-        self.assertIn('tags: ["precision-pack-v*"]', workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertNotIn('tags: ["precision-pack-v*"]', workflow)
         self.assertIn('python-version: "3.12"', workflow)
         self.assertIn("Qwen/Qwen3-Reranker-4B/resolve/$QWEN_REVISION/model-00001-of-00002.safetensors", workflow)
         self.assertIn("cf2e87cbf71fa628961532232e04dd6c19702a0a057f5e2aff95ea1aca4fd488", workflow)
@@ -1853,6 +1854,9 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn('RERANK_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"', builder)
         self.assertIn('"reranker_candidate_pools": [10, 20, 40, 80]', builder)
         self.assertIn("MAXIMUM_REFERENCE_SCORE_DELTA = 0.10", builder)
+        self.assertIn("RERANK_PHYSICAL_BATCH_TOKENS = RERANK_CONTEXT_TOKENS", builder)
+        self.assertIn('"-ub", str(RERANK_PHYSICAL_BATCH_TOKENS)', builder)
+        self.assertIn('"expected_top_index": int(case["expected_top_index"])', builder)
         reference = (root / "scripts/qwen3_reranker_reference.py").read_text(encoding="utf-8")
         self.assertIn("official Qwen", reference)
         self.assertIn("RERANK_CONTEXT_TOKENS", reference)

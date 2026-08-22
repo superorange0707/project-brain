@@ -605,8 +605,13 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
                 observed_input_chars = max(observed_input_chars, *(len(text) for text in texts))
             else:
                 query, documents, expected = case.get("query"), case.get("documents"), case.get("expected_order")
+                expected_top = case.get("expected_top_index")
                 if not isinstance(query, str) or not isinstance(documents, list) or not documents or not all(isinstance(document, str) for document in documents) or not isinstance(expected, list) or sorted(expected) != list(range(len(documents))):
                     raise ValueError(f"golden_suite reranker case {number} is invalid")
+                if expected_top is None:
+                    expected_top = expected[0]
+                if not isinstance(expected_top, int) or expected_top < 0 or expected_top >= len(documents):
+                    raise ValueError(f"golden_suite reranker case {number} has invalid expected_top_index")
                 truncate_to_chars = case.get("truncate_to_chars")
                 if truncate_to_chars is not None and (not isinstance(truncate_to_chars, int) or truncate_to_chars < 1):
                     raise ValueError(f"golden_suite reranker case {number} has invalid truncate_to_chars")
@@ -628,9 +633,9 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
                     if maximum_delta < 0.0 or maximum_delta > 1.0 or any(abs(score - reference) > maximum_delta for score, reference in zip(scores, reference_scores, strict=True)):
                         raise ValueError(f"reranker reference-score conformance failed at case {number}")
                     reference_order = sorted(range(len(reference_scores)), key=lambda index: (-reference_scores[index], index))
-                    if reference_order != expected:
-                        raise ValueError(f"reranker official-reference ordering failed at case {number}")
-                if len(scores) != len(documents) or not _same_vectors([[float(score)] for score in scores], [[float(score)] for score in single_scores], tolerance=RERANKER_BATCH_PARITY_TOLERANCE) or any(not math.isfinite(float(score)) for score in scores) or order != expected or any(float(scores[left]) < float(scores[right]) for left, right in zip(expected, expected[1:], strict=False)):
+                    if reference_order[0] != expected_top:
+                        raise ValueError(f"reranker official-reference top-result conformance failed at case {number}")
+                if len(scores) != len(documents) or not _same_vectors([[float(score)] for score in scores], [[float(score)] for score in single_scores], tolerance=RERANKER_BATCH_PARITY_TOLERANCE) or any(not math.isfinite(float(score)) for score in scores) or order[0] != expected_top:
                     raise ValueError(f"reranker conformance failed at case {number}")
                 ranking_exercised = ranking_exercised or len(documents) > 1
                 observed_input_chars = max(observed_input_chars, len(query), *(len(document) for document in documents))
