@@ -56,6 +56,13 @@ private-local-data quality remain separate measurements.
 
 ## Precision model-pack release
 
+Precision pack v1.0.2 was built on a controlled 32 GB Apple Silicon pack
+builder because the standard GitHub `macos-15` runner has only 7 GB RAM while
+the official F16 reference weights are about 7.7 GiB. The checked-in workflow
+is therefore manually dispatched only; it remains the reproducible recipe for
+an approved builder with sufficient memory and does not create a failed release
+candidate automatically on an under-provisioned tag push.
+
 The official Precision pack follows the same separate-release and
 descriptor-pinning sequence. A `precision-pack-v*` tag runs on macOS Apple
 Silicon and first downloads the pinned official

@@ -74,13 +74,13 @@ parts, reconstructed model, provenance, and clean temporary installation have
 all been verified. `brain model install semantic` then verifies that descriptor,
 the release parts, and the reassembled model before registering the pack.
 
-Precision uses the same separation. Its release workflow converts the exact
-official Qwen3-Reranker-4B source with a pinned local `llama.cpp` toolchain,
-compares public/synthetic results with Qwen's local Transformers reference, and
-ships only an offline Q6_K pack after that gate passes. It is never bundled into
-Core or Homebrew. The `precision` alias is added only by a later Core release
-that pins a published descriptor and checksum; before then it deliberately
-resolves nothing mutable.
+The separately released [Precision pack v1.0.2](https://github.com/superorange0707/project-brain/releases/tag/precision-pack-v1.0.2)
+converts the exact official Qwen3-Reranker-4B source with a pinned local
+`llama.cpp` toolchain and compares public/synthetic results with Qwen's local
+Transformers reference. Its immutable descriptor SHA-256 is
+`9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`.
+It is never bundled into Core or Homebrew; after this Core catalog release,
+`brain model install precision` resolves only that pinned release.
 
 See [offline model-pack operations](docs/MODEL_PACKS.md) for the audited pack
 format, official-Qwen conversion provenance, local conformance, controlled

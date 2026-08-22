@@ -341,8 +341,9 @@ brain refresh
 
 `brain refresh` builds the snapshot-filtered semantic index after the normal
 Core indexes when Semantic is selected. If its local runtime cannot start, the
-refresh completes with Core and reports the Semantic warning. Precision remains
-unavailable until a separately verified reranker pack is installed.
+refresh completes with Core and reports the Semantic warning. Precision becomes
+available after the separately verified reranker pack is installed; otherwise it
+automatically falls back to Semantic or Core.
 
 The manifest records model/revision/license/runtime/checksum provenance. Every
 production embedding or reranker pack must include a hash-pinned local JSON
@@ -367,8 +368,9 @@ for batch and one-document calls. A minimal embedding case looks like:
 }
 ```
 
-The separately released Precision pack follows the same controlled flow after
-its descriptor has been pinned by a compatible Core release:
+The separately released [Precision pack v1.0.2](https://github.com/superorange0707/project-brain/releases/tag/precision-pack-v1.0.2)
+is pinned by this compatible Core release. Its descriptor SHA-256 is
+`9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`:
 
 ```bash
 brain model install precision

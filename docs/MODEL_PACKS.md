@@ -143,6 +143,21 @@ Older pinned `llama.cpp` revisions name the converter `convert-hf-to-gguf.py`; u
 
 ## Conformance and local measurement
 
+## Official Precision pack v1.0.2
+
+The [v1.0.2 Precision release](https://github.com/superorange0707/project-brain/releases/tag/precision-pack-v1.0.2)
+is the Core-catalogued macOS Apple Silicon reranker pack. Its immutable
+descriptor SHA-256 is
+`9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7` and
+its Q6_K model SHA-256 is
+`2fd4a7bbb61400e65bb3849f8d367759232be2206e1bb467b2b3d7ff42e79aeb`.
+It derives without training from official `Qwen/Qwen3-Reranker-4B` revision
+`ff536d3f82cc9ef977ea312094eb103d8446116a`, with pinned `llama.cpp`
+`d775b8967a46d8beb110d444aa3b8938179e0dd8`. The release includes Apache-2.0
+and runtime notices, source hashes, a local runtime, and public/synthetic
+official-reference, long-input, batch/single, multilingual, code, and
+10/20/40/80 pool conformance. It makes no M3 Pro or private-corpus claim.
+
 Create the golden suite from public/synthetic texts and the official Qwen
 Transformers reranker implementation on the pack-builder machine. The Precision
 workflow uses the exact GGUF chat-template instruction, `Given a web search

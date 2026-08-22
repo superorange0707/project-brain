@@ -58,6 +58,14 @@ OFFICIAL_PACKS: dict[str, dict[str, str]] = {
         ),
         "descriptor_sha256": "cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc",
     },
+    "precision": {
+        "pack_id": "qwen3-reranker-4b-q6k-darwin-arm64",
+        "descriptor_url": (
+            "https://github.com/superorange0707/project-brain/releases/download/"
+            "precision-pack-v1.0.2/qwen3-reranker-4b-q6k-darwin-arm64-descriptor.json"
+        ),
+        "descriptor_sha256": "9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7",
+    },
 }
 MODEL_PACK_DESCRIPTOR_SCHEMA = "project-brain-model-pack-v1"
 
