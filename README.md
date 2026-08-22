@@ -67,6 +67,13 @@ This includes enterprise roots already trusted by the operating system; TLS and
 hostname verification stay enabled. See [corporate TLS troubleshooting](docs/USER_GUIDE.md#model-pack-download-fails-with-a-certificate-error) for the
 safe `SSL_CERT_FILE` and `models.ca_bundle` fallback options.
 
+When a verified pack starts its own local `llama.cpp` process, Project Brain
+connects to its fixed `127.0.0.1` endpoint through a dedicated direct transport.
+This prevents a corporate HTTP(S) proxy from intercepting a loopback health,
+embedding, or reranking call even when it does not recognize numeric loopback.
+No `NO_PROXY` setting is required. One-time GitHub model-pack downloads remain
+on the normal proxy-aware, system-trust download path.
+
 The first Core-catalogued [Semantic pack v1.0.6](https://github.com/superorange0707/project-brain/releases/tag/semantic-pack-v1.0.6)
 is separately released for Apple Silicon. It uses the unchanged official
 Qwen3-Embedding-4B Q6_K GGUF, is installed only from a Project Brain-controlled
@@ -129,7 +136,7 @@ Download the archive for your CPU from the
 extract it, and place all four executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.6.5-macos-arm64.tar.gz
+tar -xzf project-brain-v0.6.6-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp zoekt zoekt-index ~/.local/bin/
 ```
@@ -140,19 +147,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.5"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.6"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.5"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.6"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.5/project_brain_context-0.6.5-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.6/project_brain_context-0.6.6-py3-none-any.whl
 ```
 
 Then verify:

@@ -1541,7 +1541,7 @@ def snapshot_indexes(settings: Settings, changed_only: bool = False) -> tuple[di
 
 def doctor(settings: Settings) -> tuple[str, bool]:
     from .graph import TESTED_BACKEND_VERSION, backend_version
-    from .models import model_download_trust_status
+    from .models import managed_runtime_loopback_status, model_download_trust_status
 
     output = ["PROJECT BRAIN", "", "Dependencies", ""]
     ok = True
@@ -1553,6 +1553,10 @@ def doctor(settings: Settings) -> tuple[str, bool]:
     trust_status, trust_ok = model_download_trust_status(settings)
     output.extend(["", "Model-download TLS", "", f"trust store{'':<13}{trust_status}"])
     ok = ok and trust_ok
+    output.extend([
+        "", "Pack-owned model runtime", "",
+        f"loopback transport{'':<7}{managed_runtime_loopback_status()}",
+    ])
     output.extend(["", "Repositories", ""])
     for repo in settings.repositories:
         exists = repo.path.is_dir()

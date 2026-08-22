@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.server
 import importlib.util
 import io
 import json
@@ -13,6 +14,7 @@ import ssl
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import tomllib
 import unittest
@@ -62,7 +64,7 @@ from brain.catalog import connect as catalog_connect
 from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
 from brain.models import EMBEDDING_BATCH_PARITY_TOLERANCE, RERANKER_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
-from brain.models import _open_model_download, autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, model_download_ssl_context, runtime_for_pack, validate_manifest, verify_pack
+from brain.models import _open_model_download, autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, managed_runtime_loopback_status, model_download_ssl_context, runtime_for_pack, validate_manifest, verify_pack
 from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, Chunk, SEMANTIC_CARD_CODE_CHARS, _bounded_embedding_batches, _excluded, build_semantic_index, chunk_source, search_semantic
 from brain.ops import gc
 from brain.evaluation import evaluate_golden
@@ -907,6 +909,113 @@ else:
         self.assertTrue(opener.call_args.kwargs["context"].check_hostname)
         self.assertEqual(ssl.CERT_REQUIRED, opener.call_args.kwargs["context"].verify_mode)
 
+    def test_remote_model_download_keeps_standard_proxy_eligible_transport(self) -> None:
+        from urllib.request import Request
+
+        request = Request("https://github.com/example/project/releases/download/v1/descriptor.json")
+        proxy_url = "http://enterprise-proxy.invalid:8080"
+        with mock.patch.dict(os.environ, {"HTTPS_PROXY": proxy_url}, clear=False), mock.patch(
+            "brain.models.model_download_ssl_context", return_value=(ssl.create_default_context(), "system trust")
+        ), mock.patch("brain.models.urlopen", return_value=mock.Mock()) as remote, mock.patch(
+            "brain.models._MANAGED_LOOPBACK_OPENER.open"
+        ) as direct:
+            _open_model_download(self.settings, request, timeout=1)
+        remote.assert_called_once()
+        direct.assert_not_called()
+
+    def test_pack_owned_loopback_transport_bypasses_proxy_for_semantic_and_precision_calls(self) -> None:
+        runtime_calls: list[tuple[str, str | None]] = []
+        proxy_calls: list[str] = []
+
+        class RuntimeHandler(http.server.BaseHTTPRequestHandler):
+            def _send(self, value: dict[str, object]) -> None:
+                encoded = json.dumps(value).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def do_GET(self) -> None:
+                runtime_calls.append((self.path, self.headers.get("Authorization")))
+                self._send({"ok": True})
+
+            def do_POST(self) -> None:
+                runtime_calls.append((self.path, self.headers.get("Authorization")))
+                _ = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if self.path == "/v1/embeddings":
+                    self._send({"data": [{"embedding": [1.0, 0.0]}]})
+                elif self.path == "/rerank":
+                    self._send({"results": [{"index": 0, "relevance_score": 0.9}, {"index": 1, "relevance_score": 0.1}]})
+                else:
+                    self.send_error(404)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return None
+
+        class ProxyHandler(http.server.BaseHTTPRequestHandler):
+            def do_CONNECT(self) -> None:
+                proxy_calls.append("CONNECT")
+                self.send_error(502)
+
+            def do_GET(self) -> None:
+                proxy_calls.append("GET")
+                self.send_error(502)
+
+            def do_POST(self) -> None:
+                proxy_calls.append("POST")
+                self.send_error(502)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return None
+
+        runtime_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RuntimeHandler)
+        proxy_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+        threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (runtime_server, proxy_server)]
+        for thread in threads:
+            thread.start()
+        proxy_url = f"http://127.0.0.1:{proxy_server.server_port}"
+        endpoint = f"http://127.0.0.1:{runtime_server.server_port}"
+        try:
+            with mock.patch.dict(os.environ, {
+                "HTTP_PROXY": proxy_url, "HTTPS_PROXY": proxy_url, "NO_PROXY": "", "no_proxy": "",
+            }, clear=False), mock.patch("urllib.request.proxy_bypass", side_effect=lambda host: host == "localhost"):
+                semantic = LlamaCppRuntime(endpoint, api_key="ephemeral-test-key", direct_loopback=True)
+                precision = LlamaCppRuntime(endpoint, api_key="ephemeral-test-key", direct_loopback=True)
+                self.assertTrue(semantic.health()["ok"])
+                self.assertEqual([[1.0, 0.0]], semantic.embed(["public synthetic semantic card"], dimension=2))
+                self.assertEqual([0.9, 0.1], precision.rerank("query", ["relevant", "unrelated"]))
+        finally:
+            for server in (runtime_server, proxy_server):
+                server.shutdown()
+                server.server_close()
+            for thread in threads:
+                thread.join(timeout=1)
+        self.assertEqual([], proxy_calls)
+        self.assertEqual(
+            [("/health", None), ("/v1/embeddings", "Bearer ephemeral-test-key"), ("/rerank", "Bearer ephemeral-test-key")],
+            runtime_calls,
+        )
+
+    def test_direct_loopback_transport_is_limited_to_managed_numeric_loopback(self) -> None:
+        with self.assertRaisesRegex(ValueError, "pack-owned 127.0.0.1"):
+            LlamaCppRuntime("http://localhost:8080", direct_loopback=True)
+        with self.assertRaisesRegex(ValueError, "pack-owned 127.0.0.1"):
+            LlamaCppRuntime("http://[::1]:8080", direct_loopback=True)
+
+    def test_doctor_reports_safe_pack_runtime_proxy_boundary(self) -> None:
+        proxy_url = "http://enterprise-proxy.invalid:8080"
+        with mock.patch.dict(os.environ, {"HTTPS_PROXY": proxy_url}, clear=False):
+            status = managed_runtime_loopback_status()
+            report, ok = doctor(self.settings)
+        self.assertTrue(ok)
+        self.assertIn("direct no-proxy transport enforced", status)
+        self.assertIn("external proxy configuration detected", status)
+        self.assertNotIn(proxy_url, status)
+        self.assertIn("Pack-owned model runtime", report)
+        self.assertIn("direct no-proxy transport enforced", report)
+        self.assertNotIn(proxy_url, report)
+
     def test_local_model_install_never_opens_a_download_connection(self) -> None:
         pack = self.root / "local-only-pack"
         pack.mkdir()
@@ -1256,8 +1365,46 @@ else:
             self.assertIn("4096", command)
             self.assertNotIn("--hf-repo", command)
             self.assertEqual(12.0, runtime.client.timeout_seconds)
+            self.assertTrue(runtime.client.direct_loopback)
             runtime.shutdown()
             kill.assert_called_once()
+
+    def test_managed_runtime_startup_diagnostics_distinguish_start_health_and_transport_failures(self) -> None:
+        common = {
+            "capability": "embedding", "startup_timeout_seconds": 1,
+        }
+        artifacts = Path("/tmp/verified-artifact")
+        with mock.patch("brain.models._check_pack_integrity"), mock.patch(
+            "brain.models._pack_file", return_value=artifacts
+        ), mock.patch("brain.models.os.access", return_value=True), mock.patch(
+            "brain.models.subprocess.Popen", side_effect=OSError("synthetic")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed to start"):
+                ManagedLlamaCppRuntime(common)._start()
+
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch("brain.models._check_pack_integrity"), mock.patch(
+            "brain.models._pack_file", return_value=artifacts
+        ), mock.patch("brain.models.os.access", return_value=True), mock.patch(
+            "brain.models.subprocess.Popen", return_value=process
+        ), mock.patch.object(LlamaCppRuntime, "health", return_value={"ok": False}), mock.patch(
+            "brain.models.time.monotonic", side_effect=[0.0, 0.5, 1.5]
+        ), mock.patch("brain.models.time.sleep"), mock.patch.object(ManagedLlamaCppRuntime, "shutdown"):
+            with self.assertRaisesRegex(RuntimeError, "alive but health endpoint"):
+                ManagedLlamaCppRuntime(common)._start()
+
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch("brain.models._check_pack_integrity"), mock.patch(
+            "brain.models._pack_file", return_value=artifacts
+        ), mock.patch("brain.models.os.access", return_value=True), mock.patch(
+            "brain.models.subprocess.Popen", return_value=process
+        ), mock.patch.object(LlamaCppRuntime, "health", side_effect=ConnectionError("synthetic")), mock.patch(
+            "brain.models.time.monotonic", side_effect=[0.0, 0.5, 1.5]
+        ), mock.patch("brain.models.time.sleep"), mock.patch.object(ManagedLlamaCppRuntime, "shutdown"):
+            with self.assertRaisesRegex(RuntimeError, "health transport failed"):
+                ManagedLlamaCppRuntime(common)._start()
 
     def test_managed_llama_runtime_restarts_once_after_a_transport_disconnect(self) -> None:
         runtime = ManagedLlamaCppRuntime({})

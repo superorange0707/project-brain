@@ -229,3 +229,12 @@ ca_bundle = "/approved/path/enterprise-ca.pem"
 The bundle is added to the download trust context; it never enables insecure TLS, suppresses
 hostname checks, expands approved redirect hosts, or bypasses descriptor and
 artifact SHA-256 verification.
+
+Corporate proxy settings remain available to the one-time HTTPS descriptor and
+artifact downloader. They do not apply to an installed, verified pack's own
+runtime: Project Brain launches that process on fixed `127.0.0.1` and uses a
+dedicated no-proxy loopback transport for health, embedding, and reranking
+calls. This is deliberately narrower than a process-wide proxy override and
+does not require `NO_PROXY`; non-loopback URLs are rejected for this transport.
+`brain doctor` reports this enforcement and only a safe yes/no proxy-configured
+indicator, never a proxy URL, credential, certificate, or environment value.

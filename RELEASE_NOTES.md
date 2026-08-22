@@ -1,17 +1,20 @@
-# Project Brain v0.6.5
+# Project Brain v0.6.6
 
-Project Brain v0.6.5 fixes enterprise TLS compatibility for one-time Semantic
-and Precision model-pack downloads. The packaged downloader now uses native
-operating-system trust through `truststore`: the macOS Keychain on macOS and
-platform OpenSSL trust on Linux. A corporate inspection root already trusted by
-the operating system is therefore recognized by the standalone/Homebrew binary.
+Project Brain v0.6.6 fixes a corporate-proxy compatibility issue affecting
+already-installed Semantic and Precision packs. When Project Brain launches a
+verified pack-owned `llama.cpp` process, its health, embedding, and reranking
+calls now use dedicated direct transport to the process's fixed `127.0.0.1`
+endpoint. A proxy rule that bypasses `localhost` but not numeric loopback can
+therefore no longer intercept model verification or local inference.
 
-TLS certificate and hostname verification remain mandatory. `brain doctor`
-reports the safe trust mode without disclosing certificate material, CA paths,
-proxy credentials, or environment values. Administrators may add a local PEM
-bundle through `models.ca_bundle` or the standard `SSL_CERT_FILE` when policy
-requires it; the approved-host and descriptor/release-part/assembled-model
-SHA-256 gates remain unchanged.
+The bypass is deliberately limited to a verified, Project Brain-managed
+loopback process. It does not change system proxy settings or require
+`NO_PROXY`. One-time GitHub model descriptor and artifact downloads remain
+proxy-aware and continue using operating-system trust, certificate and hostname
+verification, approved-host validation, and descriptor/release-part/assembled-
+model SHA-256 checks. `brain doctor` reports the enforced boundary and only a
+safe proxy-configured indicator; it never displays proxy URLs, credentials,
+certificate material, or environment values.
 
 ## Release qualification
 

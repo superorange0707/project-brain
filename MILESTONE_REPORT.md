@@ -1,6 +1,6 @@
 # Project Brain milestone readiness report
 
-**Snapshot:** 2026-08-22 · **Published Core release:** 0.6.5 (enterprise TLS compatibility)
+**Snapshot:** 2026-08-22 · **Core release candidate:** 0.6.6 (pack-owned loopback proxy compatibility; publication pending)
 
 This report separates completed, locally tested engineering from validations
 that must run later on the target machine or private local data. It contains no
@@ -25,15 +25,17 @@ intentional local-only validation steps, not engineering blockers.
 | M10–M14 | COMPLETE | Local-only llama.cpp adapter, checksum/provenance manifest, pack-owned loopback lifecycle, conformance gates for official-reference vectors/order/long input/batch parity, bounded protected reranking, 10/20/40/80 public-synthetic reranker benchmarks, per-pack autotuning, and Semantic/Precision-to-Core fallback. |
 | M15 | COMPLETE | One Core codebase with capability profiles, schema incompatibility recovery guidance, controlled local/GitHub-Release/approved-internal pack installation, wheel/sdist build, notices, source-pinned Zoekt release workflow, and a descriptor-pinned official Semantic-pack catalog entry. |
 | M16 | COMPLETE | Status/freshness/storage/GC/watch/benchmark/explain commands, pinned-artifact GC protection, pre-write disk guard, local machine-profile capture, and machine-readable model tuning profile. |
-| M17 | COMPLETE | Sensitive-path exclusion, owner-only Brain state/session/output directories on POSIX, loopback-only UI/runtime boundaries, checksum/path-traversal protection, catalog/vector corruption fallback, stale-session protection, low-disk fault injection, and native system-CA model-download trust with fail-closed hostname/certificate validation. |
+| M17 | COMPLETE | Sensitive-path exclusion, owner-only Brain state/session/output directories on POSIX, loopback-only UI/runtime boundaries, checksum/path-traversal protection, catalog/vector corruption fallback, stale-session protection, low-disk fault injection, native system-CA model-download trust with fail-closed hostname/certificate validation, and direct no-proxy transport for verified pack-owned `127.0.0.1` llama.cpp calls. |
 
 ## Completed local verification for this snapshot
 
 The full local regression suite (public/synthetic tests for this candidate) covers deterministic retrieval, generations,
 incremental indexes, semantic/reranker failure fallback, corrupt local state,
 pack tampering, production-manifest provenance, public synthetic conformance,
-machine-profile privacy, low-disk preflight, UI loopback protection, and release
-artifact contents.
+machine-profile privacy, low-disk preflight, UI loopback protection, release
+artifact contents, and an enterprise-proxy simulation where numeric loopback
+health, embedding, and reranking calls bypass a fake proxy while remote model
+downloads retain their standard proxy-eligible transport.
 
 The current macOS ARM64 development host also builds the pinned Zoekt commands
 from source, indexes the demo corpus, and confirms that a literal hit comes from
@@ -57,6 +59,7 @@ brain model autotune PACK --latency-budget-ms 3000
 | Official Qwen3-Reranker-4B Q6_K Precision pack | COMPLETE | Public `precision-pack-v1.0.2` contains the official-source-derived Q6_K GGUF (SHA-256 `2fd4a7bbb61400e65bb3849f8d367759232be2206e1bb467b2b3d7ff42e79aeb`), Apache-2.0 notices, provenance, pinned local runtime, and public/synthetic official-reference conformance. Its descriptor SHA-256 is `9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`; Core `v0.6.5` pins the catalog entry. |
 | Official Qwen3-Embedding-4B Q6_K Semantic pack | COMPLETE | Public `semantic-pack-v1.0.6` contains the unchanged official Q6_K GGUF, provenance, notices, static local runtime, checksums, and public/synthetic conformance. A clean temporary installation verified the published descriptor, parts, assembled GGUF, runtime conformance, and a 583-card persistent USearch refresh. Core `v0.6.5` pins descriptor SHA-256 `cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`. |
 | Enterprise model-download TLS compatibility | COMPLETE | Core `v0.6.5` packages `truststore`, uses native system trust for model downloads, preserves certificate/hostname validation and SHA-256 gates, supports additive `models.ca_bundle`/`SSL_CERT_FILE`, and reports only safe trust-mode diagnostics. Public release-descriptor, clean wheel, standalone, and Homebrew smoke checks passed. |
+| Pack-owned runtime proxy compatibility | COMPLETE | The `v0.6.6` candidate restricts direct no-proxy HTTP transport to verified Project Brain-managed `127.0.0.1` llama.cpp processes. Public/synthetic fake-proxy coverage confirms health, embedding, and rerank calls never reach the proxy, while one-time remote pack downloads remain standard proxy-eligible system-trust requests. Target-machine validation requires only installing the released Core update; existing packs need not be reinstalled. |
 | Company model approval | EXTERNAL POLICY DECISION | The organization chooses which official-source artifact is approved. Project Brain has no bypass mechanism and remains useful as Core without it. |
 | Apple M3 Pro / 36 GB measurements | DEFERRED TO TARGET MACHINE | Run the supplied local commands to record embedding p50/p95, batch throughput, 10/20/40/80 rerank latency, retrieval timing, and process/child peak memory. No unverified M3 numbers are claimed here. |
 | Linux x86_64 measurements | DEFERRED TO TARGET MACHINE | Run the same local benchmark commands on the selected Linux host. |
@@ -66,7 +69,8 @@ brain model autotune PACK --latency-budget-ms 3000
 
 ## Publication state audit
 
-- `v0.6.5` is the current published Core release. Its Homebrew formula was
+- `v0.6.5` is the current published Core release; `v0.6.6` is a publication-pending
+  Core candidate. The published formula was
   rendered only from final GitHub Release SHA-256 values; `brew update`, strict
   audit, a real 0.6.4→0.6.5 upgrade, and formula test passed. The `v0.6.2` tag
   was never released: its CI/release-workflow defects were discovered before

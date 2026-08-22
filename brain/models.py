@@ -16,7 +16,7 @@ import time
 from platform import machine, system
 from urllib.error import URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol
@@ -80,6 +80,13 @@ MODEL_DOWNLOAD_TLS_ERROR = (
     "Run 'brain doctor' and ensure the enterprise root is trusted by the operating system or configure models.ca_bundle."
 )
 
+# A pack-owned llama.cpp process is deliberately bound to this exact address.
+# Its requests must not inherit an enterprise proxy route: some proxy policies
+# bypass ``localhost`` but not its numeric loopback spelling.  This opener is
+# used only by ManagedLlamaCppRuntime after it has verified the pack and
+# created the process; external model downloads continue to use ``urlopen``.
+_MANAGED_LOOPBACK_OPENER = build_opener(ProxyHandler({}))
+
 
 def _version(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in value.split(".") if part.isdigit())
@@ -133,11 +140,14 @@ class LlamaCppRuntime:
     timeout_seconds: float = 30.0
     api_key: str | None = None
     input_suffix: str = ""
+    direct_loopback: bool = False
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.endpoint)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("model runtime must bind only loopback HTTP or a Unix socket")
+        if self.direct_loopback and parsed.hostname != "127.0.0.1":
+            raise ValueError("direct model runtime transport is restricted to a pack-owned 127.0.0.1 endpoint")
         self.endpoint = self.endpoint.rstrip("/")
 
     def _headers(self) -> dict[str, str]:
@@ -146,9 +156,14 @@ class LlamaCppRuntime:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    def _open(self, request: Request):
+        if self.direct_loopback:
+            return _MANAGED_LOOPBACK_OPENER.open(request, timeout=self.timeout_seconds)
+        return urlopen(request, timeout=self.timeout_seconds)
+
     def _post(self, path: str, body: dict[str, object]) -> dict[str, object]:
         request = Request(self.endpoint + path, data=json.dumps(body).encode("utf-8"), method="POST", headers=self._headers())
-        with urlopen(request, timeout=self.timeout_seconds) as response:
+        with self._open(request) as response:
             value = json.loads(response.read().decode("utf-8"))
         if not isinstance(value, dict):
             raise RuntimeError("local runtime returned an invalid response")
@@ -183,7 +198,7 @@ class LlamaCppRuntime:
 
     def health(self) -> dict[str, object]:
         request = Request(self.endpoint + "/health")
-        with urlopen(request, timeout=self.timeout_seconds) as response:
+        with self._open(request) as response:
             return {"ok": response.status < 400, "runtime": "llama.cpp", "localhost_only": True}
 
     def shutdown(self) -> None:
@@ -254,7 +269,16 @@ class ManagedLlamaCppRuntime:
         if any(value in protected for value in runtime_args):
             raise RuntimeError("model pack runtime_args may not override Project Brain local runtime controls")
         command.extend(runtime_args)
-        self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as error:
+            raise RuntimeError("pack-owned llama.cpp runtime failed to start") from error
         try:
             request_timeout_seconds = min(300.0, max(5.0, float(self.manifest.get("request_timeout_seconds") or 30.0)))
         except (TypeError, ValueError) as error:
@@ -264,8 +288,11 @@ class ManagedLlamaCppRuntime:
             api_key=key,
             timeout_seconds=request_timeout_seconds,
             input_suffix=str(self.manifest.get("input_suffix") or ""),
+            direct_loopback=True,
         )
         deadline = time.monotonic() + min(120.0, max(1.0, float(self.manifest.get("startup_timeout_seconds") or 30)))
+        health_transport_failed = False
+        health_unavailable = False
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 self.shutdown()
@@ -274,10 +301,16 @@ class ManagedLlamaCppRuntime:
                 if self.client.health().get("ok"):
                     return self.client
             except OSError:
-                pass
+                health_transport_failed = True
+            else:
+                health_unavailable = True
             time.sleep(0.05)
         self.shutdown()
-        raise RuntimeError("pack-owned llama.cpp runtime did not become healthy before timeout")
+        if health_unavailable:
+            raise RuntimeError("pack-owned llama.cpp runtime is alive but health endpoint did not become ready before startup timeout")
+        if health_transport_failed:
+            raise RuntimeError("pack-owned llama.cpp runtime health transport failed before startup timeout")
+        raise RuntimeError("pack-owned llama.cpp runtime start timed out before a health check")
 
     def embed(self, texts: list[str], instruction: str = "", dimension: int | None = None) -> list[list[float]]:
         for attempt in range(2):
@@ -715,6 +748,16 @@ def model_download_trust_status(settings: Settings) -> tuple[str, bool]:
     except (OSError, ssl.SSLError, ValueError) as error:
         return f"ERROR — {error}; TLS downloads will fail closed", False
     return f"OK — {source}; certificate and hostname verification enabled", True
+
+
+def managed_runtime_loopback_status() -> str:
+    """Report the fixed local-runtime proxy boundary without exposing proxy values."""
+    proxy_configured = any(
+        bool(os.environ.get(name))
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+    )
+    suffix = "; external proxy configuration detected" if proxy_configured else ""
+    return "OK — direct no-proxy transport enforced for pack-owned 127.0.0.1 runtime" + suffix
 
 
 def _open_model_download(settings: Settings, request: Request, timeout: float):

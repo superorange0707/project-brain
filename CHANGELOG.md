@@ -2,6 +2,20 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.6.6] - 2026-08-22
+
+### Fixed
+
+- Make health, embedding, and reranking calls to a verified, pack-owned
+  `llama.cpp` process use a dedicated direct transport to its fixed
+  `127.0.0.1` endpoint. Corporate proxy rules can no longer divert numeric
+  loopback requests while ordinary one-time GitHub model downloads retain
+  proxy-aware system-trust handling and all existing checksum gates.
+- Report the safe pack-runtime loopback boundary in `brain doctor`, including
+  only whether proxy configuration is present. Startup diagnostics now separate
+  process launch, early exit, unavailable health endpoint, and transport
+  failures without exposing proxy or certificate material.
+
 ## [0.6.5] - 2026-08-22
 
 ### Fixed

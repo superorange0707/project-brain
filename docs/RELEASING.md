@@ -6,6 +6,12 @@ Core release validation must also include the packaged `truststore` dependency:
 the standalone binary uses native macOS Keychain trust (and platform OpenSSL
 trust on Linux) for one-time verified model-pack downloads. Do not replace it
 with an insecure context or a Project Brain-managed corporate CA bundle.
+For an already-installed verified pack, separately smoke-test the Brain-owned
+`127.0.0.1` runtime boundary with enterprise proxy configuration present. Its
+health, embedding, and reranking calls must use direct loopback transport;
+remote descriptor/artifact downloads must remain proxy-aware and checksum-
+verified. Never solve a loopback proxy failure by changing global proxy settings
+or weakening TLS.
 
 ## Core release and Homebrew
 

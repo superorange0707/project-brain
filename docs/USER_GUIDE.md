@@ -39,7 +39,7 @@ same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.5"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.6"
 ```
 
 Upgrade later with:
@@ -51,7 +51,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.5"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.6"
 ```
 
 ### From a source checkout
@@ -1055,6 +1055,23 @@ contents are not reported by `brain doctor`. Project Brain still enforces the
 approved redirect hosts plus descriptor, release-part, and assembled-model
 SHA-256 checks. A missing, invalid, untrusted, or hostname-mismatched
 certificate fails closed.
+
+### Pack verification starts but cannot reach local runtime
+
+Corporate proxy configuration applies to the one-time HTTPS download, but not
+to Project Brain's own verified pack runtime. A managed pack is pinned to a
+short-lived `127.0.0.1` `llama.cpp` process and all its health, embedding, and
+reranking requests use dedicated direct loopback transport. This avoids the
+common policy where `localhost` bypasses a proxy but `127.0.0.1` does not; do
+not disable TLS or change global proxy settings, and `NO_PROXY` is not required.
+
+Run `brain doctor` to confirm that direct loopback enforcement is active. It
+reports only whether external proxy configuration is present, never proxy URLs,
+credentials, certificate material, or environment values. A startup error also
+distinguishes an executable that failed to start, one that exited, an alive
+runtime with an unavailable health endpoint, and a loopback transport failure.
+GitHub release descriptor and artifact downloads continue to use configured
+enterprise proxy policy plus the verified system-trust and SHA-256 checks above.
 
 ## 15. Updating and uninstalling
 
