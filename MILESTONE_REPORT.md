@@ -1,6 +1,6 @@
 # Project Brain milestone readiness report
 
-**Snapshot:** 2026-08-22 · **Core release candidate:** 0.6.6 (pack-owned loopback proxy compatibility; publication pending)
+**Snapshot:** 2026-08-22 · **Published Core release:** 0.6.6 (pack-owned loopback proxy compatibility)
 
 This report separates completed, locally tested engineering from validations
 that must run later on the target machine or private local data. It contains no
@@ -56,25 +56,25 @@ brain model autotune PACK --latency-budget-ms 3000
 
 | Item | Status | What remains |
 | --- | --- | --- |
-| Official Qwen3-Reranker-4B Q6_K Precision pack | COMPLETE | Public `precision-pack-v1.0.2` contains the official-source-derived Q6_K GGUF (SHA-256 `2fd4a7bbb61400e65bb3849f8d367759232be2206e1bb467b2b3d7ff42e79aeb`), Apache-2.0 notices, provenance, pinned local runtime, and public/synthetic official-reference conformance. Its descriptor SHA-256 is `9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`; Core `v0.6.5` pins the catalog entry. |
-| Official Qwen3-Embedding-4B Q6_K Semantic pack | COMPLETE | Public `semantic-pack-v1.0.6` contains the unchanged official Q6_K GGUF, provenance, notices, static local runtime, checksums, and public/synthetic conformance. A clean temporary installation verified the published descriptor, parts, assembled GGUF, runtime conformance, and a 583-card persistent USearch refresh. Core `v0.6.5` pins descriptor SHA-256 `cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`. |
+| Official Qwen3-Reranker-4B Q6_K Precision pack | COMPLETE | Public `precision-pack-v1.0.2` contains the official-source-derived Q6_K GGUF (SHA-256 `2fd4a7bbb61400e65bb3849f8d367759232be2206e1bb467b2b3d7ff42e79aeb`), Apache-2.0 notices, provenance, pinned local runtime, and public/synthetic official-reference conformance. Its descriptor SHA-256 is `9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`; Core `v0.6.6` pins the catalog entry. |
+| Official Qwen3-Embedding-4B Q6_K Semantic pack | COMPLETE | Public `semantic-pack-v1.0.6` contains the unchanged official Q6_K GGUF, provenance, notices, static local runtime, checksums, and public/synthetic conformance. A clean temporary installation verified the published descriptor, parts, assembled GGUF, runtime conformance, and a 583-card persistent USearch refresh. Core `v0.6.6` pins descriptor SHA-256 `cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`. |
 | Enterprise model-download TLS compatibility | COMPLETE | Core `v0.6.5` packages `truststore`, uses native system trust for model downloads, preserves certificate/hostname validation and SHA-256 gates, supports additive `models.ca_bundle`/`SSL_CERT_FILE`, and reports only safe trust-mode diagnostics. Public release-descriptor, clean wheel, standalone, and Homebrew smoke checks passed. |
-| Pack-owned runtime proxy compatibility | COMPLETE | The `v0.6.6` candidate restricts direct no-proxy HTTP transport to verified Project Brain-managed `127.0.0.1` llama.cpp processes. Public/synthetic fake-proxy coverage confirms health, embedding, and rerank calls never reach the proxy, while one-time remote pack downloads remain standard proxy-eligible system-trust requests. Target-machine validation requires only installing the released Core update; existing packs need not be reinstalled. |
+| Pack-owned runtime proxy compatibility | COMPLETE | Core `v0.6.6` restricts direct no-proxy HTTP transport to verified Project Brain-managed `127.0.0.1` llama.cpp processes. Public/synthetic fake-proxy coverage and clean-wheel Semantic/Precision conformance smoke tests with an unusable proxy and empty `NO_PROXY` confirm health, embedding, and rerank calls do not use the proxy, while one-time remote pack downloads remain standard proxy-eligible system-trust requests. Target-machine validation requires only installing the released Core update; existing packs need not be reinstalled. |
 | Company model approval | EXTERNAL POLICY DECISION | The organization chooses which official-source artifact is approved. Project Brain has no bypass mechanism and remains useful as Core without it. |
 | Apple M3 Pro / 36 GB measurements | DEFERRED TO TARGET MACHINE | Run the supplied local commands to record embedding p50/p95, batch throughput, 10/20/40/80 rerank latency, retrieval timing, and process/child peak memory. No unverified M3 numbers are claimed here. |
 | Linux x86_64 measurements | DEFERRED TO TARGET MACHINE | Run the same local benchmark commands on the selected Linux host. |
 | Time-split ticket replay and real enterprise Recall/MRR/nDCG | DEFERRED TO PRIVATE LOCAL DATA | Use the existing local golden/replay and historical Git evaluation infrastructure with private labels retained on the work machine. No private corpus is requested or committed. |
 | Public GitHub v0.6.1 release and Homebrew upgrade | COMPLETE | v0.6.1 is published. The official tap points at its final four-platform SHA-256 artifacts; `brew update`, a real 0.6.0→0.6.1 upgrade, formula test, and strict online audit have passed. |
 | Public GitHub v0.6.5 Core release | COMPLETE | The public GitHub Release contains final checksum-published wheel/sdist and four standalone assets. GitHub Actions passed Python 3.11–3.14 with the Semantic extra and all four standalone build gates. The official tap was rendered from its published SHA256SUMS, strictly audited, and a real 0.6.4→0.6.5 Homebrew upgrade plus formula test passed. |
+| Public GitHub v0.6.6 Core release | COMPLETE | `v0.6.6` is published from commit `429e9214bb0343a0356fd8bf3360883f6ae0c8e0` with final GitHub release SHA256SUMS for wheel, sdist, and four standalone assets. GitHub Actions passed the public/synthetic distribution suite and all macOS/Linux ARM/AMD standalone builds. The official tap commit `806f1d3` was rendered exclusively from that published SHA256SUMS; strict audit, a real 0.6.5→0.6.6 upgrade, and formula test passed. |
 
 ## Publication state audit
 
-- `v0.6.5` is the current published Core release; `v0.6.6` is a publication-pending
-  Core candidate. The published formula was
-  rendered only from final GitHub Release SHA-256 values; `brew update`, strict
-  audit, a real 0.6.4→0.6.5 upgrade, and formula test passed. The `v0.6.2` tag
-  was never released: its CI/release-workflow defects were discovered before
-  any artifact or tap mutation.
+- `v0.6.6` is the current published Core release. Its official Homebrew formula
+  was rendered only from final GitHub Release SHA-256 values; `brew update`,
+  strict audit, a real 0.6.5→0.6.6 upgrade, and formula test passed. The
+  `v0.6.2` tag was never released: its CI/release-workflow defects were
+  discovered before any artifact or tap mutation.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.
 - The Semantic pack's packaging download is a release-engineering operation
