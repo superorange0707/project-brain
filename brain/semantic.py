@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from http.client import HTTPException
 import json
 import math
 import os
@@ -9,8 +10,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable
+from urllib.error import URLError
 
-from .models import active_pack, embedding_batch_size, runtime_for_pack
+from .models import active_pack, embedding_batch_size, embedding_request_bytes, runtime_for_pack
 
 if TYPE_CHECKING:
     from .core import Repository, Settings
@@ -27,7 +29,15 @@ DEPENDENCY_LOCK_NAMES = {"uv.lock", "poetry.lock", "package-lock.json", "yarn.lo
 SEMANTIC_CHILD_LINES = 80
 SEMANTIC_CARD_CODE_CHARS = 2_048
 SEMANTIC_IDENTIFIER_CHARS = 256
-SEMANTIC_EMBEDDING_BATCH_CHARS = 4_096
+# These limits apply to the whole model input and the exact UTF-8 JSON request
+# body, not merely to the source-code section of a semantic card.  They protect
+# the pack-owned local runtime from an oversized request while keeping the
+# autotuned item count as a separate, additional bound.
+SEMANTIC_MAX_CARD_INPUT_BYTES = 8_192
+SEMANTIC_MAX_REQUEST_BODY_BYTES = 24_576
+# Invalidates pre-request-bounding cache/state entries without changing the
+# model-pack card schema contract.
+SEMANTIC_EMBEDDING_INPUT_VERSION = "2"
 SYMBOL = re.compile(r"(?m)^\s*(?:class|interface|record|enum|def|function|fun|func)\s+([A-Za-z_$][\w$]*)")
 
 
@@ -41,6 +51,10 @@ class Chunk:
     kind: str
     symbol: str
     card: str
+
+
+class SemanticEmbeddingError(RuntimeError):
+    """A sanitized semantic-indexing failure safe for CLI diagnostics."""
 
 
 def _excluded(path: Path, content: bytes) -> bool:
@@ -111,28 +125,157 @@ def _usearch() -> tuple[Any, Any] | None:
     return Index, numpy
 
 
-def _bounded_embedding_batches(chunks: list[Chunk], indexes: list[int], batch_size: int) -> Iterable[list[int]]:
-    """Keep model requests bounded by both candidate count and card input size."""
+def _card_input_bytes(card: str, *, document_instruction: str, input_suffix: str) -> int:
+    return len((document_instruction + card + input_suffix).encode("utf-8"))
+
+
+def _bounded_semantic_card(
+    card: str,
+    *,
+    document_instruction: str = "",
+    input_suffix: str = "",
+    dimension: int | None = None,
+) -> str:
+    """Keep identity metadata intact while deterministically trimming only code."""
+    def fits(value: str) -> bool:
+        return (
+            _card_input_bytes(value, document_instruction=document_instruction, input_suffix=input_suffix) <= SEMANTIC_MAX_CARD_INPUT_BYTES
+            and embedding_request_bytes([value], instruction=document_instruction, input_suffix=input_suffix, dimension=dimension) <= SEMANTIC_MAX_REQUEST_BODY_BYTES
+        )
+
+    if fits(card):
+        return card
+    prefix, separator, code = card.partition("\nCode:\n")
+    if not separator:
+        raise SemanticEmbeddingError(
+            "semantic embedding card metadata exceeds the safe model/request bound: "
+            f"max_card_chars={len(card)} request_bytes={embedding_request_bytes([card], instruction=document_instruction, input_suffix=input_suffix, dimension=dimension)}"
+        )
+    prefix += separator
+    if not fits(prefix):
+        # Repository/path/symbol metadata must never be silently trimmed.  A
+        # malformed or pathological identity is therefore a safe hard failure.
+        raise SemanticEmbeddingError(
+            "semantic embedding card metadata exceeds the safe model/request bound: "
+            f"max_card_chars={len(card)} request_bytes={embedding_request_bytes([prefix], instruction=document_instruction, input_suffix=input_suffix, dimension=dimension)}"
+        )
+    marker = "\n[semantic card code truncated]"
+    lower, upper = 0, len(code)
+    while lower < upper:
+        middle = (lower + upper + 1) // 2
+        candidate = prefix + code[:middle]
+        if middle < len(code):
+            candidate += marker
+        if fits(candidate):
+            lower = middle
+        else:
+            upper = middle - 1
+    bounded = prefix + code[:lower]
+    if lower < len(code) and fits(bounded + marker):
+        bounded += marker
+    return bounded
+
+
+def _request_bytes(
+    indexes: list[int],
+    cards: list[str],
+    *,
+    document_instruction: str,
+    input_suffix: str,
+    dimension: int | None,
+) -> int:
+    return embedding_request_bytes(
+        [cards[index] for index in indexes],
+        instruction=document_instruction,
+        input_suffix=input_suffix,
+        dimension=dimension,
+    )
+
+
+def _bounded_embedding_batches(
+    chunks: list[Chunk],
+    indexes: list[int],
+    batch_size: int,
+    *,
+    cards: list[str] | None = None,
+    document_instruction: str = "",
+    input_suffix: str = "",
+    dimension: int | None = None,
+) -> Iterable[list[int]]:
+    """Keep requests within the tuned count and exact serialized-byte ceilings."""
+    cards = cards or [chunk.card for chunk in chunks]
     cursor = 0
     while cursor < len(indexes):
         batch: list[int] = []
-        chars = 0
         while cursor < len(indexes) and len(batch) < batch_size:
             index = indexes[cursor]
-            card_chars = len(chunks[index].card)
-            if batch and chars + card_chars > SEMANTIC_EMBEDDING_BATCH_CHARS:
+            request_bytes = _request_bytes(
+                [index], cards, document_instruction=document_instruction, input_suffix=input_suffix, dimension=dimension
+            )
+            if request_bytes > SEMANTIC_MAX_REQUEST_BODY_BYTES:
+                raise SemanticEmbeddingError(
+                    "semantic embedding card exceeds the safe request-body bound: "
+                    f"max_card_chars={len(cards[index])} request_bytes={request_bytes}"
+                )
+            if batch and _request_bytes(
+                [*batch, index], cards, document_instruction=document_instruction, input_suffix=input_suffix, dimension=dimension
+            ) > SEMANTIC_MAX_REQUEST_BODY_BYTES:
                 break
             batch.append(index)
-            chars += card_chars
             cursor += 1
         yield batch
 
 
-def _cache_vectors(settings: Settings, pack_id: str, chunks: list[Chunk], *, dimension: int, embed: Callable[[list[str]], list[list[float]]], batch_size: int = 0) -> list[list[float]]:
+def _transport_error(error: Exception) -> bool:
+    return isinstance(error, (OSError, HTTPException, URLError))
+
+
+def _embedding_failure(
+    batch: list[int],
+    cards: list[str],
+    *,
+    batch_size: int,
+    document_instruction: str,
+    input_suffix: str,
+    dimension: int,
+) -> SemanticEmbeddingError:
+    return SemanticEmbeddingError(
+        "semantic embedding failed after managed-runtime restart: "
+        f"batch={batch_size} cards={len(batch)} max_card_chars={max(len(cards[index]) for index in batch)} "
+        f"request_bytes={_request_bytes(batch, cards, document_instruction=document_instruction, input_suffix=input_suffix, dimension=dimension)}"
+    )
+
+
+def _cache_vectors(
+    settings: Settings,
+    pack_id: str,
+    chunks: list[Chunk],
+    *,
+    dimension: int,
+    embed: Callable[[list[str]], list[list[float]]],
+    batch_size: int = 0,
+    document_instruction: str = "",
+    input_suffix: str = "",
+    restart: Callable[[], None] | None = None,
+) -> list[list[float]]:
     """Reuse vectors by stable chunk identity without persisting query/source text."""
     from .catalog import connect
 
-    keys = [hashlib.sha256(f"{pack_id}\0{dimension}\0{chunk.chunk_id}".encode("utf-8")).hexdigest() for chunk in chunks]
+    cards = [
+        _bounded_semantic_card(
+            chunk.card, document_instruction=document_instruction, input_suffix=input_suffix, dimension=dimension
+        )
+        for chunk in chunks
+    ]
+    # Cache the exact, bounded document sent to the model rather than only the
+    # source chunk identity.  This prevents a pre-bound card or changed pack
+    # instruction from being reused as if it were current evidence.
+    keys = [
+        hashlib.sha256(
+            f"{pack_id}\0{dimension}\0{SEMANTIC_EMBEDDING_INPUT_VERSION}\0{document_instruction}\0{card}\0{input_suffix}".encode("utf-8")
+        ).hexdigest()
+        for card in cards
+    ]
     vectors: list[list[float] | None] = [None] * len(chunks)
     connection = connect(settings)
     try:
@@ -154,17 +297,40 @@ def _cache_vectors(settings: Settings, pack_id: str, chunks: list[Chunk], *, dim
             missing.append(index)
         if missing:
             batch_size = max(1, batch_size or len(missing))
-            for batch in _bounded_embedding_batches(chunks, missing, batch_size):
-                computed = embed([chunks[index].card for index in batch])
-                if len(computed) != len(batch) or any(len(vector) != dimension for vector in computed):
-                    raise RuntimeError("embedding runtime returned an unexpected vector dimension")
-                for index, vector in zip(batch, computed, strict=True):
-                    normalized = [float(number) for number in vector]
-                    vectors[index] = normalized
-                    connection.execute(
-                        "INSERT OR REPLACE INTO embedding_cache(cache_key, pack_id, dimension, vector_json, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (keys[index], pack_id, dimension, json.dumps(normalized, separators=(",", ":")), used_at, used_at),
-                    )
+            for batch in _bounded_embedding_batches(
+                chunks, missing, batch_size, cards=cards, document_instruction=document_instruction, input_suffix=input_suffix, dimension=dimension
+            ):
+                pending = [batch]
+                while pending:
+                    current = pending.pop(0)
+                    try:
+                        computed = embed([cards[index] for index in current])
+                    except Exception as error:
+                        if not _transport_error(error):
+                            raise
+                        if restart is not None:
+                            restart()
+                        if len(current) == 1:
+                            raise _embedding_failure(
+                                current, cards, batch_size=batch_size, document_instruction=document_instruction,
+                                input_suffix=input_suffix, dimension=dimension,
+                            ) from error
+                        middle = len(current) // 2
+                        pending[0:0] = [current[:middle], current[middle:]]
+                        continue
+                    if len(computed) != len(current) or any(len(vector) != dimension for vector in computed):
+                        raise RuntimeError("embedding runtime returned an unexpected vector dimension")
+                    for index, vector in zip(current, computed, strict=True):
+                        normalized = [float(number) for number in vector]
+                        vectors[index] = normalized
+                        connection.execute(
+                            "INSERT OR REPLACE INTO embedding_cache(cache_key, pack_id, dimension, vector_json, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)",
+                            (keys[index], pack_id, dimension, json.dumps(normalized, separators=(",", ":")), used_at, used_at),
+                        )
+                    # Successful sub-batches survive a later transport failure;
+                    # vector cache entries are content-addressed and are not a
+                    # semantic-index publication.
+                    connection.commit()
             connection.execute(
                 "DELETE FROM embedding_cache WHERE cache_key NOT IN (SELECT cache_key FROM embedding_cache ORDER BY last_used_at DESC, cache_key DESC LIMIT 100000)"
             )
@@ -189,6 +355,107 @@ def _chunk_groups(repo: Repository) -> list[Chunk]:
     return chunks
 
 
+def _entries(chunks: list[Chunk]) -> list[dict[str, object]]:
+    return [
+        {"path": chunk.path, "line": chunk.start_line, "end_line": chunk.end_line, "chunk_id": chunk.chunk_id, "kind": chunk.kind, "symbol": chunk.symbol}
+        for chunk in chunks
+    ]
+
+
+def _published_state(settings: Settings) -> dict[str, object] | None:
+    try:
+        state = json.loads(_state_path(settings).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _state_is_reusable(
+    state: dict[str, object] | None,
+    groups: list[tuple[Repository, str, list[Chunk]]],
+    *,
+    backend: str,
+    pack_id: str,
+    dimension: int,
+) -> bool:
+    if (
+        not state
+        or state.get("stale")
+        or state.get("chunk_schema_version") != CHUNK_SCHEMA_VERSION
+        or state.get("card_version") != CARD_VERSION
+        or state.get("embedding_input_version") != SEMANTIC_EMBEDDING_INPUT_VERSION
+    ):
+        return False
+    if state.get("backend") != backend or state.get("pack_id") != pack_id or int(state.get("dimension") or 0) != dimension:
+        return False
+    expected = {(repo.name, snapshot): _entries(chunks) for repo, snapshot, chunks in groups if chunks}
+    if backend == "exact-mock":
+        actual: dict[tuple[str, str], list[dict[str, object]]] = {}
+        for item in state.get("entries") or []:
+            if not isinstance(item, dict):
+                return False
+            repo, snapshot = str(item.get("repo") or ""), str(item.get("snapshot") or "")
+            entry = {key: item.get(key) for key in ("path", "line", "end_line", "chunk_id", "kind", "symbol")}
+            actual.setdefault((repo, snapshot), []).append(entry)
+        return actual == expected
+    actual = {}
+    for shard in state.get("shards") or []:
+        if not isinstance(shard, dict) or not Path(str(shard.get("path") or "")).is_file():
+            return False
+        actual[(str(shard.get("repo") or ""), str(shard.get("snapshot") or ""))] = shard.get("entries")
+    return actual == expected
+
+
+def _state_result(state: dict[str, object]) -> dict[str, object]:
+    return {
+        "chunks": len(state.get("entries") or []) + sum(len(shard.get("entries") or []) for shard in state.get("shards") or [] if isinstance(shard, dict)),
+        "backend": state.get("backend"),
+        "pack_id": state.get("pack_id"),
+        "stale": False,
+    }
+
+
+def _atomic_state_write(path: Path, state: dict[str, object]) -> None:
+    """Publish one complete semantic generation without exposing a partial state."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.building")
+    try:
+        temporary.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _probe_embedding_dimension(
+    embed: Callable[[list[str]], list[list[float]]],
+    card: str,
+    *,
+    document_instruction: str,
+    input_suffix: str,
+    restart: Callable[[], None] | None,
+) -> int:
+    bounded = _bounded_semantic_card(card, document_instruction=document_instruction, input_suffix=input_suffix)
+    for attempt in range(2):
+        try:
+            probe = embed([bounded])
+        except Exception as error:
+            if not _transport_error(error):
+                raise
+            if restart is not None:
+                restart()
+            if attempt:
+                raise SemanticEmbeddingError(
+                    "semantic embedding failed after managed-runtime restart: "
+                    f"batch=1 cards=1 max_card_chars={len(bounded)} "
+                    f"request_bytes={_request_bytes([0], [bounded], document_instruction=document_instruction, input_suffix=input_suffix, dimension=None)}"
+                ) from error
+            continue
+        if len(probe) != 1 or not probe[0]:
+            raise RuntimeError("mock embedding returned no vector")
+        return len(probe[0])
+    raise AssertionError("unreachable")
+
+
 def build_semantic_index(
     settings: Settings,
     *,
@@ -211,43 +478,57 @@ def build_semantic_index(
         if dimension <= 0:
             raise RuntimeError("embedding pack must declare embedding_dimension")
         document_instruction = str(manifest.get("document_instruction") or "")
+        input_suffix = str(manifest.get("input_suffix") or "")
         embed = lambda cards: runtime.embed(cards, instruction=document_instruction, dimension=dimension)
     else:
         pack_id = pack_id or "mock"
         dimension = 0
+        document_instruction = ""
+        input_suffix = ""
     try:
         backend = _usearch() if manifest is not None else None
         if backend is None and manifest is not None:
             raise RuntimeError("USearch is required for Semantic Edition; install `project-brain-context[semantic]`")
 
+        backend_name = "usearch" if backend is not None else "exact-mock"
+        groups = [(repo, repo.source_sha or "working-tree", _chunk_groups(repo)) for repo in settings.repositories]
+        published = _published_state(settings)
+        if not dimension and published and published.get("pack_id") == pack_id:
+            dimension = int(published.get("dimension") or 0)
+        if dimension and _state_is_reusable(
+            published, groups, backend=backend_name, pack_id=pack_id, dimension=dimension,
+        ):
+            return _state_result(published)
+
         state_shards: list[dict[str, object]] = []
         all_mock_entries: list[dict[str, object]] = []
         shard_root = _shard_root(settings)
         shard_root.mkdir(parents=True, exist_ok=True)
-        for repo in settings.repositories:
-            snapshot = repo.source_sha or "working-tree"
-            chunks = _chunk_groups(repo)
+        generation_id = hashlib.sha256(f"{pack_id}\0{time.time_ns()}\0{os.getpid()}".encode()).hexdigest()
+        for repo, snapshot, chunks in groups:
             if not chunks:
                 continue
             if not dimension:
-                probe = embed([chunks[0].card])
-                if len(probe) != 1 or not probe[0]:
-                    raise RuntimeError("mock embedding returned no vector")
-                dimension = len(probe[0])
-                vectors = _cache_vectors(settings, pack_id, chunks, dimension=dimension, embed=embed, batch_size=embedding_batch_size(settings, pack_id))
-            else:
-                vectors = _cache_vectors(settings, pack_id, chunks, dimension=dimension, embed=embed, batch_size=embedding_batch_size(settings, pack_id))
-            entries = [
-                {"path": chunk.path, "line": chunk.start_line, "end_line": chunk.end_line, "chunk_id": chunk.chunk_id, "kind": chunk.kind, "symbol": chunk.symbol}
-                for chunk in chunks
-            ]
+                dimension = _probe_embedding_dimension(
+                    embed, chunks[0].card, document_instruction=document_instruction, input_suffix=input_suffix,
+                    restart=runtime.shutdown if runtime is not None else None,
+                )
+            vectors = _cache_vectors(
+                settings, pack_id, chunks, dimension=dimension, embed=embed, batch_size=embedding_batch_size(settings, pack_id),
+                document_instruction=document_instruction, input_suffix=input_suffix,
+                restart=runtime.shutdown if runtime is not None else None,
+            )
+            entries = _entries(chunks)
             if backend is None:
                 all_mock_entries.extend([{**entry, "repo": repo.name, "snapshot": snapshot, "vector": vector} for entry, vector in zip(entries, vectors, strict=True)])
                 continue
             Index, numpy = backend
             index = Index(ndim=dimension, metric="cos", dtype="f16")
             index.add(numpy.arange(len(vectors), dtype=numpy.uint64), numpy.asarray(vectors, dtype=numpy.float32))
-            shard_identity = f"{repo.name}\0{snapshot}\0{pack_id}"
+            # A shard is never overwritten in place.  The old state continues
+            # to point at its immutable generation until every new shard has
+            # been built and the state pointer is atomically replaced.
+            shard_identity = f"{repo.name}\0{snapshot}\0{pack_id}\0{generation_id}"
             shard = shard_root / f"{hashlib.sha256(shard_identity.encode()).hexdigest()}.usearch"
             temporary = shard.with_suffix(".building")
             index.save(str(temporary))
@@ -260,19 +541,19 @@ def build_semantic_index(
             "backend": "usearch" if backend is not None else "exact-mock",
             "pack_id": pack_id,
             "dimension": dimension,
+            "embedding_input_version": SEMANTIC_EMBEDDING_INPUT_VERSION,
             "stale": False,
             "shards": state_shards,
             "entries": all_mock_entries,
         }
-        settings.state_dir.mkdir(parents=True, exist_ok=True)
-        _state_path(settings).write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
+        _atomic_state_write(_state_path(settings), state)
         # Only the current snapshot can be queried.  Old immutable shards have no
         # session dependency after their evidence was materialized, so trim them.
         keep = {Path(str(shard["path"])).resolve() for shard in state_shards}
         for stale in shard_root.glob("*.usearch"):
             if stale.resolve() not in keep:
                 stale.unlink(missing_ok=True)
-        return {"chunks": sum(len(shard["entries"]) for shard in state_shards) + len(all_mock_entries), "backend": state["backend"], "pack_id": pack_id, "stale": False}
+        return _state_result(state)
     finally:
         if runtime is not None:
             runtime.shutdown()

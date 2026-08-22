@@ -136,7 +136,7 @@ Download the archive for your CPU from the
 extract it, and place all four executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.6.6-macos-arm64.tar.gz
+tar -xzf project-brain-v0.6.7-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp zoekt zoekt-index ~/.local/bin/
 ```
@@ -147,19 +147,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.6"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.7"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.6"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.7"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.6/project_brain_context-0.6.6-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.7/project_brain_context-0.6.7-py3-none-any.whl
 ```
 
 Then verify:

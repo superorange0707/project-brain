@@ -1,6 +1,6 @@
 # Project Brain milestone readiness report
 
-**Snapshot:** 2026-08-22 · **Published Core release:** 0.6.6 (pack-owned loopback proxy compatibility)
+**Snapshot:** 2026-08-23 · **Release candidate:** 0.6.7 (semantic indexing workload robustness) · **Published Core release:** 0.6.6
 
 This report separates completed, locally tested engineering from validations
 that must run later on the target machine or private local data. It contains no
@@ -21,7 +21,7 @@ intentional local-only validation steps, not engineering blockers.
 | M01–M03 | COMPLETE | Typed requests/planner/ranker seams, candidate-first ranking, duplicate/interval merging, exact verification, diversity limits, strict hydration budgets, backend timings, and expansion manifests. |
 | M04–M06 | COMPLETE | SQLite catalog migration, immutable generation pointer, Git-blob-aware updates, selected-ref freshness, pinned sessions, refresh fallback, and source-pinned Zoekt shard/query smoke coverage. |
 | M07–M08 | COMPLETE | Persisted structural/history/relationship reuse, progressive cost-based plans, deterministic feature ranking, reciprocal-rank fusion, and explainable plans. |
-| M09–M12 | COMPLETE | Deterministic structural semantic cards, snapshot-filtered USearch shards, content-addressed embedding cache, verified-pack selection, batch-bounded embedding, and Core fallback. |
+| M09–M12 | COMPLETE | Deterministic structural semantic cards, snapshot-filtered USearch shards, content-addressed bounded-input embedding cache, verified-pack selection, exact UTF-8/JSON request limits, deterministic code-only truncation, adaptive managed-runtime restart/smaller-batch recovery, atomic semantic-generation publication, unchanged-generation reuse, and Core fallback. |
 | M10–M14 | COMPLETE | Local-only llama.cpp adapter, checksum/provenance manifest, pack-owned loopback lifecycle, conformance gates for official-reference vectors/order/long input/batch parity, bounded protected reranking, 10/20/40/80 public-synthetic reranker benchmarks, per-pack autotuning, and Semantic/Precision-to-Core fallback. |
 | M15 | COMPLETE | One Core codebase with capability profiles, schema incompatibility recovery guidance, controlled local/GitHub-Release/approved-internal pack installation, wheel/sdist build, notices, source-pinned Zoekt release workflow, and a descriptor-pinned official Semantic-pack catalog entry. |
 | M16 | COMPLETE | Status/freshness/storage/GC/watch/benchmark/explain commands, pinned-artifact GC protection, pre-write disk guard, local machine-profile capture, and machine-readable model tuning profile. |
@@ -29,7 +29,7 @@ intentional local-only validation steps, not engineering blockers.
 
 ## Completed local verification for this snapshot
 
-The full local regression suite (public/synthetic tests for this candidate) covers deterministic retrieval, generations,
+The full local regression suite (104 public/synthetic tests for this candidate) covers deterministic retrieval, generations,
 incremental indexes, semantic/reranker failure fallback, corrupt local state,
 pack tampering, production-manifest provenance, public synthetic conformance,
 machine-profile privacy, low-disk preflight, UI loopback protection, release
@@ -60,6 +60,8 @@ brain model autotune PACK --latency-budget-ms 3000
 | Official Qwen3-Embedding-4B Q6_K Semantic pack | COMPLETE | Public `semantic-pack-v1.0.6` contains the unchanged official Q6_K GGUF, provenance, notices, static local runtime, checksums, and public/synthetic conformance. A clean temporary installation verified the published descriptor, parts, assembled GGUF, runtime conformance, and a 583-card persistent USearch refresh. Core `v0.6.6` pins descriptor SHA-256 `cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc`. |
 | Enterprise model-download TLS compatibility | COMPLETE | Core `v0.6.5` packages `truststore`, uses native system trust for model downloads, preserves certificate/hostname validation and SHA-256 gates, supports additive `models.ca_bundle`/`SSL_CERT_FILE`, and reports only safe trust-mode diagnostics. Public release-descriptor, clean wheel, standalone, and Homebrew smoke checks passed. |
 | Pack-owned runtime proxy compatibility | COMPLETE | Core `v0.6.6` restricts direct no-proxy HTTP transport to verified Project Brain-managed `127.0.0.1` llama.cpp processes. Public/synthetic fake-proxy coverage plus clean-wheel and Homebrew Semantic/Precision conformance smoke tests with an unusable proxy and empty `NO_PROXY` confirm health, embedding, and rerank calls do not use the proxy, while one-time remote pack downloads remain standard proxy-eligible system-trust requests. Target-machine validation requires only installing the released Core update; existing packs need not be reinstalled. |
+| Semantic refresh workload robustness | COMPLETE | The `v0.6.7` candidate bounds each complete embedding input and exact UTF-8 JSON body, preserves structural identity while trimming code, retries transport-disconnected batches with deterministic reduction, commits only successful content-addressed cache entries, and atomically switches semantic shards/state only after a complete build. Public/synthetic conformance covers multilingual/escaped cards, instructions/suffixes, tuned 16-item ceilings, 16→8→4→2→1 degradation, prior-generation retention, and identical-refresh reuse. |
+| Public GitHub v0.6.7 Core release | IN PROGRESS | Publication is authorized. The final tag, GitHub assets/checksums, platform workflow results, and Homebrew outcome are recorded only after they are independently verified. |
 | Company model approval | EXTERNAL POLICY DECISION | The organization chooses which official-source artifact is approved. Project Brain has no bypass mechanism and remains useful as Core without it. |
 | Apple M3 Pro / 36 GB measurements | DEFERRED TO TARGET MACHINE | Run the supplied local commands to record embedding p50/p95, batch throughput, 10/20/40/80 rerank latency, retrieval timing, and process/child peak memory. No unverified M3 numbers are claimed here. |
 | Linux x86_64 measurements | DEFERRED TO TARGET MACHINE | Run the same local benchmark commands on the selected Linux host. |

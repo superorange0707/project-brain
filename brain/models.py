@@ -88,6 +88,19 @@ MODEL_DOWNLOAD_TLS_ERROR = (
 _MANAGED_LOOPBACK_OPENER = build_opener(ProxyHandler({}))
 
 
+def _json_request_bytes(body: dict[str, object]) -> bytes:
+    """Serialize a local-runtime request once so size checks match the POST."""
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def embedding_request_bytes(texts: list[str], *, instruction: str = "", input_suffix: str = "", dimension: int | None = None) -> int:
+    """Return the exact UTF-8 JSON request-body size for an embedding batch."""
+    payload: dict[str, object] = {"input": [instruction + text + input_suffix for text in texts]}
+    if dimension:
+        payload["dimensions"] = dimension
+    return len(_json_request_bytes(payload))
+
+
 def _version(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in value.split(".") if part.isdigit())
 
@@ -162,7 +175,7 @@ class LlamaCppRuntime:
         return urlopen(request, timeout=self.timeout_seconds)
 
     def _post(self, path: str, body: dict[str, object]) -> dict[str, object]:
-        request = Request(self.endpoint + path, data=json.dumps(body).encode("utf-8"), method="POST", headers=self._headers())
+        request = Request(self.endpoint + path, data=_json_request_bytes(body), method="POST", headers=self._headers())
         with self._open(request) as response:
             value = json.loads(response.read().decode("utf-8"))
         if not isinstance(value, dict):

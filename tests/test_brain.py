@@ -732,7 +732,7 @@ else:
 
     def test_semantic_embedding_batches_bound_card_count_and_total_input(self) -> None:
         chunks = [Chunk(str(index), "blob", "path", 1, 1, "file", "file", "x" * size) for index, size in enumerate((2_500, 2_500, 1_500, 1_500))]
-        self.assertEqual([[0], [1, 2], [3]], list(_bounded_embedding_batches(chunks, [0, 1, 2, 3], 8)))
+        self.assertEqual([[0, 1, 2, 3]], list(_bounded_embedding_batches(chunks, [0, 1, 2, 3], 8)))
         self.assertEqual([[2, 3]], list(_bounded_embedding_batches(chunks, [2, 3], 2)))
 
     def test_local_test_model_pack_is_verified_before_semantic_edition(self) -> None:

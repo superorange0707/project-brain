@@ -352,6 +352,15 @@ refresh completes with Core and reports the Semantic warning. Precision becomes
 available after the separately verified reranker pack is installed; otherwise it
 automatically falls back to Semantic or Core.
 
+Semantic refresh sends bounded requests: the complete document instruction,
+semantic card, input suffix, UTF-8 encoding, and JSON escaping are all included
+in its limits. A pathological card keeps its repository/path/symbol metadata
+and deterministically trims only code. If a verified local runtime disconnects,
+Brain restarts it and retries smaller bounded batches before reporting a safe
+size-only diagnostic. A failed rebuild leaves the prior published semantic
+generation active; successful cached embeddings are retained for the next
+local refresh.
+
 The manifest records model/revision/license/runtime/checksum provenance. Every
 production embedding or reranker pack must include a hash-pinned local JSON
 `golden_suite` (also listed in `artifacts`); `brain model verify` runs it before
