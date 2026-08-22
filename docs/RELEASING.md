@@ -49,9 +49,10 @@ Do not add an entry to the Core catalog until a clean temporary installation
 also verifies the packaged local runtime can start and complete its golden
 suite.
 
-No release workflow claims target-machine latency, M3 Pro memory usage, private
-ticket replay quality, or Precision capability until those local validations
-exist.
+No release workflow claims target-machine latency, M3 Pro memory usage, or
+private-ticket replay quality until those local validations exist. A verified
+Precision pack is an offline capability; its target-machine performance and
+private-local-data quality remain separate measurements.
 
 ## Precision model-pack release
 

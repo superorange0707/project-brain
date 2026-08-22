@@ -591,7 +591,7 @@ def execute(args: argparse.Namespace) -> int:
             print(json.dumps(installed_packs(settings), indent=2))
         elif args.action == "install":
             if not args.value:
-                raise BrainError("brain model install requires semantic, a local pack path, or an approved HTTPS release URL")
+                raise BrainError("brain model install requires an official pack alias, a local pack path, or an approved HTTPS release URL")
             if args.value.lower() in OFFICIAL_PACKS:
                 print(json.dumps(install_official_pack(settings, args.value), indent=2))
             elif args.value.startswith("https://"):

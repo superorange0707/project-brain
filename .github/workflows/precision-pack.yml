@@ -19,7 +19,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          # sentencepiece 0.2.0 has a supported macOS ARM wheel for this
+          # reproducible converter environment; Python 3.13 would force an
+          # unnecessary source build before any model conversion starts.
+          python-version: "3.12"
       - name: Download and verify exact official Qwen source inputs
         env:
           QWEN_REVISION: ff536d3f82cc9ef977ea312094eb103d8446116a

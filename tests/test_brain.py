@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -928,6 +928,12 @@ else:
         install.assert_called_once_with(self.settings, "semantic")
         self.assertEqual("qwen3-embedding-4b-q6k-darwin-arm64", json.loads(output.getvalue())["pack_id"])
 
+    def test_cli_model_install_error_does_not_hardcode_the_semantic_alias(self) -> None:
+        output = io.StringIO()
+        with redirect_stderr(output):
+            self.assertEqual(2, main(["-c", str(self.config), "model", "install"]))
+        self.assertIn("official pack alias", output.getvalue())
+
     def test_model_conformance_rejects_bad_reranker_golden(self) -> None:
         pack = self.root / "bad-reranker-pack"
         pack.mkdir()
@@ -1830,6 +1836,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/precision-pack.yml").read_text(encoding="utf-8")
         self.assertIn('tags: ["precision-pack-v*"]', workflow)
+        self.assertIn('python-version: "3.12"', workflow)
         self.assertIn("Qwen/Qwen3-Reranker-4B/resolve/$QWEN_REVISION/model-00001-of-00002.safetensors", workflow)
         self.assertIn("cf2e87cbf71fa628961532232e04dd6c19702a0a057f5e2aff95ea1aca4fd488", workflow)
         self.assertIn("78946d22b7f6456ea7a5358dbdf3982de36c5bac1f166a5fd58e18e31db8048a", workflow)
