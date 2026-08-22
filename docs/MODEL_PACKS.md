@@ -63,7 +63,7 @@ the published runtime as well as the descriptor and model checksums.
 An unpacked pack has no symlinks and contains all artifacts it declares:
 
 ```text
-qwen3-reranker-4b-q8/
+qwen3-reranker-4b-q6k-darwin-arm64/
   manifest.json
   llama-server
   model.gguf
@@ -79,14 +79,14 @@ Production manifests must contain checksums for the runtime, weights, tokenizer,
 
 ```json
 {
-  "pack_id": "qwen3-reranker-4b-q8",
+  "pack_id": "qwen3-reranker-4b-q6k-darwin-arm64",
   "capability": "reranker",
   "model_family": "Qwen3",
   "upstream_model": "Qwen/Qwen3-Reranker-4B",
   "upstream_revision": "<official-commit-or-revision>",
   "license": "Apache-2.0",
   "weight_format": "GGUF",
-  "quantization": "Q8_0",
+  "quantization": "Q6_K",
   "runtime_name": "llama.cpp",
   "runtime_revision": "<pinned-commit>",
   "converter_revision": "llama.cpp@<pinned-commit>",
@@ -101,7 +101,7 @@ Production manifests must contain checksums for the runtime, weights, tokenizer,
   "document_card_version": "1",
   "chunk_schema_version": "1",
   "embedding_dimension": 0,
-  "minimum_brain_version": "0.6.2",
+  "minimum_brain_version": "0.6.4",
   "golden_suite": "conformance.json",
   "golden_suite_hash": "<64-hex-sha256>",
   "artifacts": {
@@ -117,17 +117,25 @@ For an embedding pack, use its actual output dimension plus the upstream pooling
 
 ## Reproducible reranker conversion
 
-Conversion runs on an approved packaging machine, not on the enterprise runtime machine. Start from a preapproved local checkout of official Qwen weights and a source-pinned `llama.cpp` checkout. Record every placeholder in the manifest and `PROVENANCE.md`:
+Conversion runs on the Project Brain model-pack builder, not on the enterprise
+runtime machine. The `precision-pack-v*` workflow pins the exact official
+`Qwen/Qwen3-Reranker-4B` revision, downloads and verifies both official
+safetensor shards and the tokenizer, then uses the recorded `llama.cpp`
+revision to make F16 GGUF followed by Q6_K. It records the original weight
+hashes in `UPSTREAM_SHA256SUMS.txt`, the converted GGUF hash in the manifest,
+and never trains or fine-tunes the model.
+
+The equivalent reproducible commands are:
 
 ```bash
 git -C /approved-src/llama.cpp checkout <pinned-llama.cpp-commit>
 python /approved-src/llama.cpp/convert_hf_to_gguf.py \
   /approved-weights/Qwen3-Reranker-4B \
-  --outtype bf16 \
-  --outfile /approved-build/qwen3-reranker-4b-bf16.gguf
+  --outtype f16 \
+  --outfile /approved-build/qwen3-reranker-4b-f16.gguf
 /approved-src/llama.cpp/build/bin/llama-quantize \
-  /approved-build/qwen3-reranker-4b-bf16.gguf \
-  /approved-build/model.gguf Q8_0
+  /approved-build/qwen3-reranker-4b-f16.gguf \
+  /approved-build/model.gguf Q6_K
 shasum -a 256 /approved-build/model.gguf /approved-weights/Qwen3-Reranker-4B/tokenizer.json
 ```
 
@@ -135,7 +143,15 @@ Older pinned `llama.cpp` revisions name the converter `convert-hf-to-gguf.py`; u
 
 ## Conformance and local measurement
 
-Create the golden suite from public/synthetic texts and the official Qwen reference implementation on the approved pack-builder machine. It must cover embedding dimensions, finite vectors, normalization, batch/single parity, reference-vector cosine, expected similarity order, and a long input; reranker cases must cover positive/negative ordering, multilingual and code-oriented pairs, batch/single score parity, long/truncated inputs, and finite non-empty scores.
+Create the golden suite from public/synthetic texts and the official Qwen
+Transformers reranker implementation on the pack-builder machine. The Precision
+workflow uses the exact GGUF chat-template instruction, `Given a web search
+query, retrieve relevant passages that answer the query`, so the official
+reference and local runtime have the same input contract. It records official
+reference scores, requires the same ranking order from Q6_K within a bounded
+probability delta, and checks batch/single parity. The suite covers positive and
+negative pairs, multilingual and code-oriented pairs, long/truncated input,
+finite non-empty scores, and 10/20/40/80 candidate pools.
 
 `brain model verify PACK` checks declared files then runs the suite through the exact local runtime. `brain model benchmark PACK` adds public synthetic embedding batch throughput or 10/20/40/80 candidate-pool latency. Neither is a private-repository Recall/MRR claim. `brain model autotune PACK` stores the result and conservative batch/pool recommendation only under private Brain state; it does not publish model or source data.
 
@@ -144,11 +160,25 @@ Create the golden suite from public/synthetic texts and the official Qwen refere
 For a copied or internal-share pack:
 
 ```bash
-brain model install /approved-share/qwen3-reranker-4b-q8.tar
-brain model verify qwen3-reranker-4b-q8
-brain model benchmark qwen3-reranker-4b-q8
-brain model autotune qwen3-reranker-4b-q8 --latency-budget-ms 3000
+brain model install /approved-share/qwen3-reranker-4b-q6k-darwin-arm64
+brain model verify qwen3-reranker-4b-q6k-darwin-arm64
+brain model benchmark qwen3-reranker-4b-q6k-darwin-arm64
+brain model autotune qwen3-reranker-4b-q6k-darwin-arm64 --latency-budget-ms 3000
 ```
+
+After the separate pack release has passed a clean release-asset installation,
+a subsequent Core catalog release enables the controlled alias:
+
+```bash
+brain model install precision
+brain model verify precision
+brain model benchmark precision
+brain model autotune precision
+brain edition set precision
+```
+
+Until that catalog entry exists, `brain model install precision` intentionally
+fails rather than resolving an unpinned or mutable model asset.
 
 An approved GitHub Release asset can be staged once only when its expected hash is supplied. It is an installation operation, not a runtime dependency:
 

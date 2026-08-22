@@ -57,7 +57,7 @@ from brain.catalog import current_generation
 from brain.catalog import connect as catalog_connect
 from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
-from brain.models import EMBEDDING_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
+from brain.models import EMBEDDING_BATCH_PARITY_TOLERANCE, RERANKER_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
 from brain.models import autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, runtime_for_pack, validate_manifest, verify_pack
 from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, Chunk, SEMANTIC_CARD_CODE_CHARS, _bounded_embedding_batches, _excluded, build_semantic_index, chunk_source, search_semantic
 from brain.ops import gc
@@ -783,6 +783,55 @@ else:
         self.assertEqual(1e-4, EMBEDDING_BATCH_PARITY_TOLERANCE)
         self.assertTrue(_same_vectors([[0.0]], [[6.2e-5]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
         self.assertFalse(_same_vectors([[0.0]], [[1.1e-4]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
+
+    def test_production_reranker_requires_official_reference_and_candidate_pool_conformance(self) -> None:
+        pack = self.root / "production-reranker-conformance-pack"
+        pack.mkdir()
+        binary, model, tokenizer = pack / "llama-server", pack / "model.gguf", pack / "tokenizer.json"
+        binary.write_bytes(b"pinned local runtime")
+        model.write_bytes(b"pinned local model")
+        tokenizer.write_bytes(b"pinned tokenizer")
+        runtime = DeterministicRuntime()
+        query = "verified code"
+        long_document = ("verified code implementation " * 300)
+
+        def case(case_id: str, documents: list[str], *, truncate: int | None = None) -> dict[str, object]:
+            scored_documents = [document[:truncate] for document in documents] if truncate else documents
+            scores = runtime.rerank(query, scored_documents)
+            payload: dict[str, object] = {
+                "id": case_id, "query": query, "documents": documents,
+                "expected_order": sorted(range(len(documents)), key=lambda index: (-scores[index], index)),
+                "reference_scores": scores, "maximum_score_delta": 0.0,
+            }
+            if truncate:
+                payload["truncate_to_chars"] = truncate
+            return payload
+
+        pools = [case(f"candidate-pool-{size}", ["verified code implementation", *[f"unrelated {index}" for index in range(1, size)]]) for size in (10, 20, 40, 80)]
+        suite_path = pack / "conformance.json"
+        suite_path.write_text(json.dumps({
+            "requirements": {"long_input_min_chars": 4096, "reranker_candidate_pools": [10, 20, 40, 80]},
+            "reranker": [case("long-public-input", [long_document, "unrelated note"], truncate=4096)],
+            "reranker_candidate_pools": pools,
+        }), encoding="utf-8")
+        digest = hashlib.sha256(suite_path.read_bytes()).hexdigest()
+        (pack / "manifest.json").write_text(json.dumps({
+            "pack_id": "production-reranker-conformance", "capability": "reranker", "model_family": "Qwen3",
+            "upstream_model": "official-source", "upstream_revision": "pinned", "license": "Apache-2.0",
+            "runtime_name": "llama.cpp", "runtime_revision": "pinned", "minimum_brain_version": "0.6.3",
+            "runtime_binary": "llama-server", "model_file": "model.gguf", "embedding_dimension": 0,
+            "weight_format": "GGUF", "quantization": "Q6_K", "weight_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+            "tokenizer_file": "tokenizer.json", "tokenizer_sha256": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "pooling": "rank", "normalization": "none",
+            "query_instruction_version": "qwen3-reranker-v1", "document_card_version": "1", "chunk_schema_version": "1", "converter_revision": "llama.cpp@pinned",
+            "golden_suite": "conformance.json", "golden_suite_hash": digest,
+            "artifacts": {"llama-server": hashlib.sha256(binary.read_bytes()).hexdigest(), "model.gguf": hashlib.sha256(model.read_bytes()).hexdigest(), "tokenizer.json": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "conformance.json": digest},
+        }), encoding="utf-8")
+        install_pack(self.settings, pack)
+        with mock.patch("brain.models.runtime_for_pack", return_value=runtime):
+            verified = verify_pack(self.settings, "production-reranker-conformance")
+        self.assertTrue(verified["conformance"]["passed"])
+        self.assertEqual(1e-4, RERANKER_BATCH_PARITY_TOLERANCE)
+        self.assertEqual(5, len(verified["conformance"]["cases"]))
 
     def test_remote_pack_install_requires_pinned_approved_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "not approved"):
@@ -1776,6 +1825,30 @@ class ReleaseSafetyTest(unittest.TestCase):
         builder = (Path(__file__).resolve().parents[1] / "scripts/build_semantic_pack.py").read_text(encoding="utf-8")
         self.assertIn("MINIMUM_REFERENCE_COSINE = 0.995", builder)
         self.assertIn('"minimum_cosine_to_reference": MINIMUM_REFERENCE_COSINE', builder)
+
+    def test_precision_pack_workflow_uses_official_source_conversion_and_local_conformance(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/precision-pack.yml").read_text(encoding="utf-8")
+        self.assertIn('tags: ["precision-pack-v*"]', workflow)
+        self.assertIn("Qwen/Qwen3-Reranker-4B/resolve/$QWEN_REVISION/model-00001-of-00002.safetensors", workflow)
+        self.assertIn("cf2e87cbf71fa628961532232e04dd6c19702a0a057f5e2aff95ea1aca4fd488", workflow)
+        self.assertIn("78946d22b7f6456ea7a5358dbdf3982de36c5bac1f166a5fd58e18e31db8048a", workflow)
+        self.assertIn("d775b8967a46d8beb110d444aa3b8938179e0dd8", workflow)
+        self.assertIn("convert_hf_to_gguf.py", workflow)
+        self.assertIn("llama-quantize", workflow)
+        self.assertIn("Q6_K", workflow)
+        self.assertIn("qwen3_reranker_reference.py", workflow)
+        self.assertIn("build_precision_pack.py", workflow)
+        self.assertIn("model install precision-pack-dist/qwen3-reranker-4b-q6k-darwin-arm64", workflow)
+        self.assertIn("model verify qwen3-reranker-4b-q6k-darwin-arm64", workflow)
+        self.assertNotIn("release.yml", workflow)
+        builder = (root / "scripts/build_precision_pack.py").read_text(encoding="utf-8")
+        self.assertIn('RERANK_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"', builder)
+        self.assertIn('"reranker_candidate_pools": [10, 20, 40, 80]', builder)
+        self.assertIn("MAXIMUM_REFERENCE_SCORE_DELTA = 0.10", builder)
+        reference = (root / "scripts/qwen3_reranker_reference.py").read_text(encoding="utf-8")
+        self.assertIn("official Qwen", reference)
+        self.assertIn("RERANK_CONTEXT_TOKENS", reference)
 
     def test_standalone_release_builds_source_pinned_zoekt(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text(encoding="utf-8")

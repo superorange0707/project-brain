@@ -1,0 +1,121 @@
+name: Publish Precision model pack
+
+on:
+  push:
+    tags: ["precision-pack-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish official Qwen Precision pack
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Download and verify exact official Qwen source inputs
+        env:
+          QWEN_REVISION: ff536d3f82cc9ef977ea312094eb103d8446116a
+          QWEN_MODEL_PART_1_SHA256: cf2e87cbf71fa628961532232e04dd6c19702a0a057f5e2aff95ea1aca4fd488
+          QWEN_MODEL_PART_2_SHA256: 78946d22b7f6456ea7a5358dbdf3982de36c5bac1f166a5fd58e18e31db8048a
+          QWEN_TOKENIZER_SHA256: aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4
+          QWEN_CONFIG_SHA256: 38bff5eac700032a185745e4076eccad7aa453473cafc2a27de412cdb7b79e19
+          QWEN_README_SHA256: f8cad5dc54e30a1746243efe21a3d05ed59e74886e805f9909b7f69528c9c7bd
+        run: |
+          mkdir -p upstream/qwen
+          for file in README.md config.json generation_config.json model.safetensors.index.json tokenizer.json tokenizer_config.json special_tokens_map.json added_tokens.json merges.txt vocab.json; do
+            curl --fail --location --retry 3 --output "upstream/qwen/$file" "https://huggingface.co/Qwen/Qwen3-Reranker-4B/resolve/$QWEN_REVISION/$file"
+          done
+          curl --fail --location --retry 3 --output upstream/qwen/model-00001-of-00002.safetensors "https://huggingface.co/Qwen/Qwen3-Reranker-4B/resolve/$QWEN_REVISION/model-00001-of-00002.safetensors"
+          curl --fail --location --retry 3 --output upstream/qwen/model-00002-of-00002.safetensors "https://huggingface.co/Qwen/Qwen3-Reranker-4B/resolve/$QWEN_REVISION/model-00002-of-00002.safetensors"
+          (
+            cd upstream/qwen
+            printf '%s  %s\n' "$QWEN_MODEL_PART_1_SHA256" model-00001-of-00002.safetensors > UPSTREAM_SHA256SUMS.txt
+            printf '%s  %s\n' "$QWEN_MODEL_PART_2_SHA256" model-00002-of-00002.safetensors >> UPSTREAM_SHA256SUMS.txt
+            printf '%s  %s\n' "$QWEN_TOKENIZER_SHA256" tokenizer.json >> UPSTREAM_SHA256SUMS.txt
+            printf '%s  %s\n' "$QWEN_CONFIG_SHA256" config.json >> UPSTREAM_SHA256SUMS.txt
+            printf '%s  %s\n' "$QWEN_README_SHA256" README.md >> UPSTREAM_SHA256SUMS.txt
+            shasum -a 256 --check UPSTREAM_SHA256SUMS.txt
+            test "$(stat -f %z model-00001-of-00002.safetensors)" = "4058781760"
+            test "$(stat -f %z model-00002-of-00002.safetensors)" = "3984833200"
+            test "$(stat -f %z tokenizer.json)" = "11422654"
+          )
+          curl --fail --location --retry 3 --output upstream/APACHE-2.0.txt https://www.apache.org/licenses/LICENSE-2.0.txt
+      - name: Build the pinned local-only llama.cpp converter and runtime
+        env:
+          LLAMA_CPP_REVISION: d775b8967a46d8beb110d444aa3b8938179e0dd8
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp.git upstream/llama.cpp
+          git -C upstream/llama.cpp checkout --detach "$LLAMA_CPP_REVISION"
+          test "$(git -C upstream/llama.cpp rev-parse HEAD)" = "$LLAMA_CPP_REVISION"
+          python -m pip install --upgrade "torch==2.7.1" "transformers==4.57.1" "safetensors==0.6.2" "sentencepiece==0.2.0"
+          python -m pip install -r upstream/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt
+          cmake -S upstream/llama.cpp -B upstream/llama.cpp/build \
+            -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF
+          cmake --build upstream/llama.cpp/build --target llama-server llama-quantize --parallel 3
+          test -x upstream/llama.cpp/build/bin/llama-server
+          test -x upstream/llama.cpp/build/bin/llama-quantize
+          ! otool -L upstream/llama.cpp/build/bin/llama-server | rg '(@rpath|/opt/homebrew|/usr/local)'
+      - name: Convert official source to Q6_K and generate official-reference scores
+        env:
+          PYTORCH_MPS_HIGH_WATERMARK_RATIO: "0.0"
+          QWEN_REVISION: ff536d3f82cc9ef977ea312094eb103d8446116a
+        run: |
+          python upstream/llama.cpp/convert_hf_to_gguf.py upstream/qwen --outtype f16 --outfile upstream/Qwen3-Reranker-4B-F16.gguf
+          upstream/llama.cpp/build/bin/llama-quantize upstream/Qwen3-Reranker-4B-F16.gguf upstream/Qwen3-Reranker-4B-Q6_K.gguf Q6_K
+          shasum -a 256 upstream/Qwen3-Reranker-4B-Q6_K.gguf
+          python scripts/qwen3_reranker_reference.py \
+            --model-dir upstream/qwen \
+            --output upstream/official-reference.json \
+            --upstream-revision "$QWEN_REVISION"
+      - name: Build, locally install, and verify public synthetic Precision pack
+        env:
+          QWEN_REVISION: ff536d3f82cc9ef977ea312094eb103d8446116a
+          LLAMA_CPP_REVISION: d775b8967a46d8beb110d444aa3b8938179e0dd8
+        run: |
+          Q6_SHA256="$(shasum -a 256 upstream/Qwen3-Reranker-4B-Q6_K.gguf | awk '{print $1}')"
+          python scripts/build_precision_pack.py \
+            --model upstream/Qwen3-Reranker-4B-Q6_K.gguf \
+            --model-sha256 "$Q6_SHA256" \
+            --tokenizer upstream/qwen/tokenizer.json \
+            --runtime upstream/llama.cpp/build/bin/llama-server \
+            --runtime-license upstream/llama.cpp/LICENSE \
+            --license upstream/APACHE-2.0.txt \
+            --source-provenance upstream/qwen/UPSTREAM_SHA256SUMS.txt \
+            --reference upstream/official-reference.json \
+            --output precision-pack-dist \
+            --release-tag "$GITHUB_REF_NAME" \
+            --upstream-revision "$QWEN_REVISION" \
+            --tokenizer-revision "$QWEN_REVISION" \
+            --runtime-revision "$LLAMA_CPP_REVISION" \
+            --minimum-brain-version 0.6.4
+          cd precision-pack-dist
+          shasum -a 256 --check SHA256SUMS.txt
+          cd ..
+          temporary="$(mktemp -d)"
+          mkdir "$temporary/repository"
+          printf '%s\n' '[project]' 'state_dir = "state"' 'generated_dir = "generated"' '' '[storage]' 'max_state_gb = 0' 'minimum_free_disk_gb = 0' '' '[[repositories]]' 'name = "public-fixture"' 'path = "repository"' > "$temporary/brain.toml"
+          PYTHONPATH=. python -m brain.cli -c "$temporary/brain.toml" model install precision-pack-dist/qwen3-reranker-4b-q6k-darwin-arm64
+          PYTHONPATH=. python -m brain.cli -c "$temporary/brain.toml" model verify qwen3-reranker-4b-q6k-darwin-arm64
+          PYTHONPATH=. python -m brain.cli -c "$temporary/brain.toml" model benchmark qwen3-reranker-4b-q6k-darwin-arm64 --samples 1
+      - name: Publish final immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            precision-pack-dist/*-metadata.tar.gz \
+            precision-pack-dist/*.part-* \
+            precision-pack-dist/*-descriptor.json \
+            precision-pack-dist/SHA256SUMS.txt \
+            --verify-tag \
+            --notes-file docs/PRECISION_PACK_RELEASE_NOTES.md \
+            --title "Project Brain Precision Pack $GITHUB_REF_NAME"

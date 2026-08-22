@@ -52,3 +52,27 @@ suite.
 No release workflow claims target-machine latency, M3 Pro memory usage, private
 ticket replay quality, or Precision capability until those local validations
 exist.
+
+## Precision model-pack release
+
+The official Precision pack follows the same separate-release and
+descriptor-pinning sequence. A `precision-pack-v*` tag runs on macOS Apple
+Silicon and first downloads the pinned official
+`Qwen/Qwen3-Reranker-4B` safetensors/tokenizer source. It checks the source
+SHA-256 values, converts F16 GGUF with the recorded `llama.cpp` commit,
+quantizes that result to Q6_K, and records both source and derived hashes.
+There is no training, fine tuning, or community GGUF dependency.
+
+Before the model-pack release is created, the workflow compares public/
+synthetic scores from the official Qwen Transformers reranker against the exact
+local Q6_K runtime. It checks ranking order, bounded score delta, multilingual
+and code pairs, long/truncated input, finite scores, batch/single parity, and
+10/20/40/80 candidate pools. It then performs a clean temporary local-pack
+installation, verification, and public synthetic benchmark. The release asset
+descriptor is only added to the Core catalog in a later Core tag after a fresh
+downloaded-release installation verifies the descriptor, parts, assembled GGUF,
+provenance, and runtime conformance.
+
+The pack, benchmark report, and release notes must not claim target-machine M3
+performance or private-repository/ticket quality. Those are intentionally local
+target-machine and private-data measurements.

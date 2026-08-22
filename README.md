@@ -74,6 +74,14 @@ parts, reconstructed model, provenance, and clean temporary installation have
 all been verified. `brain model install semantic` then verifies that descriptor,
 the release parts, and the reassembled model before registering the pack.
 
+Precision uses the same separation. Its release workflow converts the exact
+official Qwen3-Reranker-4B source with a pinned local `llama.cpp` toolchain,
+compares public/synthetic results with Qwen's local Transformers reference, and
+ships only an offline Q6_K pack after that gate passes. It is never bundled into
+Core or Homebrew. The `precision` alias is added only by a later Core release
+that pins a published descriptor and checksum; before then it deliberately
+resolves nothing mutable.
+
 See [offline model-pack operations](docs/MODEL_PACKS.md) for the audited pack
 format, official-Qwen conversion provenance, local conformance, controlled
 installation, machine measurement, and autotuning workflow. See

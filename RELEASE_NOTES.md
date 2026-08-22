@@ -1,17 +1,16 @@
-# Project Brain v0.6.3
+# Project Brain v0.6.4
 
-Project Brain v0.6.3 completes distribution readiness for the optional offline
-Semantic edition without changing the Core product boundary. The separately
-versioned Qwen3-Embedding-4B Q6_K pack is never bundled into Core or Homebrew;
-Core pins its Project Brain release descriptor and verifies every downloaded
-part, the assembled GGUF, pack manifest, provenance, and public/synthetic
-conformance before local use.
+Project Brain v0.6.4 adds the verification and distribution machinery needed
+for an independently released offline Precision pack without changing the Core
+product boundary. The Qwen3-Reranker-4B Q6_K weight is never bundled into Core
+or Homebrew. A later catalog-only Core commit will pin its descriptor only after
+the separately released artifact has passed all final checks.
 
-The release also adds a final-release-only Homebrew automation gate. The tap is
-updated only after the GitHub Release and its published `SHA256SUMS.txt` exist
-and match the build output. Failed candidates cannot update the tap. The
-authorization check is evaluated inside the post-release job, so an absent tap
-token safely skips that update rather than invalidating the Core release.
+The Precision pack workflow checks exact official source weights/tokenizer,
+uses a pinned llama.cpp conversion/quantization toolchain, and compares public
+synthetic results with the official Qwen Transformers reranker before it can
+publish a Q6_K model pack. The installed local verifier repeats order, bounded
+score delta, long-input, batch/single, and 10/20/40/80 candidate-pool checks.
 
 ## Release qualification
 
@@ -20,6 +19,9 @@ token safely skips that update rather than invalidating the Core release.
 - Core requires no model, hosted index, API key, or cloud service.
 - This release does not ship model weights and does not turn Project Brain into
   a coding agent or source-editing tool.
+- `brain model install precision` remains intentionally unavailable until the
+  immutable model-pack release and post-release clean installation are verified
+  and its descriptor is pinned in the Core catalog.
 
 ## Deliberately not claimed
 
@@ -27,9 +29,10 @@ token safely skips that update rather than invalidating the Core release.
   numbers are claimed.
 - No private-enterprise repository, ticket-replay, Recall, MRR, nDCG, or
   target-machine benchmark results are claimed.
-- Precision remains unavailable until a separately verified reranker pack is
-  installed. Organization approval remains a local policy decision; Core stays
-  fully usable without model packs.
+- The release makes no Qwen3-Reranker-4B quality or target-machine performance
+  claim. Precision remains unavailable until a separately verified reranker
+  pack is installed. Organization approval remains a local policy decision;
+  Core stays fully usable without model packs.
 
 See `MILESTONE_REPORT.md` and `docs/MODEL_PACKS.md` in the tagged source for the
 verified scope, offline-pack procedure, and target-machine/private-data follow-up.

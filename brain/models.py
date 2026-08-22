@@ -41,6 +41,10 @@ DEFAULT_RUNTIME_MAX_REQUESTS = 64
 # floating-point reduction drift; reference-vector cosine and ranking gates
 # remain independent conformance requirements.
 EMBEDDING_BATCH_PARITY_TOLERANCE = 1e-4
+# A production reranker is evaluated once as a bounded batch and once as the
+# equivalent one-document requests.  llama.cpp's local backends may differ by
+# a tiny floating-point reduction, but a larger change is a conformance error.
+RERANKER_BATCH_PARITY_TOLERANCE = 1e-4
 
 # Each entry is added only after its separately versioned model-pack release
 # passes final-release checksum verification and a clean installation check.
@@ -491,6 +495,19 @@ def _reference_vectors(value: object, *, count: int, dimension: int, case: int) 
     return vectors
 
 
+def _reference_scores(value: object, *, count: int, case: int) -> list[float]:
+    """Parse independently produced official-reference reranker scores."""
+    if not isinstance(value, list) or len(value) != count:
+        raise ValueError(f"golden_suite reranker case {case} needs one reference score per document")
+    try:
+        scores = [float(number) for number in value]
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"golden_suite reranker case {case} has invalid reference scores") from error
+    if not scores or any(not math.isfinite(score) for score in scores):
+        raise ValueError(f"golden_suite reranker case {case} has invalid reference scores")
+    return scores
+
+
 def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
     loaded = _model_suite(manifest)
     if loaded is None:
@@ -510,13 +527,40 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
         raise ValueError("production golden_suite has invalid requirements.long_input_min_chars") from error
     if strict and long_input_min_chars < 1:
         raise ValueError("production golden_suite requires requirements.long_input_min_chars")
+    candidate_pool_sizes: list[int] = []
+    candidate_pool_cases: list[dict[str, Any]] = []
+    if capability == "reranker" and strict:
+        raw_sizes = requirements.get("reranker_candidate_pools")
+        if not isinstance(raw_sizes, list) or not raw_sizes:
+            raise ValueError("production reranker golden_suite requires requirements.reranker_candidate_pools")
+        try:
+            candidate_pool_sizes = [int(size) for size in raw_sizes]
+        except (TypeError, ValueError) as error:
+            raise ValueError("production reranker golden_suite has invalid requirements.reranker_candidate_pools") from error
+        if candidate_pool_sizes != sorted(set(candidate_pool_sizes)) or any(size < 2 for size in candidate_pool_sizes):
+            raise ValueError("production reranker golden_suite has invalid requirements.reranker_candidate_pools")
+        raw_cases = suite.get("reranker_candidate_pools")
+        if not isinstance(raw_cases, list):
+            raise ValueError("production reranker golden_suite requires reranker_candidate_pools cases")
+        by_size: dict[int, dict[str, Any]] = {}
+        for raw_case in raw_cases:
+            if not isinstance(raw_case, dict):
+                raise ValueError("production reranker candidate-pool case must be an object")
+            documents = raw_case.get("documents")
+            if not isinstance(documents, list):
+                raise ValueError("production reranker candidate-pool case has invalid documents")
+            by_size[len(documents)] = raw_case
+        if set(by_size) != set(candidate_pool_sizes):
+            raise ValueError("production reranker candidate-pool cases do not match required pool sizes")
+        candidate_pool_cases = [by_size[size] for size in candidate_pool_sizes]
     observed_input_chars = 0
     ranking_exercised = False
     runtime = runtime_for_pack(manifest)
     passed: list[str] = []
     try:
         runtime.warmup()
-        for number, case in enumerate(cases, start=1):
+        all_cases = list(cases) + candidate_pool_cases if capability == "reranker" else cases
+        for number, case in enumerate(all_cases, start=1):
             if not isinstance(case, dict):
                 raise ValueError(f"golden_suite case {number} must be an object")
             if capability in {"embedding", "test"}:
@@ -563,10 +607,30 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
                 query, documents, expected = case.get("query"), case.get("documents"), case.get("expected_order")
                 if not isinstance(query, str) or not isinstance(documents, list) or not documents or not all(isinstance(document, str) for document in documents) or not isinstance(expected, list) or sorted(expected) != list(range(len(documents))):
                     raise ValueError(f"golden_suite reranker case {number} is invalid")
-                scores = runtime.rerank(query, documents)
-                single_scores = [runtime.rerank(query, [document])[0] for document in documents]
+                truncate_to_chars = case.get("truncate_to_chars")
+                if truncate_to_chars is not None and (not isinstance(truncate_to_chars, int) or truncate_to_chars < 1):
+                    raise ValueError(f"golden_suite reranker case {number} has invalid truncate_to_chars")
+                runtime_documents = [document[:truncate_to_chars] for document in documents] if truncate_to_chars is not None else documents
+                scores = runtime.rerank(query, runtime_documents)
+                single_scores = [runtime.rerank(query, [document])[0] for document in runtime_documents]
                 order = sorted(range(len(scores)), key=lambda index: (-float(scores[index]), index))
-                if len(scores) != len(documents) or not _same_vectors([[float(score)] for score in scores], [[float(score)] for score in single_scores]) or any(not math.isfinite(float(score)) for score in scores) or order != expected or any(float(scores[left]) < float(scores[right]) for left, right in zip(expected, expected[1:], strict=False)):
+                references = case.get("reference_scores")
+                if strict and references is None:
+                    raise ValueError(f"production reranker case {number} requires reference_scores")
+                if references is not None:
+                    reference_scores = _reference_scores(references, count=len(documents), case=number)
+                    if strict and "maximum_score_delta" not in case:
+                        raise ValueError(f"production reranker case {number} requires maximum_score_delta")
+                    try:
+                        maximum_delta = float(case.get("maximum_score_delta") or 0.0)
+                    except (TypeError, ValueError) as error:
+                        raise ValueError(f"golden_suite reranker case {number} has invalid maximum_score_delta") from error
+                    if maximum_delta < 0.0 or maximum_delta > 1.0 or any(abs(score - reference) > maximum_delta for score, reference in zip(scores, reference_scores, strict=True)):
+                        raise ValueError(f"reranker reference-score conformance failed at case {number}")
+                    reference_order = sorted(range(len(reference_scores)), key=lambda index: (-reference_scores[index], index))
+                    if reference_order != expected:
+                        raise ValueError(f"reranker official-reference ordering failed at case {number}")
+                if len(scores) != len(documents) or not _same_vectors([[float(score)] for score in scores], [[float(score)] for score in single_scores], tolerance=RERANKER_BATCH_PARITY_TOLERANCE) or any(not math.isfinite(float(score)) for score in scores) or order != expected or any(float(scores[left]) < float(scores[right]) for left, right in zip(expected, expected[1:], strict=False)):
                     raise ValueError(f"reranker conformance failed at case {number}")
                 ranking_exercised = ranking_exercised or len(documents) > 1
                 observed_input_chars = max(observed_input_chars, len(query), *(len(document) for document in documents))

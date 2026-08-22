@@ -367,6 +367,23 @@ for batch and one-document calls. A minimal embedding case looks like:
 }
 ```
 
+The separately released Precision pack follows the same controlled flow after
+its descriptor has been pinned by a compatible Core release:
+
+```bash
+brain model install precision
+brain model verify precision
+brain model benchmark precision
+brain model autotune precision --latency-budget-ms 3000
+brain edition set precision
+```
+
+The Precision golden suite is public/synthetic only. It compares the official
+Qwen Transformers reranker and the local Q6_K runtime for order, bounded score
+delta, batch/single parity, multilingual/code cases, long truncation, and
+10/20/40/80 candidate pools. It makes no M3 Pro or private-corpus performance
+claim.
+
 The reference-vector arrays must have the declared dimension; real pack vectors
 use the selected embedding dimension. A
 managed `llama.cpp` pack declares both `runtime_binary` and `model_file` in its
