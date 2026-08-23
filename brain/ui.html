@@ -120,6 +120,12 @@
       font-size: 12px;
     }
     .action strong { color: var(--accent-2); text-transform: uppercase; font-size: 10px; letter-spacing: .08em; }
+    .refresh-progress { margin-top: 16px; padding: 15px; border: 1px solid var(--line); border-radius: 11px; background: #091713; }
+    .refresh-phase { font-weight: 750; font-size: 16px; }
+    .progress-track { height: 8px; margin: 12px 0 10px; overflow: hidden; border-radius: 999px; background: #06100d; }
+    .progress-fill { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s ease; }
+    .progress-counts { display: flex; flex-wrap: wrap; gap: 6px 15px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .progress-counts span { white-space: nowrap; }
     pre.output {
       margin: 14px 0 0; padding: 16px; max-height: 520px; overflow: auto; white-space: pre-wrap;
       background: #06100d; border: 1px solid var(--line); border-radius: 11px;
@@ -175,14 +181,17 @@
     <aside>
       <div class="brand">
         <div class="brain">◆</div>
-        <div><strong>Project Brain</strong><span>Investigation cockpit</span></div>
+        <div><strong>Project Brain</strong><span>Operations cockpit</span></div>
       </div>
       <nav>
         <button class="nav active" data-view="overview">Overview</button>
+        <button class="nav" data-view="brain">Brain</button>
+        <button class="nav" data-view="models">Models</button>
         <button class="nav" data-view="ticket">Start ticket</button>
         <button class="nav" data-view="request">Continue with AI</button>
         <button class="nav" data-view="review">Review changes</button>
         <button class="nav" data-view="agent">M365 agent</button>
+        <button class="nav" data-view="advanced">Advanced</button>
       </nav>
       <div class="aside-foot"><span class="lock">● Local only</span><br>No model API · no code execution</div>
     </aside>
@@ -190,8 +199,8 @@
       <header class="topbar">
         <div><h1 id="page-title">Project overview</h1><p class="subtitle" id="project-name">Loading local project…</p></div>
         <div class="top-actions">
-          <button class="button ghost" id="refresh-button">Refresh</button>
-          <button class="button" id="sync-button">Discover &amp; sync</button>
+          <button class="button ghost" id="refresh-button">Refresh status</button>
+          <button class="button" id="sync-button">Refresh Brain</button>
         </div>
       </header>
 
@@ -202,6 +211,8 @@
           <article class="card metric-card"><span class="eyebrow">Attention</span><div class="metric warn" id="warning-count">—</div><span class="help">Fetch or index warnings</span></article>
           <article class="card metric-card"><span class="eyebrow">Ticket memory</span><div class="metric" id="experience-count">—</div><span class="help">Local committed cases</span></article>
           <article class="card metric-card"><span class="eyebrow">Retrieval edition</span><div class="metric" id="edition-name">—</div><span class="help" id="generation-name">Pinned generation</span></article>
+          <article class="card metric-card"><span class="eyebrow">Brain health</span><div class="metric" id="overview-health">—</div><span class="help" id="overview-effective">Checking local capabilities</span></article>
+          <article class="card metric-card"><span class="eyebrow">Semantic index</span><div class="metric" id="overview-semantic">—</div><span class="help" id="overview-alignment">Snapshot alignment</span></article>
           <article class="card wide">
             <div class="row"><div class="grow"><h2>Repository health</h2><p class="help">The exact source snapshot used for new ticket investigations.</p></div></div>
             <div style="overflow:auto"><table><thead><tr><th>Repository</th><th>Path</th><th>Branch / status</th><th>Commit</th><th>Index</th></tr></thead><tbody id="repo-table"></tbody></table></div>
@@ -219,6 +230,54 @@
         </div>
       </section>
 
+      <section class="view" id="view-brain">
+        <div class="grid">
+          <article class="card two-thirds">
+            <span class="eyebrow">Brain health</span><div class="metric" id="brain-health">—</div>
+            <p class="help" id="brain-effective">Checking Core, Semantic, and Precision readiness…</p>
+            <div class="plan" id="brain-status"></div>
+          </article>
+          <article class="card one-third">
+            <span class="eyebrow">Managed runtime</span><div class="metric good">Local only</div>
+            <p class="help" id="runtime-status">Loopback direct transport enforced.</p>
+          </article>
+          <article class="card two-thirds">
+            <h2>Edition</h2><p class="help">Choose the verified local retrieval capability. Selecting Semantic or Precision does not claim it is active until the current snapshots have a matching Semantic generation.</p>
+            <div class="row"><div class="grow"><select id="edition-select"><option value="core">Core</option><option value="semantic">Semantic</option><option value="precision">Precision</option></select></div><label class="check"><input type="checkbox" id="edition-refresh"> Switch and Refresh</label><button class="button primary" id="set-edition">Apply edition</button></div>
+            <div id="edition-message"></div>
+          </article>
+          <article class="card one-third">
+            <h2>Semantic</h2><div class="metric" id="semantic-chunks">—</div>
+            <p class="help" id="semantic-status">No semantic generation status yet.</p>
+          </article>
+          <article class="card wide">
+            <div class="row"><div class="grow"><h2>Refresh Brain</h2><p class="help">Normal refresh discovers repositories, fetches allowed refs, creates immutable snapshots, builds Core intelligence, then aligns Semantic indexing when the chosen edition requires it.</p></div><button class="button primary" id="brain-refresh">Refresh Brain</button></div>
+            <div class="row"><label class="check"><input type="checkbox" id="refresh-fetch" checked> Fetch remotes</label><label class="check"><input type="checkbox" id="refresh-discover" checked> Discover repositories</label><span class="help" id="job-status">No operation running.</span></div>
+            <div class="refresh-progress" id="refresh-progress" aria-live="polite">
+              <div class="refresh-phase" id="refresh-phase">No Refresh Brain operation started.</div>
+              <div class="progress-track"><div class="progress-fill" id="refresh-progress-fill"></div></div>
+              <div class="progress-counts" id="refresh-counts"><span>Progress will appear here without source content.</span></div>
+              <div id="refresh-progress-error"></div>
+            </div>
+          </article>
+          <article class="card wide">
+            <h2>Repository freshness</h2><div class="plan" id="freshness-status"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-models">
+        <div class="grid">
+          <article class="card wide">
+            <h2>Local model packs</h2><p class="help">Official Project Brain packs only. Installation uses the pinned release descriptor, system trust, approved download hosts, and SHA-256 verification. No model URL, proxy setting, credential, or certificate is shown here.</p>
+            <div class="artifacts" id="model-list"><div class="empty">Loading model status…</div></div>
+          </article>
+          <article class="card wide">
+            <h2>Official packs</h2><div class="artifacts" id="official-models"><div class="empty">Loading official pack catalog…</div></div>
+          </article>
+        </div>
+      </section>
+
       <section class="view" id="view-ticket">
         <div class="grid">
           <article class="card two-thirds">
@@ -229,6 +288,7 @@
             <div class="field"><label for="ticket-branches">Feature branches (optional, one REPO=BRANCH per line)</label><textarea id="ticket-branches" placeholder="payment-service=feature/ABC-1234"></textarea></div>
             <div class="row">
               <label class="check grow"><input type="checkbox" id="ticket-sync" checked> Fetch and pin latest remote commits</label>
+              <label class="check"><input type="checkbox" id="ticket-degraded"> Continue degraded if Semantic alignment fails</label>
               <select id="ticket-target" style="width:auto"><option value="claude">Clipboard chat</option><option value="m365">M365 file context</option></select>
               <button class="button primary" id="start-ticket">Start investigation</button>
             </div>
@@ -273,6 +333,9 @@
             <div class="row"><div class="grow"><h2>Evidence context</h2></div><button class="button secondary" data-copy-output>Copy for AI</button></div>
             <pre class="output" data-output>No evidence retrieved in this UI session.</pre>
             <div class="deliverybar" data-deliverybar><button class="button ghost" data-prev>Previous part</button><span data-part>0 / 0</span><button class="button ghost" data-next>Next part</button></div>
+          </article>
+          <article class="card wide">
+            <h2>Retrieval transparency</h2><p class="help">Requested and effective edition, local model participation, candidate counts, pinned generation, and safe timings for the latest request.</p><div class="plan" id="retrieval-status"><div class="empty">Run a CONTEXT_REQUEST to inspect retrieval state.</div></div>
           </article>
         </div>
       </section>
@@ -323,6 +386,25 @@
           </article>
         </div>
       </section>
+
+      <section class="view" id="view-advanced">
+        <div class="grid">
+          <article class="card two-thirds">
+            <h2>Performance and autotune</h2><p class="help">Public/synthetic measurements only. Tuning stays local and is consumed by the shared runtime; it does not upload code or model inputs.</p>
+            <div class="row"><div class="grow"><select id="performance-pack"><option value="">Select an installed verified pack</option></select></div><button class="button" id="benchmark-pack">Benchmark</button><button class="button secondary" id="autotune-pack">Autotune</button></div>
+            <pre class="output" id="performance-output">Select a verified local model pack.</pre>
+          </article>
+          <article class="card one-third">
+            <h2>Diagnostics</h2><p class="help" id="doctor-summary">Run a safe local diagnostics summary.</p><button class="button" id="run-doctor">Run doctor</button>
+          </article>
+          <article class="card wide">
+            <h2>Explain retrieval</h2><p class="help">Use the current valid CONTEXT_REQUEST to show the shared planner's operations, widening order, protected evidence, and stop condition. This is for debugging; it does not run retrieval.</p><button class="button" id="explain-request">Explain current request</button><pre class="output" id="explain-output">Classify a CONTEXT_REQUEST first.</pre>
+          </article>
+          <article class="card wide">
+            <h2>Evaluation</h2><p class="help">Configured/local golden evaluation remains CLI-only so the UI does not add file-picker or private-data transport paths. Use <code>brain evaluate</code> for configured public or private-local evaluation; Project Brain never uploads evaluation data.</p>
+          </article>
+        </div>
+      </section>
     </main>
   </div>
   <div id="toast"></div>
@@ -330,7 +412,7 @@
     "use strict";
     var token = new URLSearchParams(location.search).get("token") || "";
     var state = { status: null, preview: null, ticket: "", deliveries: {} };
-    var titles = { overview: "Project overview", ticket: "Start a ticket", request: "Continue with AI", review: "Review implementation", agent: "M365 Agent setup" };
+    var titles = { overview: "Project overview", brain: "Brain operations", models: "Local model packs", ticket: "Start a ticket", request: "Continue with AI", review: "Review implementation", agent: "M365 Agent setup", advanced: "Advanced operations" };
 
     function esc(value) {
       return String(value == null ? "" : value).replace(/[&<>"']/g, function (char) {
@@ -368,6 +450,69 @@
       button.disabled = active;
       button.innerHTML = active ? '<span class="spinner"></span> ' + esc(text || "Working…") : esc(button.dataset.label);
     }
+    function elapsed(milliseconds) {
+      var seconds = Math.max(0, Math.floor((milliseconds || 0) / 1000));
+      return String(Math.floor(seconds / 60)).padStart(2, "0") + ":" + String(seconds % 60).padStart(2, "0");
+    }
+    function renderRefreshProgress(job) {
+      if (!job || job.name !== "refresh") return;
+      var progress = job.progress || {};
+      var phase = progress.phase_label || job.phase || "Refreshing Brain";
+      document.getElementById("refresh-phase").textContent = phase;
+      var total = progress.semantic_cards_total;
+      var done = (progress.cached_embeddings_reused || 0) + (progress.new_embeddings_completed || 0);
+      if (progress.generation_state === "reused" && total != null) done = total;
+      if (total == null) { total = progress.repository_total; done = progress.repository_current || 0; }
+      var percent = total ? Math.min(100, Math.round(done * 100 / total)) : 0;
+      document.getElementById("refresh-progress-fill").style.width = percent + "%";
+      var rows = [];
+      if (progress.repository_total != null) rows.push("Repositories " + (progress.repository_current || 0) + " / " + progress.repository_total);
+      if (progress.repositories_changed != null) rows.push("Changed " + progress.repositories_changed + " · unchanged " + (progress.repositories_unchanged || 0));
+      if (progress.semantic_repository_total != null) rows.push("Semantic repositories " + (progress.semantic_repository_current || 0) + " / " + progress.semantic_repository_total);
+      if (progress.semantic_cards_total != null) rows.push("Cards " + (progress.semantic_cards_discovered || 0).toLocaleString() + " / " + progress.semantic_cards_total.toLocaleString());
+      else if (progress.semantic_cards_discovered != null) rows.push("Cards discovered " + progress.semantic_cards_discovered.toLocaleString() + " · total pending");
+      if (progress.cached_embeddings_reused != null) rows.push("Cached " + progress.cached_embeddings_reused.toLocaleString());
+      if (progress.new_embeddings_completed != null) rows.push("Embedded " + progress.new_embeddings_completed.toLocaleString());
+      if (progress.remaining_embeddings != null) rows.push("Remaining " + progress.remaining_embeddings.toLocaleString());
+      if (progress.embedding_batch_size) rows.push("Current batch " + progress.embedding_batch_size);
+      if (progress.embedding_batches_completed != null) rows.push("Embedding batches " + progress.embedding_batches_completed);
+      if (progress.semantic_shards_total != null) rows.push("Semantic shards " + (progress.semantic_shards_completed || 0) + " / " + progress.semantic_shards_total);
+      if (progress.generation_state === "reused") rows.push("Reused published generation · 0 new embeddings");
+      else if (progress.generation_state === "rebuilt") rows.push("Published rebuilt generation");
+      var elapsedMs = progress.elapsed_ms || 0;
+      if ((job.status === "pending" || job.status === "running") && job.started_at_ms) elapsedMs = Math.max(elapsedMs, Date.now() - job.started_at_ms);
+      rows.push("Elapsed " + elapsed(elapsedMs));
+      document.getElementById("refresh-counts").innerHTML = rows.map(function (row) { return "<span>" + esc(row) + "</span>"; }).join("");
+      var error = document.getElementById("refresh-progress-error");
+      if (job.status === "failed") error.innerHTML = '<div class="error">' + esc(job.error || "Refresh failed. Check local configuration, then try again.") + "</div>";
+      else if (progress.semantic_status === "failed") error.innerHTML = '<div class="error">Core refresh completed, but Semantic indexing needs attention. Check model health and run Refresh Brain again.</div>';
+      else error.innerHTML = "";
+    }
+    function setJob(job) {
+      document.getElementById("job-status").textContent = job ? job.name + ": " + job.phase : "No operation running.";
+      renderRefreshProgress(job);
+    }
+    function pause(milliseconds) { return new Promise(function (resolve) { setTimeout(resolve, milliseconds); }); }
+    async function waitForJob(job) {
+      var current = job;
+      while (current.status === "pending" || current.status === "running") {
+        setJob(current);
+        await pause(350);
+        current = await api("/api/job?id=" + encodeURIComponent(current.id));
+      }
+      setJob(current);
+      if (current.status !== "succeeded") throw new Error(current.error || "Local operation failed");
+      return current.result || {};
+    }
+    async function runModelJob(action, pack, button) {
+      busy(button, true, action.replace(/^./, function (value) { return value.toUpperCase(); }) + "…");
+      try {
+        var result = await waitForJob(await api("/api/model", {method:"POST",body:JSON.stringify({action:action,pack:pack})}));
+        await loadStatus();
+        showToast("Model " + action + " completed");
+        return result;
+      } catch (error) { report(error); } finally { busy(button, false); }
+    }
     function setView(name) {
       document.querySelectorAll(".nav").forEach(function (button) { button.classList.toggle("active", button.dataset.view === name); });
       document.querySelectorAll(".view").forEach(function (view) { view.classList.toggle("active", view.id === "view-" + name); });
@@ -378,6 +523,8 @@
     async function loadStatus() {
       var data = await api("/api/status");
       state.status = data;
+      var brain = data.brain || {};
+      var semantic = brain.semantic || {};
       document.getElementById("project-name").textContent = data.project.name + " · " + data.project.config;
       document.getElementById("repo-count").textContent = data.summary.repositories;
       document.getElementById("ready-count").textContent = data.summary.current;
@@ -385,6 +532,12 @@
       document.getElementById("experience-count").textContent = data.summary.experience_cases || 0;
       document.getElementById("edition-name").textContent = (data.retrieval && data.retrieval.edition || "core").replace(/^./, function (value) { return value.toUpperCase(); });
       document.getElementById("generation-name").textContent = "Generation " + (data.retrieval && data.retrieval.generation || "fallback");
+      document.getElementById("overview-health").textContent = brain.health || "—";
+      document.getElementById("overview-effective").textContent = brain.effective || "Core";
+      document.getElementById("overview-semantic").textContent = semantic.chunks == null ? "—" : semantic.chunks.toLocaleString();
+      document.getElementById("overview-alignment").textContent = semantic.aligned ? "Current snapshots" : (semantic.reason || "Not aligned");
+      renderBrain(brain);
+      renderModels(brain.models || {official:[],installed:[]});
       var rows = data.repositories.map(function (repo) {
         var healthy = repo.status === "current" && repo.indexed;
         var indexLabel = !repo.indexed ? '<span class="warn">Stale</span>' : (repo.structural ? '<span class="good">Structural</span>' : '<span>Lexical</span>');
@@ -410,6 +563,64 @@
       });
       document.getElementById("delete-session").disabled = !document.getElementById("session-select").value;
       return data;
+    }
+    function renderBrain(brain) {
+      var semantic = brain.semantic || {};
+      document.getElementById("brain-health").textContent = brain.health || "—";
+      document.getElementById("brain-effective").textContent = brain.effective + (brain.reason ? " — " + brain.reason : "");
+      document.getElementById("runtime-status").textContent = brain.managed_runtime || "Loopback direct transport enforced.";
+      document.getElementById("edition-select").value = brain.edition || "core";
+      document.getElementById("semantic-chunks").textContent = (semantic.chunks || 0).toLocaleString();
+      document.getElementById("semantic-status").textContent = semantic.aligned ? "Current · " + (semantic.generation || "generation") : (semantic.reason || "Semantic generation is not aligned.");
+      document.getElementById("brain-status").innerHTML = [
+        ["Core index", brain.core && brain.core.ready ? "Ready" : "Stale or unavailable"],
+        ["Semantic", semantic.aligned ? "Active and snapshot-aligned" : (semantic.reason || "Not active")],
+        ["Embedding pack", brain.capabilities && brain.capabilities.embedding ? "Verified and compatible" : "Unavailable"],
+        ["Reranker pack", brain.capabilities && brain.capabilities.reranker ? "Verified and compatible" : "Unavailable"]
+      ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
+      var freshness = brain.freshness && brain.freshness.repositories || [];
+      document.getElementById("freshness-status").innerHTML = freshness.map(function (item) {
+        return '<div class="action"><strong>' + esc(item.repo) + '</strong><div>' + (item.current ? "Current" : "Remote or index ahead") + (item.warning ? '<br><span class="help">' + esc(item.warning) + '</span>' : "") + '</div></div>';
+      }).join("") || '<div class="empty">No repository freshness data.</div>';
+    }
+    function renderModels(models) {
+      var installed = models.installed || [];
+      document.getElementById("model-list").innerHTML = installed.map(function (pack) {
+        var state = pack.verified ? (pack.compatible ? "Verified · compatible" : "Verified · incompatible") : "Installed · not verified";
+        var controls = '<button class="button ghost" data-model-action="verify" data-pack="' + esc(pack.pack_id) + '">Verify</button>' +
+          '<button class="button danger" data-model-action="remove" data-pack="' + esc(pack.pack_id) + '">Remove</button>';
+        return '<div class="artifact"><span><strong>' + esc(pack.pack_id) + '</strong><br><small>' + esc(pack.capability || "unknown") + ' · ' + esc(state) + (pack.compatibility_error ? ' · ' + esc(pack.compatibility_error) : "") + '</small></span><span>' + controls + '</span></div>';
+      }).join("") || '<div class="empty">No local model packs installed. Core remains fully available.</div>';
+      document.getElementById("official-models").innerHTML = (models.official || []).map(function (pack) {
+        return '<div class="artifact"><span><strong>' + esc(pack.alias) + '</strong><br><small>' + esc(pack.capability) + ' · ' + esc(pack.pack_id) + '</small></span><button class="button primary" data-model-action="install" data-pack="' + esc(pack.alias) + '">Install official pack</button></div>';
+      }).join("") || '<div class="empty">No official pack catalog is configured.</div>';
+      document.querySelectorAll("[data-model-action]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          var action = button.dataset.modelAction;
+          if (action === "remove" && !window.confirm("Remove this local model pack? Semantic or Precision may become degraded.")) return;
+          runModelJob(action, button.dataset.pack, button);
+        });
+      });
+      var select = document.getElementById("performance-pack");
+      var selected = select.value;
+      select.innerHTML = '<option value="">Select an installed verified pack</option>';
+      installed.filter(function (pack) { return pack.verified && pack.compatible; }).forEach(function (pack) {
+        var option = document.createElement("option"); option.value = pack.pack_id; option.textContent = pack.pack_id + " · " + pack.capability; select.appendChild(option);
+      });
+      if ([].some.call(select.options, function (option) { return option.value === selected; })) select.value = selected;
+    }
+    function renderRetrieval(retrieval) {
+      if (!retrieval || !retrieval.requested_edition) return;
+      var timing = retrieval.timing_ms || {};
+      document.getElementById("retrieval-status").innerHTML = [
+        ["Requested edition", retrieval.requested_edition],
+        ["Effective edition", retrieval.effective_edition],
+        ["Semantic recall", retrieval.semantic_recall_used ? "Used" : "Not used"],
+        ["Local reranker", retrieval.reranker_used ? "Used" : "Not used"],
+        ["Candidates / evidence", String(retrieval.candidate_count || 0) + " / " + String(retrieval.evidence_count || 0)],
+        ["Pinned generation", retrieval.generation || "fallback"],
+        ["Total time", timing.total_ms == null ? "—" : String(timing.total_ms) + " ms"]
+      ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
     }
     function setDelivery(data, viewId) {
       var delivery = data || {current:0,total:0,content:""};
@@ -443,13 +654,27 @@
     function report(error) { showToast(error.message || String(error)); }
 
     document.getElementById("refresh-button").addEventListener("click", function () { loadStatus().then(function () { showToast("Status refreshed"); }).catch(report); });
-    document.getElementById("sync-button").addEventListener("click", async function () {
-      var button = this; busy(button, true, "Syncing…");
+    async function refreshBrain(button) {
+      busy(button, true, "Refreshing…");
       try {
-        var data = await api("/api/sync", {method:"POST",body:"{}"}); state.status = data.status; await loadStatus();
-        showToast(data.discovered.length ? "Added " + data.discovered.length + " new repositories and synced" : "Repositories synced and indexed");
+        var job = await api("/api/refresh", {method:"POST",body:JSON.stringify({fetch:document.getElementById("refresh-fetch").checked,discover:document.getElementById("refresh-discover").checked})});
+        setView("brain"); setJob(job);
+        var data = await waitForJob(job); state.status = data.status; await loadStatus();
+        showToast(data.semantic && data.semantic.status === "failed" ? "Core refresh completed; Semantic needs attention" : "Brain refresh completed");
       }
       catch (error) { report(error); } finally { busy(button, false); }
+    }
+    document.getElementById("sync-button").addEventListener("click", function () { refreshBrain(this); });
+    document.getElementById("brain-refresh").addEventListener("click", function () { refreshBrain(this); });
+    document.getElementById("set-edition").addEventListener("click", async function () {
+      var button = this; busy(button, true, "Switching…");
+      try {
+        var job = await api("/api/edition", {method:"POST",body:JSON.stringify({edition:document.getElementById("edition-select").value,refresh:document.getElementById("edition-refresh").checked})});
+        var data = await waitForJob(job); await loadStatus();
+        document.getElementById("edition-message").innerHTML = '<div class="success">Edition set to <strong>' + esc(data.edition) + '</strong>' + (data.semantic && !data.semantic.aligned && data.edition !== "core" ? '<br>Semantic is not active until Refresh Brain completes.' : "") + '</div>';
+      } catch (error) {
+        document.getElementById("edition-message").innerHTML = '<div class="error">' + esc(error.message || String(error)) + '</div>';
+      } finally { busy(button, false); }
     });
 
     document.getElementById("start-ticket").addEventListener("click", async function () {
@@ -460,6 +685,7 @@
           ticket_text: document.getElementById("ticket-text").value,
           branches: document.getElementById("ticket-branches").value,
           sync: document.getElementById("ticket-sync").checked,
+          allow_degraded: document.getElementById("ticket-degraded").checked,
           target: document.getElementById("ticket-target").value
         };
         var data = await api("/api/start", {method:"POST",body:JSON.stringify(body)});
@@ -467,7 +693,7 @@
         document.getElementById("request-ticket").value = data.ticket;
         document.getElementById("review-ticket").value = data.ticket;
         document.getElementById("request-target").value = body.target;
-        showToast(data.discovered.length ? "New repositories added — investigation ready" : "Investigation ready — copy the context for your AI");
+        showToast(data.degraded ? "Investigation started in an explicit degraded state" : (data.discovered.length ? "New repositories added — investigation ready" : "Investigation ready — copy the context for your AI"));
       } catch (error) { report(error); } finally { busy(button, false); }
     });
 
@@ -521,6 +747,7 @@
         var data = await api("/api/continue", {method:"POST",body:JSON.stringify(body)});
         state.ticket = data.ticket;
         if (data.delivery) setDelivery(data.delivery, "view-request");
+        if (data.session) renderRetrieval(data.session.retrieval);
         await loadStatus();
         completed = true;
         showToast(data.kind === "final_solution" ? "Final plan archived — ready to implement" : "Evidence ready — return it to the same AI chat");
@@ -560,6 +787,7 @@
       if (!ticket) return;
       var detail = await api("/api/session?ticket=" + encodeURIComponent(ticket));
       state.ticket = ticket;
+      renderRetrieval(detail.retrieval);
       setDelivery({current:0,total:0,content:"Select a request or context artifact from the history above."}, "view-overview");
       var list = document.getElementById("artifact-list");
       list.innerHTML = detail.artifacts.map(function (artifact) {
@@ -610,6 +838,30 @@
     });
     document.getElementById("copy-agent-instructions").addEventListener("click", function () {
       copyText(document.getElementById("agent-instructions").textContent).then(function () { showToast("Agent Instructions copied"); }).catch(report);
+    });
+    document.getElementById("benchmark-pack").addEventListener("click", async function () {
+      var pack = document.getElementById("performance-pack").value;
+      if (!pack) return showToast("Select an installed verified pack first");
+      var result = await runModelJob("benchmark", pack, this);
+      if (result && result.report) document.getElementById("performance-output").textContent = JSON.stringify(result.report, null, 2);
+    });
+    document.getElementById("autotune-pack").addEventListener("click", async function () {
+      var pack = document.getElementById("performance-pack").value;
+      if (!pack) return showToast("Select an installed verified pack first");
+      var result = await runModelJob("autotune", pack, this);
+      if (result && result.report) document.getElementById("performance-output").textContent = JSON.stringify(result.report, null, 2);
+    });
+    document.getElementById("run-doctor").addEventListener("click", async function () {
+      var button = this; busy(button, true, "Checking…");
+      try {
+        var diagnostic = await api("/api/diagnostics");
+        document.getElementById("doctor-summary").textContent = diagnostic.summary + " Model-download trust: " + diagnostic.model_download_trust + ".";
+      } catch (error) { report(error); } finally { busy(button, false); }
+    });
+    document.getElementById("explain-request").addEventListener("click", function () {
+      if (!state.preview || !state.preview.planner) return showToast("Classify a valid CONTEXT_REQUEST first");
+      var explanation = { planner: state.preview.planner, requested_edition: state.status && state.status.brain && state.status.brain.edition, effective_retrieval: state.status && state.status.brain && state.status.brain.effective };
+      document.getElementById("explain-output").textContent = JSON.stringify(explanation, null, 2);
     });
 
     if (!token) {

@@ -136,7 +136,7 @@ Download the archive for your CPU from the
 extract it, and place all four executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.6.7-macos-arm64.tar.gz
+tar -xzf project-brain-v0.7.0-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp zoekt zoekt-index ~/.local/bin/
 ```
@@ -147,19 +147,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.7"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.7.0"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.7"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.7.0"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.6.7/project_brain_context-0.6.7-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.7.0/project_brain_context-0.7.0-py3-none-any.whl
 ```
 
 Then verify:
@@ -241,12 +241,40 @@ brain ui
 ```
 
 The browser page is served only on `127.0.0.1` and protected by a random session
-token. Paste a ticket, click **Start investigation**, and copy the generated
-context to your chat AI. Paste a complete reply into **Continue with AI**. Brain
-routes repository requests, tells you when to answer the AI directly, recognizes a
-final plan, and previews every local operation before it runs.
-Old ticket history can be deleted from **Project overview** with an explicit
-confirmation; repositories and branches are never touched.
+token. The normal workflow is: open **Brain**, check health and the effective
+edition, click **Refresh Brain**, select **Precision** when both verified packs
+are available, then **Start investigation** and use **Continue with AI** for
+`CONTEXT_REQUEST`s. The same page shows snapshot alignment, repository
+freshness, model verification, safe diagnostics, and explicit degraded state.
+It never silently presents an installed or stale Semantic pack as active.
+
+**Refresh Brain** is the authoritative refresh: it discovers repositories when
+enabled, fetches allowed refs, creates immutable snapshots, rebuilds Core
+intelligence, and builds/publishes a Semantic generation when Semantic or
+Precision is selected. A synced ticket start verifies that the requested
+Semantic or Precision edition is active (including snapshot alignment and the
+Precision reranker) before pinning the ticket; the user must make an explicit
+visible choice to continue degraded after a capability or Semantic failure.
+
+During a long refresh, the cockpit shows one safe structured progress surface:
+current phase, repository/card/shard counters, cache reuse versus new
+embeddings, active batch size, generation reuse or rebuild, and elapsed time.
+Totals begin as indeterminate until the real Semantic card manifest is known.
+Progress never includes source contents, local paths, credentials, proxy data,
+or model-runtime secrets.
+
+State-mutating refresh, Semantic rebuild, edition, model-pack, and GC commands
+take an owner-local workspace lock shared by CLI and cockpit processes. If
+another Project Brain process is already publishing workspace state, the new
+operation fails safely before it can change that state; read-only retrieval and
+status remain available.
+
+The **Models** and **Advanced** screens manage only approved official pack
+aliases, verification, local benchmark/autotune, diagnostics, and retrieval
+explanation. Model URLs, credentials, proxy settings, certificate material, and
+source contents are never exposed. Old ticket history can be deleted from
+**Project overview** with an explicit confirmation; repositories and branches
+are never touched.
 
 Prefer the terminal? Start a ticket investigation directly:
 
@@ -315,14 +343,27 @@ and a realistic eligibility bug. It contains no network remote or credential.
 
 The GUI is a thin, local layer over the same tested retrieval core as the CLI:
 
-- **Project health** shows snapshot SHAs, fetch state, and structural/lexical index status.
+- **Brain** shows health, requested/effective edition, Core readiness, Semantic
+  chunk/alignment state, pack compatibility, repository freshness, and the
+  direct loopback runtime boundary.
+- **Refresh Brain** uses the same shared full-refresh implementation as
+  `brain refresh`, including Semantic indexing for Semantic/Precision.
+- **Models** lists only local/official packs and offers explicit install,
+  verify, remove, benchmark, and autotune operations.
 - **Start ticket** optionally synchronizes every repo, accepts per-repo feature
-  branches, and pins the investigation to exact commits.
+  branches, verifies Semantic alignment before pinning, and makes any degraded
+  continuation an explicit user choice.
 - **Continue with AI** distinguishes direct conversation, repository requests,
   duplicate retrievals, and final solutions without invoking another model.
 - **Retrieval Plan** validates repository names and previews exactly what Brain
   will inspect; it is deliberately separate from the AI's implementation plan.
 - **Evidence context** provides chunk navigation and one-click clipboard delivery.
+- **Retrieval transparency** shows requested/effective edition, semantic and
+  reranker participation, candidate/evidence counts, pinned generation, and
+  safe timings for the latest request.
+- **Advanced** provides safe doctor/freshness summaries and planner explanation.
+  Local golden evaluation remains CLI-only so the UI does not add private-data
+  file transport.
 - **M365 Agent setup** creates and previews the permanent Agent Builder package.
 - **Review changes** packages tracked diffs, developer notes, and observed test output; it never runs the command or claims success itself.
 - **Investigation history** reopens ticket, request, context, and feedback artifacts under `.runs/TICKET/`.

@@ -230,6 +230,70 @@ class SemanticRobustnessTest(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertEqual(published, state_path.read_bytes())
 
+    def test_semantic_progress_reports_cold_build_cache_reuse_and_generation_reuse(self) -> None:
+        self.source.write_text(
+            "\n".join(f"def private_progress_fixture_{index}():\n    return {index}" for index in range(12)) + "\n",
+            encoding="utf-8",
+        )
+        self.second_source.write_text(
+            "\n".join(f"def other_progress_fixture_{index}():\n    return {index}" for index in range(8)) + "\n",
+            encoding="utf-8",
+        )
+        self.settings.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.settings.state_dir / "model-tuning.json").write_text(
+            json.dumps({"pack_id": "progress-pack", "recommendations": {"embedding_batch_size": 8}}), encoding="utf-8"
+        )
+        events: list[dict[str, object]] = []
+        build_semantic_index(self.settings, embed=self._vectors, pack_id="progress-pack", progress=events.append)
+
+        phases = [str(event["phase"]) for event in events]
+        self.assertLess(phases.index("semantic_manifest"), phases.index("semantic_embedding"))
+        self.assertLess(phases.index("semantic_embedding"), phases.index("semantic_shard"))
+        self.assertEqual("semantic_publish", phases[-1])
+        self.assertEqual("rebuilt", events[-1]["generation_state"])
+        embedding = [event for event in events if event["phase"] == "semantic_embedding"]
+        self.assertTrue(any(event.get("embedding_batch_size") == 8 for event in embedding))
+        self.assertEqual(20, max(int(event.get("semantic_cards_total") or 0) for event in events))
+        self.assertEqual(20, max(int(event.get("new_embeddings_completed") or 0) for event in events))
+        self.assertEqual(0, min(int(event.get("cached_embeddings_reused") or 0) for event in embedding))
+        self.assertEqual(0, int(events[-1].get("remaining_embeddings") or 0))
+        safe_keys = {
+            "phase", "phase_label", "elapsed_ms", "semantic_repository_current", "semantic_repository_total",
+            "semantic_cards_discovered", "semantic_cards_total", "cached_embeddings_reused", "new_embeddings_completed",
+            "remaining_embeddings", "embedding_batch_size", "embedding_batches_completed", "semantic_shards_completed",
+            "semantic_shards_total", "generation_state",
+        }
+        self.assertTrue(all(set(event) <= safe_keys for event in events))
+        self.assertNotIn("private_progress_fixture", json.dumps(events))
+
+        self.source.write_text(self.source.read_text(encoding="utf-8") + "\ndef changed_progress_fixture():\n    return 99\n", encoding="utf-8")
+        rebuilt: list[dict[str, object]] = []
+        build_semantic_index(self.settings, embed=self._vectors, pack_id="progress-pack", progress=rebuilt.append)
+        self.assertGreater(max(int(event.get("cached_embeddings_reused") or 0) for event in rebuilt), 0)
+        self.assertGreater(max(int(event.get("new_embeddings_completed") or 0) for event in rebuilt), 0)
+        self.assertEqual("rebuilt", rebuilt[-1]["generation_state"])
+
+        reused: list[dict[str, object]] = []
+        build_semantic_index(self.settings, embed=self._vectors, pack_id="progress-pack", progress=reused.append)
+        self.assertEqual("semantic_reuse", reused[-1]["phase"])
+        self.assertEqual("reused", reused[-1]["generation_state"])
+        self.assertEqual(0, reused[-1]["new_embeddings_completed"])
+
+    def test_semantic_progress_failure_never_reports_publication(self) -> None:
+        self.second_source.write_text("def private_transport_marker():\n    return 'TRANSPORT_FAIL'\n", encoding="utf-8")
+        events: list[dict[str, object]] = []
+
+        def failing(cards: list[str]) -> list[list[float]]:
+            if any("TRANSPORT_FAIL" in card for card in cards):
+                raise RemoteDisconnected("synthetic disconnect")
+            return self._vectors(cards)
+
+        with self.assertRaises(SemanticEmbeddingError):
+            build_semantic_index(self.settings, embed=failing, pack_id="progress-failure-pack", progress=events.append)
+        self.assertNotIn("semantic_publish", [event["phase"] for event in events])
+        self.assertEqual("failed", events[-1]["generation_state"])
+        self.assertNotIn("private_transport_marker", json.dumps(events))
+
     @unittest.skipUnless(importlib.util.find_spec("usearch"), "requires optional semantic extra")
     def test_unpublished_shards_do_not_replace_a_prior_generation(self) -> None:
         manifest = {"pack_id": "shard-pack", "embedding_dimension": 2, "document_instruction": "", "input_suffix": ""}

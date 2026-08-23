@@ -2,17 +2,443 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .catalog import current_generation, diagnose, generation_root
 from .editions import capabilities, current_edition
+from .locks import workspace_exclusive
 
 if TYPE_CHECKING:
     from .core import Settings
 
 
 _GIB = 1024 ** 3
+
+
+Progress = Callable[[dict[str, Any]], None]
+
+
+_PROGRESS_LABELS = {
+    "discovery": "Discovering repositories",
+    "sync": "Reconciling repository snapshots",
+    "core_index": "Building Core indexes",
+    "knowledge": "Building project maps and relationships",
+    "graph": "Building graph state",
+    "semantic_manifest": "Discovering Semantic cards",
+    "semantic_embedding": "Building Semantic index",
+    "semantic_shard": "Writing Semantic shards",
+    "semantic_reuse": "Reused published Semantic generation",
+    "semantic_publish": "Publishing Semantic generation",
+    "complete": "Refresh complete",
+    "failed": "Refresh failed",
+}
+_PROGRESS_COUNTS = {
+    "repository_current", "repository_total", "repositories_unchanged", "repositories_changed",
+    "semantic_repository_current", "semantic_repository_total", "semantic_cards_discovered", "semantic_cards_total",
+    "cached_embeddings_reused", "new_embeddings_completed", "remaining_embeddings", "embedding_batch_size",
+    "embedding_batches_completed", "semantic_shards_completed", "semantic_shards_total",
+}
+_PROGRESS_STATES = {"generation_state", "semantic_status"}
+_SAFE_GENERATION_STATES = {"not-required", "checking", "rebuilding", "rebuilt", "reused", "failed"}
+_SAFE_SEMANTIC_STATUSES = {"not-required", "ready", "failed"}
+_ADDITIONAL_SAFE_PROGRESS_LABELS = {
+    "Queued", "Starting", "Running", "Completed", "Validating local model pack", "Publishing model operation result",
+    "Core refresh complete; Semantic needs attention",
+}
+_SAFE_PROGRESS_LABELS = frozenset(_PROGRESS_LABELS.values()) | _ADDITIONAL_SAFE_PROGRESS_LABELS
+
+
+def progress_event(
+    phase: str,
+    *,
+    elapsed_ms: int,
+    phase_label: str | None = None,
+    **details: Any,
+) -> dict[str, Any]:
+    """Return a fixed, source-free refresh event safe for all local clients."""
+    safe_label = phase_label if phase_label in _SAFE_PROGRESS_LABELS else None
+    event: dict[str, Any] = {
+        "phase": phase if phase in _PROGRESS_LABELS else "failed",
+        "phase_label": safe_label or _PROGRESS_LABELS.get(phase, _PROGRESS_LABELS["failed"]),
+        "elapsed_ms": max(0, int(elapsed_ms)),
+    }
+    for key in _PROGRESS_COUNTS:
+        value = details.get(key)
+        if value is not None and not isinstance(value, bool):
+            try:
+                event[key] = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+    for key in _PROGRESS_STATES:
+        value = details.get(key)
+        if value is None:
+            continue
+        text = str(value)
+        if key == "generation_state" and text in _SAFE_GENERATION_STATES:
+            event[key] = text
+        elif key == "semantic_status" and text in _SAFE_SEMANTIC_STATUSES:
+            event[key] = text
+    return event
+
+
+@dataclass
+class RefreshOutcome:
+    """The one authoritative refresh result shared by CLI and UI surfaces."""
+
+    additions: list[Any]
+    sync: list[Any]
+    graph: list[Any]
+    experience: dict[str, Any]
+    semantic: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "discovered": [item.name for item in self.additions],
+            "sync": [asdict(item) for item in self.sync],
+            "graph": [asdict(item) for item in self.graph],
+            "experience": self.experience,
+            "semantic": self.semantic,
+        }
+
+
+def _progress(callback: Progress | None, started: float, state: dict[str, Any], phase: str, **details: Any) -> None:
+    """Merge safe counters so a final event retains the last known totals."""
+    state.update({key: value for key, value in details.items() if value is not None})
+    if callback is not None:
+        callback(progress_event(phase, elapsed_ms=(time.perf_counter() - started) * 1000, **state))
+
+
+def format_refresh_progress(event: dict[str, Any]) -> str:
+    """Render a concise CLI line from the same safe event supplied to the UI."""
+    elapsed = max(0, int(event.get("elapsed_ms") or 0)) // 1000
+    details: list[str] = []
+    if "repository_total" in event:
+        details.append(f"repos {event.get('repository_current', 0)}/{event['repository_total']}")
+    if "repositories_changed" in event:
+        details.append(f"changed {event['repositories_changed']} unchanged {event.get('repositories_unchanged', 0)}")
+    if "semantic_cards_total" in event:
+        details.append(f"cards {event.get('semantic_cards_discovered', 0)}/{event['semantic_cards_total']}")
+    if "cached_embeddings_reused" in event:
+        details.append(f"cached {event['cached_embeddings_reused']}")
+    if "new_embeddings_completed" in event:
+        details.append(f"embedded {event['new_embeddings_completed']}")
+    if "remaining_embeddings" in event:
+        details.append(f"remaining {event['remaining_embeddings']}")
+    if event.get("embedding_batch_size"):
+        details.append(f"batch {event['embedding_batch_size']}")
+    if "semantic_shards_total" in event:
+        details.append(f"shards {event.get('semantic_shards_completed', 0)}/{event['semantic_shards_total']}")
+    if event.get("generation_state") in {"reused", "rebuilt", "rebuilding"}:
+        details.append(f"generation {event['generation_state']}")
+    suffix = " · " + "; ".join(details) if details else ""
+    return f"[{elapsed // 60:02d}:{elapsed % 60:02d}] {event.get('phase_label', 'Refreshing')}{suffix}"
+
+
+def semantic_status(settings: Settings) -> dict[str, Any]:
+    """Return safe, snapshot-aware semantic readiness without loading a model."""
+    from .semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, SEMANTIC_EMBEDDING_INPUT_VERSION
+
+    try:
+        state = json.loads((settings.state_dir / "semantic-index.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    expected = {repo.name: repo.source_sha or "working-tree" for repo in settings.repositories}
+    actual: dict[str, str] = {}
+    for shard in state.get("shards") or []:
+        if isinstance(shard, dict):
+            actual[str(shard.get("repo") or "")] = str(shard.get("snapshot") or "")
+    for entry in state.get("entries") or []:
+        if isinstance(entry, dict):
+            actual[str(entry.get("repo") or "")] = str(entry.get("snapshot") or "")
+    chunks = len(state.get("entries") or []) + sum(
+        len(item.get("entries") or []) for item in state.get("shards") or [] if isinstance(item, dict)
+    )
+    valid_schema = bool(state) and (
+        state.get("chunk_schema_version") == CHUNK_SCHEMA_VERSION
+        and state.get("card_version") == CARD_VERSION
+        and state.get("embedding_input_version") == SEMANTIC_EMBEDDING_INPUT_VERSION
+    )
+    missing = sorted(name for name, snapshot in expected.items() if actual.get(name) != snapshot)
+    stale = bool(state.get("stale"))
+    aligned = valid_schema and not stale and not missing
+    if not state:
+        reason = "Semantic generation has not been built."
+    elif stale:
+        reason = str(state.get("stale_reason") or "Semantic generation is stale.")
+    elif not valid_schema:
+        reason = "Semantic generation schema is incompatible."
+    elif missing:
+        reason = "Semantic generation does not match current snapshots."
+    else:
+        reason = None
+    return {
+        "available": bool(state),
+        "chunks": chunks,
+        "stale": stale,
+        "aligned": aligned,
+        "generation": str(state.get("generation") or "unknown")[:12] if state else None,
+        "backend": state.get("backend"),
+        "pack_id": state.get("pack_id"),
+        "reason": reason,
+    }
+
+
+@workspace_exclusive
+def refresh_brain(
+    settings: Settings,
+    *,
+    fetch: bool = True,
+    branch_values: list[str] | None = None,
+    discover: bool = True,
+    progress: Progress | None = None,
+) -> RefreshOutcome:
+    """Refresh all authoritative Core state and Semantic state when required.
+
+    A Semantic failure never publishes partial semantic state.  It is returned as
+    an explicit degraded outcome so callers can decide whether a new
+    investigation may proceed.
+    """
+    from .core import discover_and_configure_repositories, generate_map, snapshot_indexes
+    from .editions import current_edition
+    from .experience import build_experience_index, evaluate_sessions
+    from .graph import index_graph
+    from .relations import generate_relationship_map
+    from .sync import parse_branch_overrides, sync_repositories
+
+    started = time.perf_counter()
+    progress_state: dict[str, Any] = {
+        "repository_current": 0,
+        "repository_total": len(settings.repositories),
+        "generation_state": "not-required",
+    }
+
+    def emit(phase: str, **details: Any) -> None:
+        _progress(progress, started, progress_state, phase, **details)
+
+    emit("discovery")
+    additions = discover_and_configure_repositories(settings) if discover else []
+    emit("sync", repository_current=0, repository_total=len(settings.repositories))
+    results = sync_repositories(settings, fetch=fetch, branch_overrides=parse_branch_overrides(settings, branch_values or []))
+    emit("core_index", repository_current=0, repository_total=len(results))
+    _, updated = snapshot_indexes(settings, changed_only=True)
+    emit(
+        "core_index",
+        repository_current=len(results),
+        repository_total=len(results),
+        repositories_changed=len(updated),
+        repositories_unchanged=max(0, len(results) - len(updated)),
+    )
+    emit("knowledge")
+    generate_map(settings)
+    generate_relationship_map(settings)
+    experience = build_experience_index(settings, changed_only=True)
+    evaluation = evaluate_sessions(settings, experience)
+    emit("graph")
+    graphs = index_graph(settings, defer_lazy=True)
+
+    edition = current_edition(settings)
+    if edition in {"semantic", "precision"}:
+        emit("semantic_manifest", generation_state="checking")
+        try:
+            from .semantic import build_semantic_index
+
+            def semantic_progress(event: dict[str, object]) -> None:
+                details = dict(event)
+                phase = str(details.pop("phase", "semantic_embedding"))
+                details.pop("phase_label", None)
+                details.pop("elapsed_ms", None)
+                emit(phase, **details)
+
+            built = build_semantic_index(settings, progress=semantic_progress) if progress is not None else build_semantic_index(settings)
+            semantic = {**semantic_status(settings), "required": True, "status": "ready", "build": built}
+        except (OSError, RuntimeError, ValueError) as error:
+            # Do not leak source, endpoint, proxy, or certificate details to an
+            # operations UI.  The semantic layer already retains its prior
+            # generation atomically when this path fails.
+            semantic = {
+                **semantic_status(settings),
+                "required": True,
+                "status": "failed",
+                "error": f"Semantic indexing failed ({type(error).__name__}).",
+            }
+            emit("complete", phase_label="Core refresh complete; Semantic needs attention", semantic_status="failed")
+    else:
+        semantic = {**semantic_status(settings), "required": False, "status": "not-required"}
+        emit("complete", semantic_status="not-required")
+    if semantic["status"] == "ready":
+        emit("complete", semantic_status="ready")
+    return RefreshOutcome(
+        additions=additions,
+        sync=results,
+        graph=graphs,
+        experience={"cases": len(experience.get("cases") or []), "evaluated_sessions": evaluation["evaluated_sessions"]},
+        semantic=semantic,
+    )
+
+
+@workspace_exclusive
+def change_edition(settings: Settings, edition: str, *, refresh: bool = False, progress: Progress | None = None) -> dict[str, Any]:
+    """Validate a capability profile and optionally align its semantic state."""
+    from .editions import set_edition
+
+    selected = set_edition(settings, edition)
+    outcome = refresh_brain(settings, progress=progress) if refresh else None
+    return {
+        "edition": selected,
+        "capabilities": capabilities(settings),
+        "semantic": outcome.semantic if outcome is not None else semantic_status(settings),
+        "refresh": outcome.as_dict() if outcome is not None else None,
+    }
+
+
+def model_operation(
+    settings: Settings,
+    action: str,
+    value: str | None = None,
+    *,
+    samples: int = 3,
+    latency_budget_ms: int = 3000,
+    expected_sha256: str | None = None,
+    official_only: bool = False,
+) -> Any:
+    """Shared model-pack operation; UI callers may select official aliases only."""
+    from .models import installed_packs, official_packs
+
+    action = action.lower().strip()
+    if action == "list":
+        return {"official": official_packs(), "installed": installed_packs(settings)}
+    if action == "status":
+        return installed_packs(settings)
+    return _model_mutation(
+        settings,
+        action,
+        value,
+        samples=samples,
+        latency_budget_ms=latency_budget_ms,
+        expected_sha256=expected_sha256,
+        official_only=official_only,
+    )
+
+
+@workspace_exclusive
+def _model_mutation(
+    settings: Settings,
+    action: str,
+    value: str | None,
+    *,
+    samples: int,
+    latency_budget_ms: int,
+    expected_sha256: str | None,
+    official_only: bool,
+) -> Any:
+    """Serialize model operations that can write workspace state or runtime data."""
+    from .models import (
+        OFFICIAL_PACKS,
+        autotune_pack,
+        benchmark_pack,
+        install_official_pack,
+        install_pack,
+        install_pack_url,
+        remove_pack,
+        verify_pack,
+    )
+
+    if action == "install" and not value:
+        raise ValueError("brain model install requires an official pack alias, a local pack path, or an approved HTTPS release URL")
+    if not value:
+        raise ValueError(f"brain model {action} requires PACK")
+    alias = value.lower()
+    pack_id = str((OFFICIAL_PACKS.get(alias) or {}).get("pack_id") or value)
+    if action == "install":
+        if alias in OFFICIAL_PACKS:
+            return install_official_pack(settings, alias)
+        if official_only:
+            raise ValueError("UI model installation accepts only an official Project Brain pack alias")
+        if value.startswith("https://"):
+            if not expected_sha256:
+                raise ValueError("brain model install URL requires --sha256 from the approved release manifest")
+            return install_pack_url(settings, value, expected_sha256)
+        if "://" in value or value.startswith("github:"):
+            raise ValueError("model install accepts a local pack path or approved HTTPS release URL only")
+        return install_pack(settings, Path(value))
+    if action == "verify":
+        return verify_pack(settings, pack_id)
+    if action == "benchmark":
+        return benchmark_pack(settings, pack_id, samples=samples)
+    if action == "autotune":
+        return autotune_pack(settings, pack_id, samples=samples, latency_budget_ms=latency_budget_ms)
+    if action == "remove":
+        remove_pack(settings, pack_id)
+        return {"pack_id": pack_id, "removed": True}
+    raise ValueError("model action must be list, status, install, verify, benchmark, autotune, or remove")
+
+
+def model_status(settings: Settings) -> dict[str, Any]:
+    """Safe model-pack state for UI rendering; never expose local paths or secrets."""
+    from .models import OFFICIAL_PACKS, installed_packs, pack_compatibility_error
+
+    installed = []
+    for pack in installed_packs(settings):
+        compatible = not bool(pack.get("invalid")) and pack_compatibility_error(pack) is None
+        installed.append({
+            "pack_id": pack.get("pack_id"),
+            "capability": pack.get("capability"),
+            "model_family": pack.get("model_family"),
+            "verified": bool(pack.get("verified")),
+            "compatible": compatible,
+            "compatibility_error": pack_compatibility_error(pack) if not compatible and not pack.get("invalid") else "Invalid installed manifest" if pack.get("invalid") else None,
+        })
+    return {
+        "official": [
+            {"alias": alias, "pack_id": value.get("pack_id"), "capability": value.get("capability")}
+            for alias, value in sorted(OFFICIAL_PACKS.items())
+        ],
+        "installed": installed,
+    }
+
+
+def dashboard_status(settings: Settings) -> dict[str, Any]:
+    """One safe status calculation reused by the operations UI and CLI status."""
+    requested = current_edition(settings)
+    available = capabilities(settings)
+    semantic = semantic_status(settings)
+    repo_freshness = freshness(settings)
+    core_ready = bool(available.get("lexical_index")) and all(item.get("current") for item in repo_freshness["repositories"])
+    if requested == "precision" and available.get("reranker") and available.get("embedding") and semantic["aligned"]:
+        effective, reason = "Precision active", None
+    elif requested == "precision":
+        effective = "Degraded"
+        reason = "Verified compatible reranker pack is unavailable" if not available.get("reranker") else semantic["reason"] or "Semantic generation is not aligned"
+    elif requested == "semantic" and available.get("embedding") and semantic["aligned"]:
+        effective, reason = "Semantic active", None
+    elif requested == "core":
+        effective, reason = "Core", None
+    elif not available.get("embedding"):
+        effective, reason = "Degraded", "Verified compatible embedding pack or vector backend is unavailable"
+    else:
+        effective, reason = "Degraded", semantic["reason"] or "Semantic generation is not aligned"
+    if not core_ready:
+        health = "Action required"
+    elif effective == "Degraded":
+        health = "Degraded"
+    else:
+        health = "Healthy"
+    return {
+        "version": __import__("brain").__version__,
+        "edition": requested,
+        "effective": effective,
+        "reason": reason,
+        "health": health,
+        "core": {"ready": core_ready},
+        "semantic": semantic,
+        "capabilities": available,
+        "freshness": repo_freshness,
+        "models": model_status(settings),
+        "managed_runtime": "loopback direct enforced",
+    }
 
 
 def _directory_bytes(path: Path) -> int:
@@ -117,6 +543,7 @@ def _semantic_shard_removals(settings: Settings) -> list[Path]:
     return [path for path in root.glob("*.usearch") if path.resolve() not in keep]
 
 
+@workspace_exclusive
 def gc(settings: Settings, *, dry_run: bool = True, keep_recent: int = 2) -> dict[str, Any]:
     root = generation_root(settings)
     pinned = _pinned_generations(settings)

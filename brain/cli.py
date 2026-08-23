@@ -243,15 +243,10 @@ def _refresh_all(
     branch_values: list[str] | None = None,
     discover: bool = True,
 ) -> tuple[list, list[SyncResult], list[GraphIndexResult]]:
-    additions = discover_and_configure_repositories(settings) if discover else []
-    overrides = parse_branch_overrides(settings, branch_values or [])
-    results = sync_repositories(settings, fetch=fetch, branch_overrides=overrides)
-    snapshot_indexes(settings, changed_only=True)
-    generate_map(settings)
-    generate_relationship_map(settings)
-    experience = build_experience_index(settings, changed_only=True)
-    evaluate_sessions(settings, experience)
-    return additions, results, index_graph(settings, defer_lazy=True)
+    from .ops import refresh_brain
+
+    outcome = refresh_brain(settings, fetch=fetch, branch_values=branch_values, discover=discover)
+    return outcome.additions, outcome.sync, outcome.graph
 
 
 def _print_discovered(repositories: list) -> None:
@@ -463,28 +458,34 @@ def execute(args: argparse.Namespace) -> int:
         )
         return 0
     if args.command == "refresh":
-        additions, results, graphs = _refresh_all(
+        from .ops import format_refresh_progress, refresh_brain
+
+        last_phase = ""
+        last_second = -1
+
+        def report_progress(event: dict[str, object]) -> None:
+            nonlocal last_phase, last_second
+            phase = str(event.get("phase") or "")
+            second = int(event.get("elapsed_ms") or 0) // 1000
+            if phase != last_phase or second != last_second or phase in {"complete", "semantic_reuse"}:
+                print(format_refresh_progress(event))
+                last_phase, last_second = phase, second
+
+        outcome = refresh_brain(
             settings,
             fetch=not args.no_fetch,
             branch_values=args.branch,
             discover=not args.no_discover,
+            progress=report_progress,
         )
-        _print_discovered(additions)
-        _print_sync(results)
-        _print_graph(graphs)
+        _print_discovered(outcome.additions)
+        _print_sync(outcome.sync)
+        _print_graph(outcome.graph)
         print(f"Generated {settings.generated_dir / 'PROJECT_FACTS.md'}")
         print(f"Generated {settings.generated_dir / 'PROJECT_RELATIONSHIPS.md'}")
         print(f"Generated {settings.generated_dir / 'EXPERIENCE_REPORT.md'}")
-        from .editions import current_edition
-
-        if current_edition(settings) in {"semantic", "precision"}:
-            from .semantic import build_semantic_index
-
-            try:
-                semantic = build_semantic_index(settings)
-                print("Semantic index: " + json.dumps(semantic, sort_keys=True))
-            except RuntimeError as error:
-                print(f"Semantic index unavailable; Core remains active: {error}")
+        if outcome.semantic["required"]:
+            print("Semantic index: " + json.dumps(outcome.semantic, sort_keys=True))
         return 0
     if args.command == "map":
         generate_map(settings)
@@ -559,12 +560,13 @@ def execute(args: argparse.Namespace) -> int:
         print(json.dumps(report, indent=2) if args.json else "\n".join(f"L{item['tier']} {item['kind']}: {item['value']} — {item['reason']}" for item in report["operations"]))
         return 0
     if args.command == "edition":
-        from .editions import current_edition, set_edition
+        from .editions import current_edition
+        from .ops import change_edition
 
         if args.action == "set":
             if not args.value:
                 raise BrainError("brain edition set requires core, semantic, or precision")
-            print(set_edition(settings, args.value))
+            print(change_edition(settings, args.value)["edition"])
         else:
             print(current_edition(settings))
         return 0
@@ -574,57 +576,20 @@ def execute(args: argparse.Namespace) -> int:
         print(json.dumps(capabilities(settings), indent=2))
         return 0
     if args.command == "model":
-        from .models import (
-            OFFICIAL_PACKS,
-            autotune_pack,
-            benchmark_pack,
-            install_official_pack,
-            install_pack,
-            install_pack_url,
-            installed_packs,
-            official_packs,
-            remove_pack,
-            verify_pack,
-        )
+        from .ops import model_operation
 
-        if args.action == "list":
-            print(json.dumps({"official": official_packs(), "installed": installed_packs(settings)}, indent=2))
-        elif args.action == "status":
-            print(json.dumps(installed_packs(settings), indent=2))
-        elif args.action == "install":
-            if not args.value:
-                raise BrainError("brain model install requires an official pack alias, a local pack path, or an approved HTTPS release URL")
-            if args.value.lower() in OFFICIAL_PACKS:
-                print(json.dumps(install_official_pack(settings, args.value), indent=2))
-            elif args.value.startswith("https://"):
-                if not args.sha256:
-                    raise BrainError("brain model install URL requires --sha256 from the approved release manifest")
-                print(json.dumps(install_pack_url(settings, args.value, args.sha256), indent=2))
-            elif "://" in args.value or args.value.startswith("github:"):
-                raise BrainError("model install accepts a local pack path or approved HTTPS release URL only")
-            else:
-                print(json.dumps(install_pack(settings, Path(args.value)), indent=2))
-        elif args.action == "verify":
-            if not args.value:
-                raise BrainError("brain model verify requires PACK")
-            pack_id = str((OFFICIAL_PACKS.get(args.value.lower()) or {}).get("pack_id") or args.value)
-            print(json.dumps(verify_pack(settings, pack_id), indent=2))
-        elif args.action == "benchmark":
-            if not args.value:
-                raise BrainError("brain model benchmark requires PACK")
-            pack_id = str((OFFICIAL_PACKS.get(args.value.lower()) or {}).get("pack_id") or args.value)
-            print(json.dumps(benchmark_pack(settings, pack_id, samples=args.samples), indent=2))
-        elif args.action == "autotune":
-            if not args.value:
-                raise BrainError("brain model autotune requires PACK")
-            pack_id = str((OFFICIAL_PACKS.get(args.value.lower()) or {}).get("pack_id") or args.value)
-            print(json.dumps(autotune_pack(settings, pack_id, samples=args.samples, latency_budget_ms=args.latency_budget_ms), indent=2))
+        result = model_operation(
+            settings,
+            args.action,
+            args.value,
+            samples=args.samples,
+            latency_budget_ms=args.latency_budget_ms,
+            expected_sha256=args.sha256,
+        )
+        if args.action == "remove":
+            print(f"Removed local model pack {result['pack_id']}")
         else:
-            if not args.value:
-                raise BrainError("brain model remove requires PACK")
-            pack_id = str((OFFICIAL_PACKS.get(args.value.lower()) or {}).get("pack_id") or args.value)
-            remove_pack(settings, pack_id)
-            print(f"Removed local model pack {pack_id}")
+            print(json.dumps(result, indent=2))
         return 0
     if args.command in {"freshness", "storage", "gc"}:
         from .ops import freshness, gc, storage

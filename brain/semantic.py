@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable
 from urllib.error import URLError
 
 from .models import active_pack, embedding_batch_size, embedding_request_bytes, runtime_for_pack
+from .locks import workspace_exclusive
 
 if TYPE_CHECKING:
     from .core import Repository, Settings
@@ -55,6 +56,18 @@ class Chunk:
 
 class SemanticEmbeddingError(RuntimeError):
     """A sanitized semantic-indexing failure safe for CLI diagnostics."""
+
+
+SemanticProgress = Callable[[dict[str, object]], None]
+
+
+_SEMANTIC_PROGRESS_LABELS = {
+    "semantic_manifest": "Discovering Semantic cards",
+    "semantic_embedding": "Building Semantic index",
+    "semantic_shard": "Writing Semantic shards",
+    "semantic_reuse": "Reused published Semantic generation",
+    "semantic_publish": "Publishing Semantic generation",
+}
 
 
 def _excluded(path: Path, content: bytes) -> bool:
@@ -257,6 +270,7 @@ def _cache_vectors(
     document_instruction: str = "",
     input_suffix: str = "",
     restart: Callable[[], None] | None = None,
+    progress: SemanticProgress | None = None,
 ) -> list[list[float]]:
     """Reuse vectors by stable chunk identity without persisting query/source text."""
     from .catalog import connect
@@ -277,6 +291,22 @@ def _cache_vectors(
         for card in cards
     ]
     vectors: list[list[float] | None] = [None] * len(chunks)
+    cached = 0
+    completed = 0
+    completed_batches = 0
+
+    def report(*, batch: int = 0, remaining: int | None = None) -> None:
+        if progress is not None:
+            progress({
+                "semantic_cards_discovered": len(chunks),
+                "semantic_cards_total": len(chunks),
+                "cached_embeddings_reused": cached,
+                "new_embeddings_completed": completed,
+                "remaining_embeddings": remaining,
+                "embedding_batch_size": batch,
+                "embedding_batches_completed": completed_batches,
+            })
+
     connection = connect(settings)
     try:
         from datetime import UTC, datetime
@@ -291,10 +321,12 @@ def _cache_vectors(
                     if isinstance(value, list) and len(value) == dimension:
                         vectors[index] = [float(number) for number in value]
                         connection.execute("UPDATE embedding_cache SET last_used_at=? WHERE cache_key=?", (used_at, key))
+                        cached += 1
                         continue
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
             missing.append(index)
+        report(remaining=len(missing))
         if missing:
             batch_size = max(1, batch_size or len(missing))
             for batch in _bounded_embedding_batches(
@@ -303,6 +335,7 @@ def _cache_vectors(
                 pending = [batch]
                 while pending:
                     current = pending.pop(0)
+                    report(batch=len(current), remaining=len(missing) - completed)
                     try:
                         computed = embed([cards[index] for index in current])
                     except Exception as error:
@@ -327,10 +360,13 @@ def _cache_vectors(
                             "INSERT OR REPLACE INTO embedding_cache(cache_key, pack_id, dimension, vector_json, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)",
                             (keys[index], pack_id, dimension, json.dumps(normalized, separators=(",", ":")), used_at, used_at),
                         )
+                    completed += len(current)
+                    completed_batches += 1
                     # Successful sub-batches survive a later transport failure;
                     # vector cache entries are content-addressed and are not a
                     # semantic-index publication.
                     connection.commit()
+                    report(remaining=len(missing) - completed)
             connection.execute(
                 "DELETE FROM embedding_cache WHERE cache_key NOT IN (SELECT cache_key FROM embedding_cache ORDER BY last_used_at DESC, cache_key DESC LIMIT 100000)"
             )
@@ -456,17 +492,32 @@ def _probe_embedding_dimension(
     raise AssertionError("unreachable")
 
 
+@workspace_exclusive
 def build_semantic_index(
     settings: Settings,
     *,
     embed: Callable[[list[str]], list[list[float]]] | None = None,
     pack_id: str | None = None,
+    progress: SemanticProgress | None = None,
 ) -> dict[str, object]:
     """Build per-repository, per-snapshot USearch shards from an approved local pack.
 
     An injected embedder is reserved for tests and uses an exact JSON mock index;
     production indexing refuses to silently substitute a hash embedding for a pack.
     """
+    started = time.perf_counter()
+    progress_state: dict[str, object] = {}
+
+    def emit(phase: str, **details: object) -> None:
+        progress_state.update({key: value for key, value in details.items() if value is not None})
+        if progress is not None:
+            progress({
+                "phase": phase,
+                "phase_label": _SEMANTIC_PROGRESS_LABELS[phase],
+                "elapsed_ms": max(0, round((time.perf_counter() - started) * 1000)),
+                **progress_state,
+            })
+
     runtime = None
     manifest = active_pack(settings, "embedding") if embed is None else None
     if embed is None and manifest is None:
@@ -491,13 +542,41 @@ def build_semantic_index(
             raise RuntimeError("USearch is required for Semantic Edition; install `project-brain-context[semantic]`")
 
         backend_name = "usearch" if backend is not None else "exact-mock"
-        groups = [(repo, repo.source_sha or "working-tree", _chunk_groups(repo)) for repo in settings.repositories]
+        groups: list[tuple[Repository, str, list[Chunk]]] = []
+        card_total = 0
+        semantic_repo_total = len(settings.repositories)
+        emit("semantic_manifest", semantic_repository_current=0, semantic_repository_total=semantic_repo_total, semantic_cards_discovered=0, generation_state="checking")
+        for position, repo in enumerate(settings.repositories, start=1):
+            chunks = _chunk_groups(repo)
+            groups.append((repo, repo.source_sha or "working-tree", chunks))
+            card_total += len(chunks)
+            emit(
+                "semantic_manifest",
+                semantic_repository_current=position,
+                semantic_repository_total=semantic_repo_total,
+                semantic_cards_discovered=card_total,
+            )
+        emit("semantic_manifest", semantic_cards_total=card_total)
         published = _published_state(settings)
         if not dimension and published and published.get("pack_id") == pack_id:
             dimension = int(published.get("dimension") or 0)
         if dimension and _state_is_reusable(
             published, groups, backend=backend_name, pack_id=pack_id, dimension=dimension,
         ):
+            shard_total = sum(bool(chunks) for _, _, chunks in groups)
+            emit(
+                "semantic_reuse",
+                semantic_cards_discovered=card_total,
+                semantic_cards_total=card_total,
+                cached_embeddings_reused=0,
+                new_embeddings_completed=0,
+                remaining_embeddings=0,
+                embedding_batch_size=0,
+                embedding_batches_completed=0,
+                semantic_shards_completed=shard_total,
+                semantic_shards_total=shard_total,
+                generation_state="reused",
+            )
             return _state_result(published)
 
         state_shards: list[dict[str, object]] = []
@@ -505,7 +584,14 @@ def build_semantic_index(
         shard_root = _shard_root(settings)
         shard_root.mkdir(parents=True, exist_ok=True)
         generation_id = hashlib.sha256(f"{pack_id}\0{time.time_ns()}\0{os.getpid()}".encode()).hexdigest()
-        for repo, snapshot, chunks in groups:
+        emit("semantic_embedding", generation_state="rebuilding")
+        shard_total = sum(bool(chunks) for _, _, chunks in groups)
+        last_semantic_position = max((position for position, (_, _, chunks) in enumerate(groups, start=1) if chunks), default=0)
+        completed_shards = 0
+        cached_total = 0
+        embedded_total = 0
+        batches_total = 0
+        for position, (repo, snapshot, chunks) in enumerate(groups, start=1):
             if not chunks:
                 continue
             if not dimension:
@@ -513,29 +599,65 @@ def build_semantic_index(
                     embed, chunks[0].card, document_instruction=document_instruction, input_suffix=input_suffix,
                     restart=runtime.shutdown if runtime is not None else None,
                 )
-            vectors = _cache_vectors(
+            repo_progress = {"cached": 0, "embedded": 0, "batches": 0}
+
+            def cache_progress(details: dict[str, object]) -> None:
+                repo_progress["cached"] = int(details.get("cached_embeddings_reused") or 0)
+                repo_progress["embedded"] = int(details.get("new_embeddings_completed") or 0)
+                repo_progress["batches"] = int(details.get("embedding_batches_completed") or 0)
+                values: dict[str, object] = {
+                    "semantic_repository_current": position,
+                    "semantic_repository_total": semantic_repo_total,
+                    "semantic_cards_discovered": card_total,
+                    "semantic_cards_total": card_total,
+                    "cached_embeddings_reused": cached_total + repo_progress["cached"],
+                    "new_embeddings_completed": embedded_total + repo_progress["embedded"],
+                    "embedding_batch_size": int(details.get("embedding_batch_size") or 0),
+                    "embedding_batches_completed": batches_total + repo_progress["batches"],
+                }
+                # The cache lookup is intentionally performed by the real per-repo
+                # indexing loop. The exact global remainder becomes known once the
+                # final repository's cache entries have been checked.
+                if position == last_semantic_position:
+                    values["remaining_embeddings"] = int(details.get("remaining_embeddings") or 0)
+                emit("semantic_embedding", **values)
+
+            repo_vectors = _cache_vectors(
                 settings, pack_id, chunks, dimension=dimension, embed=embed, batch_size=embedding_batch_size(settings, pack_id),
                 document_instruction=document_instruction, input_suffix=input_suffix,
                 restart=runtime.shutdown if runtime is not None else None,
+                progress=cache_progress,
             )
+            cached_total += repo_progress["cached"]
+            embedded_total += repo_progress["embedded"]
+            batches_total += repo_progress["batches"]
             entries = _entries(chunks)
             if backend is None:
-                all_mock_entries.extend([{**entry, "repo": repo.name, "snapshot": snapshot, "vector": vector} for entry, vector in zip(entries, vectors, strict=True)])
-                continue
-            Index, numpy = backend
-            index = Index(ndim=dimension, metric="cos", dtype="f16")
-            index.add(numpy.arange(len(vectors), dtype=numpy.uint64), numpy.asarray(vectors, dtype=numpy.float32))
-            # A shard is never overwritten in place.  The old state continues
-            # to point at its immutable generation until every new shard has
-            # been built and the state pointer is atomically replaced.
-            shard_identity = f"{repo.name}\0{snapshot}\0{pack_id}\0{generation_id}"
-            shard = shard_root / f"{hashlib.sha256(shard_identity.encode()).hexdigest()}.usearch"
-            temporary = shard.with_suffix(".building")
-            index.save(str(temporary))
-            temporary.replace(shard)
-            state_shards.append({"repo": repo.name, "snapshot": snapshot, "path": str(shard), "entries": entries})
+                all_mock_entries.extend([{**entry, "repo": repo.name, "snapshot": snapshot, "vector": vector} for entry, vector in zip(entries, repo_vectors, strict=True)])
+            else:
+                Index, numpy = backend
+                index = Index(ndim=dimension, metric="cos", dtype="f16")
+                index.add(numpy.arange(len(repo_vectors), dtype=numpy.uint64), numpy.asarray(repo_vectors, dtype=numpy.float32))
+                # A shard is never overwritten in place.  The old state continues
+                # to point at its immutable generation until every new shard has
+                # been built and the state pointer is atomically replaced.
+                shard_identity = f"{repo.name}\0{snapshot}\0{pack_id}\0{generation_id}"
+                shard = shard_root / f"{hashlib.sha256(shard_identity.encode()).hexdigest()}.usearch"
+                temporary = shard.with_suffix(".building")
+                index.save(str(temporary))
+                temporary.replace(shard)
+                state_shards.append({"repo": repo.name, "snapshot": snapshot, "path": str(shard), "entries": entries})
+            completed_shards += 1
+            emit(
+                "semantic_shard",
+                semantic_repository_current=position,
+                semantic_repository_total=semantic_repo_total,
+                semantic_shards_completed=completed_shards,
+                semantic_shards_total=shard_total,
+            )
 
         state = {
+            "generation": generation_id,
             "chunk_schema_version": CHUNK_SCHEMA_VERSION,
             "card_version": CARD_VERSION,
             "backend": "usearch" if backend is not None else "exact-mock",
@@ -547,6 +669,12 @@ def build_semantic_index(
             "entries": all_mock_entries,
         }
         _atomic_state_write(_state_path(settings), state)
+        emit(
+            "semantic_publish",
+            semantic_shards_completed=completed_shards,
+            semantic_shards_total=shard_total,
+            generation_state="rebuilt",
+        )
         # Only the current snapshot can be queried.  Old immutable shards have no
         # session dependency after their evidence was materialized, so trim them.
         keep = {Path(str(shard["path"])).resolve() for shard in state_shards}
@@ -554,6 +682,9 @@ def build_semantic_index(
             if stale.resolve() not in keep:
                 stale.unlink(missing_ok=True)
         return _state_result(state)
+    except Exception:
+        emit("semantic_embedding", generation_state="failed")
+        raise
     finally:
         if runtime is not None:
             runtime.shutdown()

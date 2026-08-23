@@ -1773,6 +1773,32 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
             f"C{index}": {"repo": item.repo, "path": item.path, "line": item.line}
             for index, item in enumerate(bundle.additional_candidates[:50], 1)
         }
+        from .editions import current_edition
+
+        found_by = {source for item in bundle.evidence for source in item.found_by}
+        requested_edition = current_edition(settings)
+        semantic_used = "local semantic index" in found_by
+        reranker_used = "local reranker" in found_by
+        if requested_edition == "precision" and reranker_used and semantic_used:
+            effective_edition = "Precision"
+        elif requested_edition in {"semantic", "precision"} and semantic_used:
+            effective_edition = "Semantic"
+        elif requested_edition == "core":
+            effective_edition = "Core"
+        else:
+            effective_edition = "Degraded Core"
+        retrieval = {
+            "requested_edition": requested_edition,
+            "effective_edition": effective_edition,
+            "semantic_recall_used": semantic_used,
+            "reranker_used": reranker_used,
+            "candidate_count": int(bundle.metrics.get("candidates") or 0),
+            "evidence_count": len(bundle.evidence),
+            "generation": state.get("generation"),
+            "snapshots": sorted((state.get("sources") or {}).keys()),
+            "timing_ms": bundle.metrics,
+            "warnings": list(bundle.warnings),
+        }
         history = list(state.get("request_history") or [])
         history.append({
             "number": number,
@@ -1782,6 +1808,7 @@ def create_context(settings: Settings, ticket: str, request_text: str, include_d
             "operations": plan["operation_count"],
             "new_evidence": len(new_evidence),
             "unresolved": len(bundle.unresolved),
+            "retrieval": retrieval,
             "created_at": datetime.now(UTC).isoformat(),
         })
         state["request_history"] = history

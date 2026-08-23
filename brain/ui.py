@@ -5,6 +5,7 @@ import re
 import secrets
 import shutil
 import threading
+import time
 import webbrowser
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -22,20 +23,15 @@ from .core import (
     create_context,
     create_feedback,
     deliver,
-    discover_and_configure_repositories,
-    generate_map,
     load_index_state,
     load_source_state,
     request_repair_prompt,
     session_dir,
     session_state,
-    snapshot_indexes,
     start_session,
 )
-from .graph import index_graph
-from .relations import generate_relationship_map
-from .experience import build_experience_index, evaluate_sessions, load_experience_index
-from .sync import parse_branch_overrides, sync_repositories
+from .experience import load_experience_index
+from .ops import progress_event
 
 
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
@@ -100,9 +96,8 @@ def _sessions(settings: Settings) -> list[dict[str, Any]]:
 
 def project_status(settings: Settings) -> dict[str, Any]:
     from .catalog import current_generation
-    from .editions import capabilities, current_edition
     from .metrics import benchmark_report
-    from .ops import storage
+    from .ops import dashboard_status, storage
 
     sources = load_source_state(settings)
     indexes = load_index_state(settings)
@@ -144,6 +139,7 @@ def project_status(settings: Settings) -> dict[str, Any]:
             "structural": structural,
             "warning": source.get("warning"),
         })
+    brain = dashboard_status(settings)
     return {
         "project": {"name": settings.name, "config": settings.config_path.name},
         "summary": {
@@ -156,12 +152,13 @@ def project_status(settings: Settings) -> dict[str, Any]:
         "repositories": repositories,
         "sessions": _sessions(settings),
         "retrieval": {
-            "edition": current_edition(settings),
+            "edition": brain["edition"],
             "generation": (current_generation(settings) or {}).get("generation"),
-            "capabilities": capabilities(settings),
+            "capabilities": brain["capabilities"],
             "benchmark": benchmark_report(settings),
             "storage": storage(settings),
         },
+        "brain": brain,
     }
 
 
@@ -171,21 +168,9 @@ def _refresh(
     fetch: bool = True,
     branch_values: list[str] | None = None,
 ) -> dict[str, Any]:
-    additions = discover_and_configure_repositories(settings)
-    overrides = parse_branch_overrides(settings, branch_values or [])
-    synced = sync_repositories(settings, fetch=fetch, branch_overrides=overrides)
-    snapshot_indexes(settings, changed_only=True)
-    generate_map(settings)
-    generate_relationship_map(settings)
-    experience = build_experience_index(settings, changed_only=True)
-    evaluation = evaluate_sessions(settings, experience)
-    graphs = index_graph(settings, defer_lazy=True)
-    return {
-        "discovered": [repo.name for repo in additions],
-        "sync": [asdict(item) for item in synced],
-        "graph": [asdict(item) for item in graphs],
-        "experience": {"cases": len(experience.get("cases") or []), "evaluated_sessions": evaluation["evaluated_sessions"]},
-    }
+    from .ops import refresh_brain
+
+    return refresh_brain(settings, fetch=fetch, branch_values=branch_values).as_dict()
 
 
 def _delivery(settings: Settings, ticket: str, part: int | None = None) -> dict[str, Any]:
@@ -210,6 +195,8 @@ def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
         raise BrainError(f"Session {ticket} does not exist")
     state = session_state(settings, ticket)
     ticket_path = directory / "ticket.md"
+    history = state.get("request_history") or []
+    latest = history[-1] if history else {}
     return {
         "ticket": ticket,
         "ticket_text": ticket_path.read_text(encoding="utf-8") if ticket_path.is_file() else "",
@@ -217,7 +204,8 @@ def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
         "feedbacks": int(state.get("feedbacks") or 0),
         "status": str(state.get("status") or "investigating"),
         "no_progress_rounds": int(state.get("no_progress_rounds") or 0),
-        "request_history": state.get("request_history") or [],
+        "request_history": history,
+        "retrieval": latest.get("retrieval") if isinstance(latest, dict) else {},
         "artifacts": _session_artifacts(settings, ticket),
         "delivery": _delivery(settings, ticket),
     }
@@ -252,13 +240,115 @@ def _delete_session(settings: Settings, ticket: str) -> list[str]:
     return removed
 
 
+class _OperationCoordinator:
+    """Bounded in-memory coordinator for UI mutations; no source is retained."""
+
+    _RETAINED = 20
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active: str | None = None
+        self._jobs: dict[str, dict[str, Any]] = {}
+
+    def _claim(self, name: str) -> str:
+        with self._lock:
+            if self._active is not None:
+                active = self._jobs.get(self._active) or {}
+                raise BrainError(f"Another state-changing operation is already running: {active.get('name') or 'operation'}")
+            job_id = secrets.token_urlsafe(12)
+            self._active = job_id
+            self._jobs[job_id] = {
+                "id": job_id,
+                "name": name,
+                "status": "pending",
+                "phase": "Queued",
+                "progress": progress_event("discovery", elapsed_ms=0, phase_label="Queued"),
+                "started_at_ms": round(time.time() * 1000),
+                "result": None,
+                "error": None,
+                "_started": time.perf_counter(),
+            }
+            return job_id
+
+    def _finish(self, job_id: str, *, result: dict[str, Any] | None = None, error: Exception | None = None) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            if error is None:
+                job.update({"status": "succeeded", "phase": "Completed", "result": result or {}, "error": None})
+            else:
+                # Errors from refresh/model runtimes can contain a local path or
+                # transport context.  The UI receives only a safe class label.
+                message = str(error).strip()
+                safe_validation = isinstance(error, (BrainError, ValueError)) and "://" not in message and len(message) <= 280
+                job.update({
+                    "status": "failed",
+                    "phase": "Failed",
+                    "progress": progress_event("failed", elapsed_ms=(time.perf_counter() - float(job["_started"])) * 1000),
+                    "result": None,
+                    "error": message if safe_validation else f"Operation failed ({type(error).__name__}).",
+                })
+            if self._active == job_id:
+                self._active = None
+            completed = [key for key, item in self._jobs.items() if item["status"] in {"succeeded", "failed"}]
+            for key in completed[:-self._RETAINED]:
+                self._jobs.pop(key, None)
+
+    def _progress(self, job_id: str, event: dict[str, Any] | str) -> None:
+        with self._lock:
+            if job_id in self._jobs:
+                if isinstance(event, str):
+                    safe = progress_event("discovery", elapsed_ms=0, phase_label=event)
+                else:
+                    details = {key: value for key, value in event.items() if key not in {"phase", "phase_label", "elapsed_ms"}}
+                    safe = progress_event(
+                        str(event.get("phase") or "failed"),
+                        elapsed_ms=event.get("elapsed_ms") or 0,
+                        phase_label=str(event.get("phase_label") or "") or None,
+                        **details,
+                    )
+                self._jobs[job_id].update({"status": "running", "phase": safe["phase_label"], "progress": safe})
+
+    def start(self, name: str, operation: Any) -> dict[str, Any]:
+        job_id = self._claim(name)
+
+        def run() -> None:
+            try:
+                self._progress(job_id, "Starting")
+                result = operation(lambda event: self._progress(job_id, event))
+            except Exception as error:
+                self._finish(job_id, error=error)
+            else:
+                self._finish(job_id, result=result)
+
+        threading.Thread(target=run, name=f"project-brain-{name}", daemon=True).start()
+        return self.get(job_id)
+
+    def foreground(self, name: str, operation: Any) -> Any:
+        job_id = self._claim(name)
+        try:
+            self._progress(job_id, "Running")
+            result = operation()
+        except Exception as error:
+            self._finish(job_id, error=error)
+            raise
+        self._finish(job_id, result={})
+        return result
+
+    def get(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise BrainError("Operation does not exist")
+            return {key: value for key, value in job.items() if not key.startswith("_")}
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address: tuple[str, int], settings: Settings, token: str):
         self.settings = settings
         self.token = token
-        self.action_lock = threading.Lock()
+        self.operations = _OperationCoordinator()
         super().__init__(address, _Handler)
 
 
@@ -328,6 +418,23 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/status":
                 self._json({"ok": True, "data": project_status(self.server.settings)})
+            elif parsed.path == "/api/models":
+                from .ops import model_status
+
+                self._json({"ok": True, "data": model_status(self.server.settings)})
+            elif parsed.path == "/api/job":
+                self._json({"ok": True, "data": self.server.operations.get(_one(query, "id"))})
+            elif parsed.path == "/api/diagnostics":
+                from .models import model_download_trust_status
+                from .ops import dashboard_status
+
+                trust, trust_ok = model_download_trust_status(self.server.settings)
+                self._json({"ok": True, "data": {
+                    "ok": trust_ok,
+                    "summary": "Local diagnostics are healthy." if trust_ok else "Local diagnostics need attention.",
+                    "model_download_trust": trust,
+                    "brain": dashboard_status(self.server.settings),
+                }})
             elif parsed.path == "/api/session":
                 self._json({"ok": True, "data": _session_detail(self.server.settings, _one(query, "ticket"))})
             elif parsed.path == "/api/artifact":
@@ -357,15 +464,66 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     self._json({"ok": True, "data": data})
                 return
-            with self.server.action_lock:
-                self._action(parsed.path, body)
-        except (BrainError, OSError, ValueError) as exc:
+            if parsed.path in {"/api/refresh", "/api/model", "/api/edition"}:
+                self._start_operation(parsed.path, body)
+            else:
+                self.server.operations.foreground(parsed.path, lambda: self._action(parsed.path, body))
+        except (BrainError, OSError, RuntimeError, ValueError) as exc:
             self._error(exc)
+
+    def _start_operation(self, path: str, body: dict[str, Any]) -> None:
+        settings = self.server.settings
+        if path == "/api/refresh":
+            from .ops import refresh_brain
+
+            fetch = bool(body.get("fetch", True))
+            discover = bool(body.get("discover", True))
+            job = self.server.operations.start(
+                "refresh",
+                lambda progress: {**refresh_brain(settings, fetch=fetch, discover=discover, progress=progress).as_dict(), "status": project_status(settings)},
+            )
+        elif path == "/api/edition":
+            from .ops import change_edition
+
+            edition = str(body.get("edition") or "")
+            refresh = bool(body.get("refresh"))
+            job = self.server.operations.start(
+                "edition",
+                lambda progress: {**change_edition(settings, edition, refresh=refresh, progress=progress), "status": project_status(settings)},
+            )
+        else:
+            from .ops import model_operation
+
+            action = str(body.get("action") or "")
+            value = str(body.get("pack") or "") or None
+            if action not in {"install", "verify", "remove", "benchmark", "autotune"}:
+                raise BrainError("UI model action is not supported")
+            job = self.server.operations.start(
+                f"model-{action}",
+                lambda progress: self._model_job(settings, action, value, progress),
+            )
+        self._json({"ok": True, "data": job}, HTTPStatus.ACCEPTED)
+
+    @staticmethod
+    def _model_job(settings: Settings, action: str, value: str | None, progress: Any) -> dict[str, Any]:
+        from .ops import model_operation
+
+        progress("Validating local model pack")
+        result = model_operation(settings, action, value, official_only=True)
+        progress("Publishing model operation result")
+        return {
+            "action": action,
+            "pack_id": str(result.get("pack_id") or value or "") if isinstance(result, dict) else str(value or ""),
+            "report": result if action in {"benchmark", "autotune"} else None,
+            "status": project_status(settings),
+        }
 
     def _action(self, path: str, body: dict[str, Any]) -> None:
         settings = self.server.settings
         if path == "/api/sync":
-            result = _refresh(settings, fetch=True)
+            from .ops import refresh_brain
+
+            result = refresh_brain(settings, fetch=True).as_dict()
             self._json({"ok": True, "data": {**result, "status": project_status(settings)}})
             return
         if path == "/api/session/delete":
@@ -383,17 +541,40 @@ class _Handler(BaseHTTPRequestHandler):
             branch_lines = [line.strip() for line in str(body.get("branches") or "").splitlines() if line.strip()]
             if branch_lines and not body.get("sync", True):
                 raise BrainError("Feature branch overrides require repository sync")
-            refresh = (
-                _refresh(settings, fetch=True, branch_values=branch_lines)
-                if body.get("sync", True)
-                else {"discovered": [], "sync": [], "graph": []}
-            )
+            if body.get("sync", True):
+                from .editions import current_edition
+                from .ops import dashboard_status, refresh_brain
+
+                refresh = refresh_brain(settings, fetch=True, branch_values=branch_lines).as_dict()
+                requested_edition = current_edition(settings)
+                expected = {
+                    "semantic": "Semantic active",
+                    "precision": "Precision active",
+                }.get(requested_edition)
+                operation = dashboard_status(settings)
+                degraded = bool(expected and operation["effective"] != expected)
+                if degraded and not body.get("allow_degraded"):
+                    reason = operation["reason"] or "the requested edition did not become active"
+                    raise BrainError(
+                        f"{requested_edition.capitalize()} is not active ({reason}). Investigation was not started; "
+                        "refresh Brain again or explicitly continue degraded."
+                    )
+            else:
+                refresh = {"discovered": [], "sync": [], "graph": [], "semantic": None}
+                degraded = False
             content, artifact = start_session(settings, ticket, ticket_text)
             target = _target(body)
             deliver(settings, ticket, content, target, copy=False)
             self._json({
                 "ok": True,
-                "data": {"ticket": ticket, "path": artifact.name, "delivery": _delivery(settings, ticket), **refresh, "status": project_status(settings)},
+                "data": {
+                    "ticket": ticket,
+                    "path": artifact.name,
+                    "delivery": _delivery(settings, ticket),
+                    "degraded": degraded,
+                    **refresh,
+                    "status": project_status(settings),
+                },
             })
             return
         if path == "/api/context":

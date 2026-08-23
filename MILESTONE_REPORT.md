@@ -1,6 +1,6 @@
 # Project Brain milestone readiness report
 
-**Snapshot:** 2026-08-23 · **Published Core release:** 0.6.7 (semantic indexing workload robustness)
+**Snapshot:** 2026-08-23 · **v0.7.0 release gate:** complete locally (UI parity / operations cockpit) · **Published Core release at this snapshot:** 0.6.7
 
 This report separates completed, locally tested engineering from validations
 that must run later on the target machine or private local data. It contains no
@@ -26,16 +26,25 @@ intentional local-only validation steps, not engineering blockers.
 | M15 | COMPLETE | One Core codebase with capability profiles, schema incompatibility recovery guidance, controlled local/GitHub-Release/approved-internal pack installation, wheel/sdist build, notices, source-pinned Zoekt release workflow, and a descriptor-pinned official Semantic-pack catalog entry. |
 | M16 | COMPLETE | Status/freshness/storage/GC/watch/benchmark/explain commands, pinned-artifact GC protection, pre-write disk guard, local machine-profile capture, and machine-readable model tuning profile. |
 | M17 | COMPLETE | Sensitive-path exclusion, owner-only Brain state/session/output directories on POSIX, loopback-only UI/runtime boundaries, checksum/path-traversal protection, catalog/vector corruption fallback, stale-session protection, low-disk fault injection, native system-CA model-download trust with fail-closed hostname/certificate validation, and direct no-proxy transport for verified pack-owned `127.0.0.1` llama.cpp calls. |
+| M18 | COMPLETE | One shared CLI/UI full-refresh operation, snapshot-aware Semantic alignment status, explicit requested-Edition validation before UI ticket pinning (including Precision reranker availability), loopback operations dashboard, official-pack-only UI controls, bounded local operation jobs with single-writer rejection, and a re-entrant cross-process workspace lock for refresh/Semantic publication/edition/model/GC mutations. Structured source-free refresh progress comes from the real Semantic manifest/cache/batch/shard loop, with safe diagnostics, planner explanation, and retrieval transparency. |
 
 ## Completed local verification for this snapshot
 
-The full local regression suite (104 public/synthetic tests for this candidate) covers deterministic retrieval, generations,
+The full local regression suite (115 public/synthetic tests for this candidate) covers deterministic retrieval, generations,
 incremental indexes, semantic/reranker failure fallback, corrupt local state,
 pack tampering, production-manifest provenance, public synthetic conformance,
 machine-profile privacy, low-disk preflight, UI loopback protection, release
 artifact contents, and an enterprise-proxy simulation where numeric loopback
 health, embedding, and reranking calls bypass a fake proxy while remote model
-downloads retain their standard proxy-eligible transport.
+downloads retain their standard proxy-eligible transport. The v0.7.0 UI tests
+also cover CLI/UI shared refresh delegation, structured progress ordering,
+Semantic manifest/card/cache/batch/shard counters, cold rebuild and identical
+generation reuse, no false completion after a Semantic failure, progress-payload
+sanitization, monotonically advancing UI polling, start-with-sync alignment
+refusal, explicit edition validation, model-operation error safety, bounded job
+progress, in-process overlapping-write rejection, and cross-process workspace
+operation rejection/release for refresh, Semantic rebuild, edition transition,
+model removal, and GC.
 
 The current macOS ARM64 development host also builds the pinned Zoekt commands
 from source, indexes the demo corpus, and confirms that a literal hit comes from
@@ -61,6 +70,7 @@ brain model autotune PACK --latency-budget-ms 3000
 | Enterprise model-download TLS compatibility | COMPLETE | Core `v0.6.5` packages `truststore`, uses native system trust for model downloads, preserves certificate/hostname validation and SHA-256 gates, supports additive `models.ca_bundle`/`SSL_CERT_FILE`, and reports only safe trust-mode diagnostics. Public release-descriptor, clean wheel, standalone, and Homebrew smoke checks passed. |
 | Pack-owned runtime proxy compatibility | COMPLETE | Core `v0.6.6` restricts direct no-proxy HTTP transport to verified Project Brain-managed `127.0.0.1` llama.cpp processes. Public/synthetic fake-proxy coverage plus clean-wheel and Homebrew Semantic/Precision conformance smoke tests with an unusable proxy and empty `NO_PROXY` confirm health, embedding, and rerank calls do not use the proxy, while one-time remote pack downloads remain standard proxy-eligible system-trust requests. Target-machine validation requires only installing the released Core update; existing packs need not be reinstalled. |
 | Semantic refresh workload robustness | COMPLETE | Core `v0.6.7` bounds each complete embedding input and exact UTF-8 JSON body, preserves structural identity while trimming code, retries transport-disconnected batches with deterministic reduction, commits only successful content-addressed cache entries, and atomically switches semantic shards/state only after a complete build. Public/synthetic conformance covers multilingual/escaped cards, instructions/suffixes, tuned 16-item ceilings, 16→8→4→2→1 degradation, prior-generation retention, and identical-refresh reuse. |
+| Project Brain v0.7.0 UI parity / operations cockpit | COMPLETE | Release-gate candidate. UI and CLI share the same Core+Semantic refresh operation; UI start-with-sync refuses to pin a requested Semantic/Precision edition that is not active (unaligned Semantic state or unavailable verified Precision reranker) absent an explicit degraded choice. Refresh progress is structured, source-free, and emitted by the actual Semantic manifest/cache/batch/shard loop; dashboard/models/advanced views reuse existing status, capability, model, benchmark, autotune, doctor, and planner services. No model-pack protocol, Semantic schema, TLS/proxy/runtime boundary, source-write capability, tag, GitHub Release, Homebrew tap, deployment, or publication action changed. |
 | Public GitHub v0.6.7 Core release | COMPLETE | Published from commit `50cde719af8af4d95a49942490d0fe3f539bfd58` under annotated tag object `59fbbe7d7588a4e9e8017031d403b4e5ff8b20db`. GitHub Actions run `32606349713` passed the public/synthetic distribution suite and all macOS/Linux ARM/AMD standalone builds. The published `SHA256SUMS.txt` (SHA-256 `fc3fca243be51c61b3fa4f3385e8618cd262c419d226d337dcb9e5b404edefea`) was independently checked against the wheel, sdist, and four standalone assets before the official tap was changed. Tap commit `89a74829624c4956049f02a9667bbd9a7f128de4` was rendered exclusively from those published values; strict audit, a real 0.6.6→0.6.7 upgrade, and formula test passed. |
 | Company model approval | EXTERNAL POLICY DECISION | The organization chooses which official-source artifact is approved. Project Brain has no bypass mechanism and remains useful as Core without it. |
 | Apple M3 Pro / 36 GB measurements | DEFERRED TO TARGET MACHINE | Run the supplied local commands to record embedding p50/p95, batch throughput, 10/20/40/80 rerank latency, retrieval timing, and process/child peak memory. No unverified M3 numbers are claimed here. |
@@ -82,6 +92,10 @@ brain model autotune PACK --latency-budget-ms 3000
   published release, and the `v0.6.2` tag was never released: its
   CI/release-workflow defects were discovered before any artifact or tap
   mutation.
+- At this snapshot, `v0.7.0` has passed its local release gate but has no tag,
+  GitHub Release, Homebrew/tap change, deployed artifact, or publication
+  action. The v0.6.7 model-pack releases and public Core artifacts remain
+  untouched.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.
 - The Semantic pack's packaging download is a release-engineering operation

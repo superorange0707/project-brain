@@ -39,7 +39,7 @@ same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.6"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.7.0"
 ```
 
 Upgrade later with:
@@ -51,7 +51,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.6.6"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.7.0"
 ```
 
 ### From a source checkout
@@ -124,7 +124,7 @@ not pay the startup cost for every repo. Run `brain doctor` only when you want t
 detailed health report.
 
 After initialization, clone new repositories normally. The next `brain refresh`,
-synced ticket start, or cockpit **Discover & sync** automatically finds them and
+synced ticket start, or cockpit **Refresh Brain** automatically finds them and
 appends only the missing `[[repositories]]` blocks to `brain.toml`. Existing
 descriptions, tags, comments, branch overrides, and settings are not rewritten.
 Use `--no-discover` when a workspace intentionally excludes other Git repos below
@@ -560,7 +560,36 @@ Run the editor-independent GUI from a Brain workspace:
 brain ui
 ```
 
-The command prints and opens a random-token URL on `127.0.0.1`. The page provides:
+The command prints and opens a random-token URL on `127.0.0.1`. For ordinary
+work, stay in the page:
+
+1. Open **Brain** and check overall health, effective retrieval state, model
+   verification, Semantic chunk count/alignment, and repository freshness.
+2. Click **Refresh Brain**. By default it discovers repositories, fetches
+   allowed remote refs, creates immutable snapshots, updates Core indexes/maps,
+   and builds the Semantic generation when the selected edition requires it.
+   The single progress surface reports its current phase and safe repository,
+   Semantic-card, embedding-cache/new-embedding, batch, shard, generation, and
+   elapsed-time counters. Card totals are intentionally indeterminate until the
+   real manifest is complete. It never displays source text, absolute paths,
+   model credentials, or proxy data.
+   Refresh, Semantic rebuild/publication, edition changes, model-pack changes,
+   and GC also share an owner-local workspace lock with CLI processes. If a
+   different Project Brain process is already performing one of those changes,
+   the new operation stops before publishing state; retry after the active
+   operation finishes.
+3. Select **Core**, **Semantic**, or **Precision**. Semantic requires a verified
+   compatible embedding pack and vector backend; Precision additionally requires
+   a verified compatible reranker. Installed does not mean indexed or active.
+4. Start a ticket. When synchronization is requested in Semantic/Precision,
+   Brain verifies that the requested edition is active before it pins ticket
+   snapshots: Semantic must be aligned, and Precision must also have its
+   verified compatible reranker. If either condition fails, the ticket is not
+   started unless you explicitly choose the displayed degraded continuation.
+5. Use **Continue with AI** for the complete reply containing a
+   `CONTEXT_REQUEST`, then inspect Evidence and Retrieval transparency.
+
+The page also provides:
 
 - repository snapshot, index, and ticket-session health;
 - a ticket form that synchronizes repos and creates the AI start context;
@@ -572,6 +601,12 @@ The command prints and opens a random-token URL on `127.0.0.1`. The page provide
 - a one-click M365 Agent setup kit;
 - implementation feedback containing tracked diffs and observed test output;
 - access to saved ticket, request, context, and feedback artifacts.
+
+**Models** accepts only the Project Brain official pack aliases and exposes
+install, verify, remove, benchmark, and autotune as explicit local operations.
+**Advanced** provides safe diagnostics, freshness, and planner explanation.
+Configured/local golden evaluation stays CLI-only (`brain evaluate`) so no
+private evaluation data or file paths need to cross a browser surface.
 
 No AI model runs inside the page. It does not execute tests or edit code. Closing
 `brain ui` invalidates the random URL and stops the local server.
