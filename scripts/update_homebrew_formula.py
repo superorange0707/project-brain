@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 
@@ -16,7 +17,7 @@ def checksums(path: Path) -> dict[str, str]:
     return values
 
 
-def render(version: str, values: dict[str, str]) -> str:
+def render(version: str, values: dict[str, str], *, release_candidate: bool = False) -> str:
     assets = {
         "macos-arm64": f"project-brain-v{version}-macos-arm64.tar.gz",
         "macos-amd64": f"project-brain-v{version}-macos-amd64.tar.gz",
@@ -27,10 +28,18 @@ def render(version: str, values: dict[str, str]) -> str:
     if missing:
         raise ValueError("final SHA256SUMS is missing standalone release assets: " + ", ".join(missing))
     url = "https://github.com/superorange0707/project-brain/releases/download"
-    return f'''class ProjectBrain < Formula
+    formula_class = "ProjectBrainRc" if release_candidate else "ProjectBrain"
+    version_line = f'  version "{version}"\n' if release_candidate else ""
+    conflict_line = (
+        '  conflicts_with "project-brain", because: "both install the brain executable"\n'
+        if release_candidate
+        else ""
+    )
+    return f'''class {formula_class} < Formula
   desc "Give any chat AI read-only, multi-repository codebase exploration"
   homepage "https://github.com/superorange0707/project-brain"
   license "MIT"
+{version_line}{conflict_line}
 
   on_macos do
     if Hardware::CPU.arm?
@@ -73,10 +82,15 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--sha256sums", type=Path, required=True)
     parser.add_argument("--formula", type=Path, required=True)
+    parser.add_argument("--release-candidate", action="store_true")
     args = parser.parse_args()
-    if not args.version or any(character not in "0123456789." for character in args.version):
-        raise SystemExit("--version must be a numeric release version")
-    args.formula.write_text(render(args.version, checksums(args.sha256sums)), encoding="utf-8")
+    pattern = r"\d+(?:\.\d+)+-rc\d+" if args.release_candidate else r"\d+(?:\.\d+)+"
+    if re.fullmatch(pattern, args.version) is None:
+        raise SystemExit("--version does not match the selected release channel")
+    args.formula.write_text(
+        render(args.version, checksums(args.sha256sums), release_candidate=args.release_candidate),
+        encoding="utf-8",
+    )
     return 0
 
 

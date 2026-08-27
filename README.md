@@ -136,7 +136,7 @@ Download the archive for your CPU from the
 extract it, and place all four executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.7.0-macos-arm64.tar.gz
+tar -xzf project-brain-v0.8.0-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp zoekt zoekt-index ~/.local/bin/
 ```
@@ -147,19 +147,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.7.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.8.0"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.7.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.8.0"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.7.0/project_brain_context-0.7.0-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.8.0/project_brain_context-0.8.0-py3-none-any.whl
 ```
 
 Then verify:
@@ -256,6 +256,14 @@ Semantic or Precision edition is active (including snapshot alignment and the
 Precision reranker) before pinning the ticket; the user must make an explicit
 visible choice to continue degraded after a capability or Semantic failure.
 
+The opt-in **Auto Refresh: When idle** setting uses that same authoritative
+refresh after a debounced source/index freshness check. Drift is coalesced while
+ticket retrievals are active and one refresh starts when the workspace becomes
+idle. Normal working-tree edits are ignored. Model, storage, configuration,
+Git/network, and runtime failures remain visible Action Required states and are
+never turned into a refresh retry loop. The preference and safe timestamps live
+only in Brain-owned local state.
+
 During a long refresh, the cockpit shows one safe structured progress surface:
 current phase, repository/card/shard counters, cache reuse versus new
 embeddings, active batch size, generation reuse or rebuild, and elapsed time.
@@ -264,10 +272,11 @@ Progress never includes source contents, local paths, credentials, proxy data,
 or model-runtime secrets.
 
 State-mutating refresh, Semantic rebuild, edition, model-pack, and GC commands
-take an owner-local workspace lock shared by CLI and cockpit processes. If
-another Project Brain process is already publishing workspace state, the new
-operation fails safely before it can change that state; read-only retrieval and
-status remain available.
+take an owner-local exclusive workspace lock shared by CLI and cockpit
+processes. Retrieval holds a shared workspace lease plus a per-ticket lock:
+different tickets may retrieve concurrently (two by default), the same ticket
+cannot allocate duplicate request numbers, and refresh remains exclusive.
+Status, history, and evidence reads remain available.
 
 The **Models** and **Advanced** screens manage only approved official pack
 aliases, verification, local benchmark/autotune, diagnostics, and retrieval
@@ -316,6 +325,11 @@ The AI then permanently knows that it should talk to you directly
 for business, document, runtime, and environment facts, and emit a
 `CONTEXT_REQUEST` only for local repository evidence.
 
+After upgrading to v0.8.0, rerun `brain agent-kit m365`, replace Instructions
+and `PROJECT_KNOWLEDGE.md`, and optionally refresh Suggested Prompts. The kit's
+`AGENT_KIT.json` identifies Brain 0.8.0, kit version 2, and protocol v3. Existing
+Agents need not be rebuilt; start a new conversation when validating v3.
+
 Start every M365 ticket with `--target m365`. Upload the newly printed
 round-specific file each time, for example:
 
@@ -348,19 +362,22 @@ The GUI is a thin, local layer over the same tested retrieval core as the CLI:
   direct loopback runtime boundary.
 - **Refresh Brain** uses the same shared full-refresh implementation as
   `brain refresh`, including Semantic indexing for Semantic/Precision.
+- **Auto Refresh: When idle** checks selected refs, Core/Semantic alignment, and
+  repository discovery, then coalesces one refresh behind active retrievals.
 - **Models** lists only local/official packs and offers explicit install,
   verify, remove, benchmark, and autotune operations.
-- **Start ticket** optionally synchronizes every repo, accepts per-repo feature
-  branches, verifies Semantic alignment before pinning, and makes any degraded
-  continuation an explicit user choice.
+- **Start ticket** defaults to the current pinned Brain snapshot, with a separate
+  workspace-exclusive “Check latest code & Refresh before start” option.
+- **Investigations** is a live board for queued/running/waiting tickets; two
+  independent retrieval jobs may progress while the user switches tickets.
 - **Continue with AI** distinguishes direct conversation, repository requests,
   duplicate retrievals, and final solutions without invoking another model.
 - **Retrieval Plan** validates repository names and previews exactly what Brain
   will inspect; it is deliberately separate from the AI's implementation plan.
 - **Evidence context** provides chunk navigation and one-click clipboard delivery.
-- **Retrieval transparency** shows requested/effective edition, semantic and
-  reranker participation, candidate/evidence counts, pinned generation, and
-  safe timings for the latest request.
+- **Retrieval transparency** shows requested/effective/physical operations,
+  repository routing/widening, candidate pruning, stop reason, edition/model
+  participation, pinned generation, and safe stage timings.
 - **Advanced** provides safe doctor/freshness summaries and planner explanation.
   Local golden evaluation remains CLI-only so the UI does not add private-data
   file transport.
@@ -377,40 +394,30 @@ remains the source of evidence.
 
 ```yaml
 CONTEXT_REQUEST:
-  version: 1
+  version: 3
   objective: >
     Determine how jurisdiction changes reach trading eligibility recalculation.
-
-  searches:
-    - query: "JURISDICTION_CHANGED"
-      repos: []
-
-  paths:
-    - query: "application.properties"
-      repos: [trading-service]
-
-  symbols:
-    - name: "TradingEligibilityService.recalculate"
-      repos: [trading-service]
-      include: [definition, callers, callees, implementations, tests]
-
-  files: []
-
-  history:
-    - query: "JURISDICTION_CHANGED"
-      repos: [trading-service]
+  hints:
+    literals: [JURISDICTION_CHANGED]
+    symbols: [TradingEligibilityService.recalculate]
 ```
 
-One request can trigger dozens of local operations. The returned context includes
+An objective-only v3 request is also valid. Brain extracts bounded high-signal
+terms, performs cheap global discovery, routes expensive work to the top six
+repositories, fuses duplicate/symbol work, and widens to 16/all only when
+required coverage is still missing and budgets allow. v1/v2 explicit-operation
+requests remain supported and receive the same deduplication and budgets.
+
+The returned context includes
 the objective, exact analyzed commit/ref, freshness warnings, structural and
 framework relationships, ranked source evidence, Git history, and an explicit
 unresolved section. It also reports unique evidence gained, prior retrieval
 objectives, and no-progress turns. An identical plan against the same pinned
 snapshots is rejected instead of wasting another round.
 
-`files:` is for paths already verified by prior evidence. If the exact location
-is unknown, the AI uses `paths:` for filename/path fragments or `searches:` for
-configuration keys and source literals instead of guessing.
+`hints.files` is for paths already verified by prior evidence. If the location
+is unknown, the AI uses a small `hints.paths`, `hints.symbols`, or
+`hints.literals` entry instead of guessing.
 
 ## What it can explore
 
@@ -491,7 +498,7 @@ brain benchmark --machine Record a non-identifying local benchmark target profil
 brain edition           Inspect or set core, semantic, or precision capability profile
 brain capabilities      Show installed offline capabilities
 brain model             Install, verify, benchmark, autotune, or remove local model packs
-brain watch             Refresh selected snapshots at a fixed interval
+brain watch             Check freshness and refresh once the workspace is idle
 brain map               Generate Spring/Maven/project facts
 brain start             Start a ticket investigation
 brain continue          Route a complete AI reply and run only tool requests

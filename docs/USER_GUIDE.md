@@ -39,7 +39,7 @@ same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.7.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.8.0"
 ```
 
 Upgrade later with:
@@ -51,7 +51,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.7.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.8.0"
 ```
 
 ### From a source checkout
@@ -130,6 +130,18 @@ descriptions, tags, comments, branch overrides, and settings are not rewritten.
 Use `--no-discover` when a workspace intentionally excludes other Git repos below
 the same parent folder.
 
+The cockpit's opt-in **Auto Refresh: When idle** mode checks selected commit refs,
+Core index alignment, required Semantic generation alignment, and newly cloned
+repositories. It ignores ordinary working-tree edits. Multiple changes are
+debounced into one call to the same `refresh_brain()` pipeline used by manual
+refresh. Active ticket retrievals leave that refresh pending; new tickets may
+still pin the current ready snapshot, and existing tickets retain their original
+snapshots. Missing/incompatible model packs, storage guards, invalid config,
+Git/network failures, and runtime failures require explicit action and are not
+continually retried. The Off/When idle preference and safe timestamps are stored
+only under the Brain-owned state directory. `brain watch` uses this same detector
+and scheduler rather than a separate unconditional polling implementation.
+
 ### What “latest” means
 
 Project Brain runs `git fetch --prune --quiet origin` for each repo. It then picks
@@ -200,6 +212,16 @@ hydrate_limit = 18
 max_regions_per_file = 2
 max_regions_per_repo = 8
 
+[retrieval]
+max_concurrent_investigations = 2
+repo_workers = 4
+initial_repo_limit = 6
+widen_repo_limit = 16
+max_effective_operations = 15
+max_backend_operations = 200
+pre_rerank_candidate_limit = 200
+semantic_shard_workers = 4
+
 [delivery]
 clipboard_chunk_chars = 180000
 
@@ -246,6 +268,13 @@ Project Brain also accepts legacy `config.yml` and `config.yaml` files.
 - `max_results`: maximum matches gathered per operation.
 - `path_result_limit`: maximum verified filename/path matches read per repository.
 - `candidate_limit`: maximum ranked metadata candidates considered before source hydration.
+
+### Retrieval settings (advanced)
+
+The defaults are intended for normal work and usually should not be changed.
+They bound concurrent tickets, the shared repository worker pool, initial and
+widened repository scopes, logical/physical operations, late candidates, and
+Semantic shard search. Values outside Brain's hard safe maxima are rejected.
 
 ### Experience settings
 
@@ -299,7 +328,8 @@ Project Brain also accepts legacy `config.yml` and `config.yaml` files.
 - `fetch_scope`: defaults to `selected`, which fetches only the chosen source
   branch when it can be identified locally. Use `all-branches` only when a
   workspace deliberately needs every remote branch.
-- `watch_interval_seconds`: polling cadence for `brain watch` (minimum 10).
+- `watch_interval_seconds`: polling cadence for idle auto-refresh and
+  `brain watch` freshness checks (minimum 10).
 
 ### Editions and local model packs
 
@@ -581,16 +611,20 @@ work, stay in the page:
 3. Select **Core**, **Semantic**, or **Precision**. Semantic requires a verified
    compatible embedding pack and vector backend; Precision additionally requires
    a verified compatible reranker. Installed does not mean indexed or active.
-4. Start a ticket. When synchronization is requested in Semantic/Precision,
+4. Start a ticket from the current Brain snapshot (the default), or explicitly
+   select **Check latest code & Refresh before start**. When synchronization is requested in Semantic/Precision,
    Brain verifies that the requested edition is active before it pins ticket
    snapshots: Semantic must be aligned, and Precision must also have its
    verified compatible reranker. If either condition fails, the ticket is not
    started unless you explicitly choose the displayed degraded continuation.
-5. Use **Continue with AI** for the complete reply containing a
-   `CONTEXT_REQUEST`, then inspect Evidence and Retrieval transparency.
+5. Use **Continue with AI** for the complete reply containing a v3
+   `CONTEXT_REQUEST`. Retrieval runs as a background ticket job, so a second
+   investigation may progress independently. Then inspect Evidence and
+   Retrieval transparency.
 
 The page also provides:
 
+- an investigation board for queued, retrieving, waiting, and ready tickets;
 - repository snapshot, index, and ticket-session health;
 - a ticket form that synchronizes repos and creates the AI start context;
 - a Continue with AI inbox that distinguishes direct conversation, repository
@@ -647,6 +681,11 @@ The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
 sent into Brain, while `ABC-1234-context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
+After upgrading to v0.8.0, rerun `brain agent-kit m365`, replace Agent Builder
+Instructions and `PROJECT_KNOWLEDGE.md`, and optionally refresh Suggested
+Prompts. `AGENT_KIT.json` records the Brain, kit, and protocol versions.
+Existing Agents need not be rebuilt; use a new conversation to validate v3.
+
 ## 9. Continue an AI investigation
 
 The preferred command accepts the AI's complete reply:
@@ -678,9 +717,9 @@ If the AI guesses a direct file path that does not exist, Brain records that
 operation under `Unresolved`, completes the remaining batched operations, and
 still produces the numbered `context-NNN.md`. Unsafe paths remain rejected. A
 request number is committed only when its context artifact is also produced.
-The generated AI instructions permit `files:` only for paths already verified
-in Brain evidence; unknown filenames/locations use `paths:`, while unknown
-configuration keys, endpoints, topics, and source literals use `searches:`.
+The generated AI instructions permit `hints.files` only for paths already
+verified in Brain evidence; unknown locations use small `hints.paths`,
+`hints.symbols`, or `hints.literals` values.
 
 Old investigations can be removed from **Project overview** with **Delete
 history**. The confirmation names the ticket; this deletes only `.runs/TICKET`
@@ -689,42 +728,37 @@ are never deleted.
 
 ### `CONTEXT_REQUEST` format
 
-The AI should either ask for evidence or return a final solution. A full request:
+The AI should either ask for evidence or return a final solution. The normal
+request is objective-first; every optional hint list may be omitted or empty:
 
 ```yaml
 CONTEXT_REQUEST:
-  version: 1
+  version: 3
   objective: Determine the online eligibility recalculation flow.
-
-  searches:
-    - query: "JURISDICTION_CHANGED"
-      repos: []
-    - query: "customer.updated"
-      repos: [trading-service]
-
-  paths:
-    - query: application.properties
-      repos: [trading-service]
-
-  symbols:
-    - name: "EligibilityEvaluator"
-      repos: [trading-service]
-      include:
-        - definition
-        - callers
-        - callees
-        - implementations
-        - tests
-
-  files:
-    - repo: trading-service
-      path: src/main/resources/application.yml
-      lines: 1-160
-
-  history:
-    - query: "JURISDICTION_CHANGED"
-      repos: [trading-service]
+  hints:
+    literals: [JURISDICTION_CHANGED, customer.updated]
+    symbols: [EligibilityEvaluator]
+    paths: [application.properties]
+  coverage:
+    production: required
+    tests: auto
+    relationships: auto
+    configuration: auto
+    history: auto
 ```
+
+This is also valid and does not require a repair round:
+
+```yaml
+CONTEXT_REQUEST:
+  version: 3
+  objective: Locate the production flow and tests responsible for this behavior.
+```
+
+Brain performs bounded global discovery, ranks repositories, starts expensive
+work in the top six, fuses duplicate/shared-symbol work, prunes before Precision
+reranking, and widens to 16/all only when required coverage is missing and
+budgets allow. Legacy v1/v2 explicit operations remain valid.
 
 From the clipboard:
 
@@ -771,6 +805,19 @@ The cumulative **Implementation readiness** section reports whether production
 source, tests, configuration, relationships, Git history, and similar tickets
 have been seen. It is evidence coverage, not an automatic claim that the change
 is safe; the chat AI still decides whether an unknown is blocking.
+
+For a private local before/after replay, keep ticket data on the work machine:
+
+```bash
+brain explain TICKET --file request.yml --json
+brain continue TICKET --file ai-response.txt --target m365
+brain benchmark --json
+```
+
+Compare only safe aggregates from `.runs/TICKET/trace-NNN.json`: total/stage
+milliseconds, requested/effective/physical operations, routed scope, candidates,
+evidence, context size, and stop reason. Do not export the request, source,
+repository paths, or ticket text.
 
 ## 10. Claude chunk navigation
 

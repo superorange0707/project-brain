@@ -11,11 +11,45 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from brain.auto_refresh import AutoRefreshService, FreshnessDecision
 from brain.cli import _refresh_all, main
-from brain.core import load_settings
+from brain.core import BrainError, load_settings
 from brain.ops import RefreshOutcome, format_refresh_progress, refresh_brain
 from brain.sync import SyncResult
-from brain.ui import _Server, serve_ui
+from brain.ui import _OperationCoordinator, _Server, serve_ui
+
+
+class OperationCoordinatorTest(unittest.TestCase):
+    def test_two_tickets_run_concurrently_but_same_ticket_and_mutation_are_blocked(self) -> None:
+        coordinator = _OperationCoordinator(max_retrievals=2)
+        entered = [threading.Event(), threading.Event()]
+        release = threading.Event()
+
+        def operation(index):
+            def run(progress):
+                progress({"phase": "repo_routing", "phase_label": "private source", "repo_total": 6, "candidate_count": index})
+                entered[index].set()
+                release.wait(3)
+                return {"ticket": f"TICKET-{index}"}
+            return run
+
+        first = coordinator.start("retrieval", operation(0), kind="retrieval", ticket="TICKET-A")
+        second = coordinator.start("retrieval", operation(1), kind="retrieval", ticket="TICKET-B")
+        self.assertTrue(all(event.wait(3) for event in entered))
+        with self.assertRaisesRegex(BrainError, "this ticket"):
+            coordinator.start("retrieval", operation(0), kind="retrieval", ticket="TICKET-A")
+        with self.assertRaisesRegex(BrainError, "state-changing operation"):
+            coordinator.start("refresh", operation(0))
+        jobs = coordinator.list()
+        self.assertEqual({"TICKET-A", "TICKET-B"}, {job["ticket"] for job in jobs})
+        self.assertNotIn("private", json.dumps(jobs))
+        release.set()
+        for job in (first, second):
+            for _ in range(100):
+                if coordinator.get(job["id"])["status"] == "succeeded":
+                    break
+                time.sleep(0.01)
+            self.assertEqual("succeeded", coordinator.get(job["id"])["status"])
 
 
 class LocalUiTest(unittest.TestCase):
@@ -97,7 +131,10 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("Operations cockpit", html)
         self.assertIn("Local model packs", html)
         self.assertIn("Retrieval transparency", html)
+        self.assertIn("Detailed profiler", html)
         self.assertIn('id="refresh-progress"', html)
+        self.assertIn('id="auto-refresh-mode"', html)
+        self.assertIn('value="when_idle">When idle', html)
         self.assertIn("Reused published generation", html)
         self.assertIn("Current batch", html)
         self.assertIn("Ticket memory", html)
@@ -115,6 +152,35 @@ class LocalUiTest(unittest.TestCase):
 
         _, status_data, _ = self.get("/api/status")
         self.assertEqual(0, status_data["data"]["summary"]["experience_cases"])
+        self.assertIsInstance(self.server.auto_refresh, AutoRefreshService)
+
+    def test_auto_refresh_preference_api_exposes_only_safe_local_status(self) -> None:
+        self.server.auto_refresh._detector = lambda _settings: FreshnessDecision.ready()
+
+        _, enabled, _ = self.post("/api/auto-refresh", {"mode": "when_idle"})
+        self.assertEqual("when_idle", enabled["data"]["mode"])
+        _, status, _ = self.get("/api/status")
+        auto = status["data"]["auto_refresh"]
+        self.assertEqual(
+            {"mode", "last_check", "last_refresh", "pending", "pending_reason", "status"},
+            set(auto),
+        )
+        self.assertNotIn(str(self.root), json.dumps(auto))
+        self.assertEqual("when_idle", json.loads(
+            (self.settings.state_dir / "auto-refresh.json").read_text(encoding="utf-8")
+        )["mode"])
+
+        _, disabled, _ = self.post("/api/auto-refresh", {"mode": "off"})
+        self.assertEqual("off", disabled["data"]["mode"])
+
+    def test_auto_refresh_job_failure_never_exposes_a_path(self) -> None:
+        with patch("brain.ops.refresh_brain", side_effect=BrainError(f"failed below {self.root}")):
+            with self.assertRaises(BrainError):
+                self.server._auto_refresh()
+
+        job = self.server.operations.list()[0]
+        self.assertEqual("Operation failed (BrainError).", job["error"])
+        self.assertNotIn(str(self.root), json.dumps(job))
 
     def test_request_preview_start_context_feedback_and_artifacts(self) -> None:
         request_text = """The next evidence I need is:

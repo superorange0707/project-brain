@@ -22,6 +22,16 @@ Progress = Callable[[dict[str, Any]], None]
 
 
 _PROGRESS_LABELS = {
+    "queued": "Queued",
+    "planning": "Planning retrieval",
+    "global_discovery": "Global discovery",
+    "repo_routing": "Routing repositories",
+    "targeted_retrieval": "Retrieving from routed repositories",
+    "semantic": "Semantic discovery",
+    "candidate_pruning": "Pruning candidates",
+    "reranking": "Reranking candidates",
+    "hydrating": "Hydrating exact source",
+    "packing_context": "Packing context",
     "discovery": "Discovering repositories",
     "sync": "Reconciling repository snapshots",
     "core_index": "Building Core indexes",
@@ -40,12 +50,14 @@ _PROGRESS_COUNTS = {
     "semantic_repository_current", "semantic_repository_total", "semantic_cards_discovered", "semantic_cards_total",
     "cached_embeddings_reused", "new_embeddings_completed", "remaining_embeddings", "embedding_batch_size",
     "embedding_batches_completed", "semantic_shards_completed", "semantic_shards_total",
+    "requested_operations", "effective_operations", "physical_operations_completed",
+    "repo_current", "repo_total", "candidate_count", "pruned_candidate_count", "evidence_count",
 }
 _PROGRESS_STATES = {"generation_state", "semantic_status"}
 _SAFE_GENERATION_STATES = {"not-required", "checking", "rebuilding", "rebuilt", "reused", "failed"}
 _SAFE_SEMANTIC_STATUSES = {"not-required", "ready", "failed"}
 _ADDITIONAL_SAFE_PROGRESS_LABELS = {
-    "Queued", "Starting", "Running", "Completed", "Validating local model pack", "Publishing model operation result",
+    "Starting", "Running", "Completed", "Validating local model pack", "Publishing model operation result",
     "Core refresh complete; Semantic needs attention",
 }
 _SAFE_PROGRESS_LABELS = frozenset(_PROGRESS_LABELS.values()) | _ADDITIONAL_SAFE_PROGRESS_LABELS

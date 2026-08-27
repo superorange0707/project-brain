@@ -125,7 +125,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME"
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME" --prerelease
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME"
+          fi
 
   homebrew-tap:
     name: Update Homebrew tap after final release
@@ -167,19 +172,26 @@ jobs:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/superorange0707/homebrew-tap.git" homebrew-tap
-          python scripts/update_homebrew_formula.py --version "${GITHUB_REF_NAME#v}" --sha256sums published/SHA256SUMS.txt --formula homebrew-tap/Formula/project-brain.rb
-          ruby -c homebrew-tap/Formula/project-brain.rb
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            FORMULA=homebrew-tap/Formula/project-brain-rc.rb
+            python scripts/update_homebrew_formula.py --version "$VERSION" --sha256sums published/SHA256SUMS.txt --formula "$FORMULA" --release-candidate
+          else
+            FORMULA=homebrew-tap/Formula/project-brain.rb
+            python scripts/update_homebrew_formula.py --version "$VERSION" --sha256sums published/SHA256SUMS.txt --formula "$FORMULA"
+          fi
+          ruby -c "$FORMULA"
           git -C homebrew-tap diff --check
           if git -C homebrew-tap diff --quiet; then exit 0; fi
           git -C homebrew-tap config user.name "project-brain-release[bot]"
           git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C homebrew-tap add Formula/project-brain.rb
+          git -C homebrew-tap add "${FORMULA#homebrew-tap/}"
           git -C homebrew-tap commit -m "project-brain ${GITHUB_REF_NAME}"
           git -C homebrew-tap push origin main
 
   pypi:
     name: Publish to PyPI with OIDC
-    if: ${{ vars.PUBLISH_PYPI == 'true' }}
+    if: ${{ vars.PUBLISH_PYPI == 'true' && !contains(github.ref_name, '-') }}
     needs: build
     runs-on: ubuntu-latest
     environment:

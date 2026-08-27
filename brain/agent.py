@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from importlib.resources import files as package_files
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .core import BrainError, Settings, request_preview, save_session, session_dir, session_state
+from .locks import ticket_exclusive
 
 
 def response_preview(text: str, settings: Settings | None = None, ticket: str | None = None) -> dict[str, Any]:
@@ -58,6 +61,7 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
     }
 
 
+@ticket_exclusive
 def archive_final_solution(settings: Settings, ticket: str, text: str) -> Path:
     preview = response_preview(text, settings, ticket)
     if preview["kind"] != "final_solution":
@@ -104,7 +108,7 @@ Investigate this ticket as a read-only coding agent. I will attach the latest Pr
 
 ## Continue with Brain evidence
 
-Continue the investigation using the attached latest Project Brain handoff. Update what is VERIFIED, INFERRED, BLOCKING UNKNOWN, and NON-BLOCKING UNKNOWN. Request more repository evidence only when it would materially change the implementation.
+Continue using the latest Project Brain handoff. Update VERIFIED, INFERRED, BLOCKING UNKNOWN, and NON-BLOCKING UNKNOWN. Request at most one focused follow-up for one fact that can materially change the implementation; otherwise return FINAL_SOLUTION.
 
 ## Read internal documentation
 
@@ -131,16 +135,27 @@ Starter prompt:
 
 > Investigate this ticket as a read-only coding agent. I will attach the Project Brain start package. Ask me directly for business, document, or runtime facts; emit a CONTEXT_REQUEST only when local repository evidence is required; return FINAL_SOLUTION when the implementation is ready.
 
+This kit uses Project Brain CONTEXT_REQUEST protocol v3. After upgrading Brain, rerun `brain agent-kit m365`, replace Agent Builder Instructions and PROJECT_KNOWLEDGE.md, and optionally refresh Suggested Prompts. A new M365 conversation is recommended for protocol validation.
+
 For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365` and upload the printed `generated/handoffs/TICKET-start.md`. For every later repository round, upload only the newly printed `generated/handoffs/TICKET-context-NNN.md`. Never upload the internal `.runs/TICKET/request-NNN.yml`; it is the AI-to-Brain command, while `context-NNN.md` is Brain's evidence response. The changing filename prevents M365 from reusing an older attachment; `TICKET-current.md` is only a local alias.
 """
     setup_path = directory / "SETUP.md"
     setup_path.write_text(setup, encoding="utf-8")
+    manifest = {
+        "project_brain_version": __version__,
+        "agent_kit_version": 2,
+        "context_request_protocol": 3,
+    }
+    manifest_path = directory / "AGENT_KIT.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return {
         "directory": str(directory),
         "instructions_path": str(instructions_path),
         "knowledge_path": str(knowledge_path),
         "suggested_prompts_path": str(suggested_path),
         "setup_path": str(setup_path),
+        "manifest_path": str(manifest_path),
+        "manifest": manifest,
         "instructions": instructions,
         "knowledge": knowledge_path.read_text(encoding="utf-8"),
         "suggested_prompts": suggested,

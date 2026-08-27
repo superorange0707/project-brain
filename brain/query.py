@@ -26,8 +26,7 @@ def merge_evidence(evidence: list[Evidence]) -> list[Evidence]:
     return sorted(merged, key=lambda item: (-item.score, item.repo, item.path, item.line_start))
 
 
-def select_candidates(settings: Settings, hits: list[SearchHit]) -> tuple[list[SearchHit], list[SearchHit]]:
-    """Merge nearby hits, then enforce global/file/repository hydration diversity."""
+def _candidate_regions(settings: Settings, hits: list[SearchHit]) -> list[SearchHit]:
     from .retrieval.ranker import fuse_and_rank
 
     hits = fuse_and_rank(hits)
@@ -52,7 +51,26 @@ def select_candidates(settings: Settings, hits: list[SearchHit]) -> tuple[list[S
             kinds = list(dict.fromkeys(part.strip() for part in (current.kind + ", " + hit.kind).split(",")))
             current.kind = ", ".join(kinds)
 
-    ranked = sorted(regions, key=lambda item: (-item.score, item.repo, item.path, item.line))
+    return sorted(regions, key=lambda item: (-item.score, item.repo, item.path, item.line))
+
+
+def prune_candidates(settings: Settings, hits: list[SearchHit], limit: int) -> tuple[list[SearchHit], list[SearchHit]]:
+    """Bound the reranker pool while retaining direct/path/definition evidence."""
+    ranked = _candidate_regions(settings, hits)
+    protected = [
+        item for item in ranked
+        if any(value in item.kind.lower() for value in ("requested", "verified path", "definition"))
+    ]
+    protected_keys = {(item.repo, item.path, item.line) for item in protected}
+    ordinary = [item for item in ranked if (item.repo, item.path, item.line) not in protected_keys]
+    kept = (protected + ordinary)[: max(1, limit)]
+    kept_keys = {(item.repo, item.path, item.line) for item in kept}
+    return kept, [item for item in ranked if (item.repo, item.path, item.line) not in kept_keys]
+
+
+def select_candidates(settings: Settings, hits: list[SearchHit]) -> tuple[list[SearchHit], list[SearchHit]]:
+    """Merge nearby hits, then enforce global/file/repository hydration diversity."""
+    ranked = _candidate_regions(settings, hits)
     considered, omitted = ranked[: settings.candidate_limit], ranked[settings.candidate_limit :]
     selected: list[SearchHit] = []
     repo_counts: dict[str, int] = {}

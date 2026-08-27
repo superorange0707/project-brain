@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
+from .locks import MODEL_LANE
+
 if TYPE_CHECKING:
     from .core import Settings
 
@@ -1155,6 +1157,7 @@ def rerank_candidates(
     *,
     runtime: ModelRuntime | None = None,
     limit: int = DEFAULT_RERANK_POOL,
+    trace: Any | None = None,
 ) -> list[Any]:
     """Apply a local reranker to a bounded candidate shortlist only.
 
@@ -1165,15 +1168,22 @@ def rerank_candidates(
     """
     if not query or not hits:
         return hits
+    lane_started = time.perf_counter()
+    MODEL_LANE.acquire()
+    if trace is not None:
+        trace.add_stage("model_lane_wait_ms", (time.perf_counter() - lane_started) * 1000)
     owns_runtime = runtime is None
     pack_id = ""
-    if runtime is None:
-        manifest = active_pack(settings, "reranker")
-        if manifest is None:
-            raise RuntimeError("Precision edition requires a verified local reranker pack")
-        pack_id = str(manifest["pack_id"])
-        runtime = runtime_for_pack(manifest)
     try:
+        if runtime is None:
+            manifest = active_pack(settings, "reranker")
+            if manifest is None:
+                raise RuntimeError("Precision edition requires a verified local reranker pack")
+            pack_id = str(manifest["pack_id"])
+            runtime_started = time.perf_counter()
+            runtime = runtime_for_pack(manifest)
+            if trace is not None:
+                trace.add_stage("reranker_runtime_start_ms", (time.perf_counter() - runtime_started) * 1000)
         batch_size, recommended_pool = _reranker_tuning(settings, pack_id) if pack_id else (DEFAULT_RERANK_POOL, DEFAULT_RERANK_POOL)
         limit = max(1, min(limit, recommended_pool, MAX_RERANK_POOL))
         protected = ["requested" in str(hit.kind).lower() or "definition" in str(hit.kind).lower() for hit in hits]
@@ -1194,11 +1204,14 @@ def rerank_candidates(
         # Production conformance compares a batch with one-document calls before
         # a pack becomes usable.  Splitting a calibrated shortlist is therefore
         # a memory bound, not a change to its relevance semantics.
+        inference_started = time.perf_counter()
         scores = [
             score
             for start in range(0, len(documents), batch_size)
             for score in runtime.rerank(query, documents[start:start + batch_size])
         ]
+        if trace is not None:
+            trace.add_stage("reranker_inference_ms", (time.perf_counter() - inference_started) * 1000)
         if len(scores) != len(positions) or any(not math.isfinite(float(score)) for score in scores):
             raise RuntimeError("local reranker returned incomplete or invalid candidate scores")
         low, high = min(scores), max(scores)
@@ -1210,8 +1223,9 @@ def rerank_candidates(
             hits[position].found_by = sorted(set(hits[position].found_by + ["local reranker"] ))
         return hits
     finally:
-        if owns_runtime:
+        if owns_runtime and runtime is not None:
             runtime.shutdown()
+        MODEL_LANE.release()
 
 
 def _percentile(values: list[float], percentile: float) -> float:

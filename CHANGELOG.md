@@ -2,6 +2,31 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.8.0] - 2026-08-27
+
+### Added
+
+- Objective-first CONTEXT_REQUEST v3 with bounded hints/coverage and a minimal
+  v3 repair response, while preserving v1/v2.
+- Deterministic repository routing/widening, operation fusion, request-local
+  memoization, physical/logical/candidate budgets, trace schema v2, and safe
+  retrieval progress/profiling.
+- Shared bounded repository workers, bounded parallel Semantic shard search,
+  one local-model lane, shared workspace retrieval leases, per-ticket locking,
+  two-ticket UI background jobs, and an investigation board.
+- M365 Agent Kit version metadata and instructions for v3, one focused
+  follow-up, no-progress handling, and FINAL_SOLUTION convergence.
+- Opt-in idle auto-refresh with shared UI/CLI freshness detection, debounced
+  coalescing behind active retrievals, bounded cooldown/backoff, safe local
+  status, and the existing authoritative refresh pipeline.
+
+### Changed
+
+- The UI starts new tickets from the current Brain snapshot by default; refresh
+  before start is an explicit workspace-exclusive option.
+- Candidate fusion/pruning now happens before optional Precision reranking and
+  exact source hydration.
+
 ## [0.6.6] - 2026-08-22
 
 ### Fixed

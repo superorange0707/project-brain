@@ -218,7 +218,8 @@
             <div style="overflow:auto"><table><thead><tr><th>Repository</th><th>Path</th><th>Branch / status</th><th>Commit</th><th>Index</th></tr></thead><tbody id="repo-table"></tbody></table></div>
           </article>
           <article class="card wide">
-            <h2>Investigations</h2><p class="help">Open a previous ticket, its requests, evidence, and implementation feedback.</p>
+            <h2>Investigations</h2><p class="help">Independent tickets can retrieve concurrently; workspace refresh remains exclusive.</p>
+            <div id="investigation-board" class="artifacts" style="margin-bottom:14px"><div class="empty">No investigations yet.</div></div>
             <div class="row"><div class="grow"><select id="session-select"><option value="">No investigations yet</option></select></div><button class="button" id="open-session">Open</button><button class="button danger" id="delete-session" disabled>Delete history</button></div>
             <div id="artifact-list" class="artifacts" style="margin-top:14px"></div>
           </article>
@@ -253,6 +254,7 @@
           <article class="card wide">
             <div class="row"><div class="grow"><h2>Refresh Brain</h2><p class="help">Normal refresh discovers repositories, fetches allowed refs, creates immutable snapshots, builds Core intelligence, then aligns Semantic indexing when the chosen edition requires it.</p></div><button class="button primary" id="brain-refresh">Refresh Brain</button></div>
             <div class="row"><label class="check"><input type="checkbox" id="refresh-fetch" checked> Fetch remotes</label><label class="check"><input type="checkbox" id="refresh-discover" checked> Discover repositories</label><span class="help" id="job-status">No operation running.</span></div>
+            <div class="row"><label for="auto-refresh-mode"><strong>Auto Refresh</strong></label><select id="auto-refresh-mode"><option value="off">Off</option><option value="when_idle">When idle</option></select><span class="help">Last check: <span id="auto-refresh-last-check">Never</span> · Last refresh: <span id="auto-refresh-last-refresh">Never</span> · <span id="auto-refresh-status">Off</span></span></div>
             <div class="refresh-progress" id="refresh-progress" aria-live="polite">
               <div class="refresh-phase" id="refresh-phase">No Refresh Brain operation started.</div>
               <div class="progress-track"><div class="progress-fill" id="refresh-progress-fill"></div></div>
@@ -287,7 +289,7 @@
             <div class="field"><label for="ticket-text">Ticket description, acceptance criteria, logs and constraints</label><textarea class="tall" id="ticket-text" placeholder="# Problem&#10;&#10;Describe observed and expected behaviour…"></textarea></div>
             <div class="field"><label for="ticket-branches">Feature branches (optional, one REPO=BRANCH per line)</label><textarea id="ticket-branches" placeholder="payment-service=feature/ABC-1234"></textarea></div>
             <div class="row">
-              <label class="check grow"><input type="checkbox" id="ticket-sync" checked> Fetch and pin latest remote commits</label>
+              <label class="check grow"><input type="checkbox" id="ticket-sync"> Check latest code & Refresh before start</label>
               <label class="check"><input type="checkbox" id="ticket-degraded"> Continue degraded if Semantic alignment fails</label>
               <select id="ticket-target" style="width:auto"><option value="claude">Clipboard chat</option><option value="m365">M365 file context</option></select>
               <button class="button primary" id="start-ticket">Start investigation</button>
@@ -295,7 +297,7 @@
           </article>
           <article class="card one-third">
             <span class="eyebrow">Your role</span><div class="metric">Courier</div>
-            <p class="help">Give this package to the AI. Talk to the AI directly. Return here only when it emits a CONTEXT_REQUEST for local repository evidence.</p>
+            <p class="help">The default starts from the current pinned Brain snapshot. Give this package to the AI and return only when it emits a CONTEXT_REQUEST for repository evidence.</p>
             <ol class="help" style="padding-left:18px;line-height:2"><li>Give the package to AI</li><li>Answer AI questions directly</li><li>Bring back tool requests only</li></ol>
           </article>
           <article class="card wide">
@@ -525,6 +527,7 @@
       state.status = data;
       var brain = data.brain || {};
       var semantic = brain.semantic || {};
+      var autoRefresh = data.auto_refresh || {};
       document.getElementById("project-name").textContent = data.project.name + " · " + data.project.config;
       document.getElementById("repo-count").textContent = data.summary.repositories;
       document.getElementById("ready-count").textContent = data.summary.current;
@@ -536,6 +539,10 @@
       document.getElementById("overview-effective").textContent = brain.effective || "Core";
       document.getElementById("overview-semantic").textContent = semantic.chunks == null ? "—" : semantic.chunks.toLocaleString();
       document.getElementById("overview-alignment").textContent = semantic.aligned ? "Current snapshots" : (semantic.reason || "Not aligned");
+      document.getElementById("auto-refresh-mode").value = autoRefresh.mode || "off";
+      document.getElementById("auto-refresh-last-check").textContent = autoRefresh.last_check ? new Date(autoRefresh.last_check).toLocaleString() : "Never";
+      document.getElementById("auto-refresh-last-refresh").textContent = autoRefresh.last_refresh ? new Date(autoRefresh.last_refresh).toLocaleString() : "Never";
+      document.getElementById("auto-refresh-status").textContent = autoRefresh.pending_reason || String(autoRefresh.status || "off").replaceAll("_", " ");
       renderBrain(brain);
       renderModels(brain.models || {official:[],installed:[]});
       var rows = data.repositories.map(function (repo) {
@@ -544,6 +551,16 @@
         return "<tr><td><strong>" + esc(repo.name) + "</strong></td><td>" + esc(repo.path) + "</td><td><code>" + esc(repo.ref || "working tree") + "</code><br><span class=\"pill " + (healthy ? "current" : "problem") + "\">" + esc(repo.status) + "</span></td><td><code>" + esc(repo.sha || "unknown") + "</code></td><td>" + indexLabel + "</td></tr>";
       }).join("");
       document.getElementById("repo-table").innerHTML = rows || '<tr><td colspan="5" class="empty">No repositories configured.</td></tr>';
+      document.getElementById("investigation-board").innerHTML = data.sessions.map(function (session) {
+        var job = session.job || {};
+        var progress = job.progress || {};
+        var status = session.status === "retrieving" ? "● Retrieving · " + elapsed(progress.elapsed_ms || (Date.now() - (job.started_at_ms || Date.now()))) : (session.status === "ready_to_implement" ? "✓ Ready to implement" : "✓ Waiting for AI");
+        var details = session.status === "retrieving" ? (progress.phase_label || "Queued") + " · ops " + String(progress.effective_operations || 0) + " · candidates " + String(progress.candidate_count || 0) : String(session.requests || 0) + " retrieval rounds";
+        return '<button class="artifact" data-board-ticket="' + esc(session.ticket) + '"><span><strong>' + esc(session.ticket) + '</strong><br><small>' + esc(status) + '</small></span><small>' + esc(details) + '</small></button>';
+      }).join("") || '<div class="empty">No investigations yet.</div>';
+      document.querySelectorAll("[data-board-ticket]").forEach(function (button) {
+        button.addEventListener("click", function () { document.getElementById("session-select").value = button.dataset.boardTicket; openSession().catch(report); });
+      });
       ["session-select", "request-ticket", "review-ticket"].forEach(function (id) {
         var select = document.getElementById(id);
         var selected = select.value || state.ticket || (data.sessions[0] && data.sessions[0].ticket) || "";
@@ -612,15 +629,34 @@
     function renderRetrieval(retrieval) {
       if (!retrieval || !retrieval.requested_edition) return;
       var timing = retrieval.timing_ms || {};
-      document.getElementById("retrieval-status").innerHTML = [
+      var trace = retrieval.trace || {};
+      var summary = [
         ["Requested edition", retrieval.requested_edition],
         ["Effective edition", retrieval.effective_edition],
         ["Semantic recall", retrieval.semantic_recall_used ? "Used" : "Not used"],
         ["Local reranker", retrieval.reranker_used ? "Used" : "Not used"],
+        ["Requested / effective / physical ops", String(retrieval.requested_operations || 0) + " / " + String(retrieval.effective_operations || 0) + " / " + String(retrieval.physical_backend_operations || 0)],
+        ["Repository scope", String((retrieval.initial_repo_scope || []).length) + " → " + String((retrieval.final_repo_scope || []).length)],
         ["Candidates / evidence", String(retrieval.candidate_count || 0) + " / " + String(retrieval.evidence_count || 0)],
+        ["Stop reason", retrieval.stop_reason || "coverage_satisfied"],
         ["Pinned generation", retrieval.generation || "fallback"],
-        ["Total time", timing.total_ms == null ? "—" : String(timing.total_ms) + " ms"]
+        ["Total time", timing.total_ms == null ? "—" : String(timing.total_ms) + " ms"],
+        ["Planning / routing / discovery", String(timing.planning_ms || 0) + " / " + String(timing.repo_routing_ms || 0) + " / " + String(timing.candidate_ms || 0) + " ms"],
+        ["Pruning / rerank / hydration / pack", String(timing.candidate_pruning_ms || 0) + " / " + String(timing.rerank_ms || 0) + " / " + String(timing.source_hydration_ms || 0) + " / " + String(timing.context_pack_ms || 0) + " ms"]
       ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
+      var backend = trace.backend_ms || {};
+      var detailed = [
+        ["Queue / model lane", String(trace.queue_wait_ms || 0) + " / " + String(trace.model_lane_wait_ms || 0) + " ms"],
+        ["Exact lexical / Zoekt", String(trace.exact_lexical_ms || 0) + " / " + String(backend.zoekt || 0) + " ms"],
+        ["Path / symbol / graph", String(trace.path_ms || 0) + " / " + String(trace.symbol_ms || 0) + " / " + String(trace.graph_ms || 0) + " ms"],
+        ["Semantic embed / shards / total", String(trace.semantic_query_embedding_ms || 0) + " / " + String(trace.semantic_shard_search_ms || 0) + " / " + String(trace.semantic_total_ms || trace.semantic_ms || 0) + " ms"],
+        ["Relationships / history / experience", String(trace.relationship_ms || 0) + " / " + String(trace.history_ms || 0) + " / " + String(trace.experience_ms || 0) + " ms"],
+        ["Embedding runtime / inference", String(trace.embedding_runtime_start_ms || 0) + " / " + String(trace.embedding_inference_ms || 0) + " ms"],
+        ["Reranker runtime / inference", String(trace.reranker_runtime_start_ms || 0) + " / " + String(trace.reranker_inference_ms || 0) + " ms"],
+        ["Hits / prune / rerank / hydrated", String(trace.raw_hits || 0) + " / " + String(trace.candidates_after_prune || 0) + " / " + String(trace.rerank_input_count || 0) + " / " + String(trace.hydrated_regions || 0)],
+        ["Cache / subprocesses / bytes read", String(trace.cache_hits || 0) + " / " + String(trace.subprocess_count || 0) + " / " + String(trace.bytes_read || 0)]
+      ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
+      document.getElementById("retrieval-status").innerHTML = summary + '<details><summary>Detailed profiler</summary>' + detailed + '</details>';
     }
     function setDelivery(data, viewId) {
       var delivery = data || {current:0,total:0,content:""};
@@ -733,6 +769,12 @@
       catch (error) { report(error); } finally { busy(button, false); }
     });
     document.getElementById("request-text").addEventListener("input", function () { state.preview = null; document.getElementById("run-request").disabled = true; });
+    document.getElementById("auto-refresh-mode").addEventListener("change", async function () {
+      try {
+        await api("/api/auto-refresh", {method:"POST",body:JSON.stringify({mode:this.value})});
+        await loadStatus();
+      } catch (error) { report(error); }
+    });
     document.getElementById("run-request").addEventListener("click", async function () {
       if (!state.preview) return;
       var button = this; busy(button, true, state.preview.kind === "final_solution" ? "Archiving…" : "Retrieving…");
@@ -744,7 +786,8 @@
           include_diff: document.getElementById("request-diff").checked,
           target: document.getElementById("request-target").value
         };
-        var data = await api("/api/continue", {method:"POST",body:JSON.stringify(body)});
+        var job = await api("/api/retrieval", {method:"POST",body:JSON.stringify(body)});
+        var data = await waitForJob(job);
         state.ticket = data.ticket;
         if (data.delivery) setDelivery(data.delivery, "view-request");
         if (data.session) renderRetrieval(data.session.retrieval);
@@ -832,7 +875,7 @@
         document.getElementById("agent-instructions").textContent = data.instructions;
         var paths = document.getElementById("agent-paths");
         paths.style.display = "block";
-        paths.textContent = "Created " + data.instructions_path + " · " + data.knowledge_path + " · " + data.suggested_prompts_path + " · " + data.setup_path;
+        paths.textContent = "Created " + data.instructions_path + " · " + data.knowledge_path + " · " + data.suggested_prompts_path + " · " + data.setup_path + " · " + data.manifest_path;
         showToast("M365 Agent setup kit generated");
       } catch (error) { report(error); } finally { busy(button, false); }
     });

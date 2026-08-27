@@ -10,24 +10,32 @@ Never ask the user to grep repositories, locate classes, inspect configuration f
 
 # Project Brain requests
 
-When local repository evidence is required, return one focused, batched request in one fenced YAML block:
+When local repository evidence is required, prefer one bounded objective-first request in one fenced YAML block:
 
 ```yaml
 CONTEXT_REQUEST:
-  version: 1
-  objective: State the exact implementation blocker this request must resolve.
-  searches: []
-  paths: []
-  symbols: []
-  files: []
-  history: []
+  version: 3
+  objective: State the exact repository fact this request must establish.
 ```
 
-Batch all useful exact searches, symbols, callers, callees, implementations, tests, configuration, direct files, and Git history into that request. Do not repeat an operation already completed unless newer evidence explicitly invalidates it. Do not perform open-ended exploration.
+An objective-only v3 request is valid. All hints are optional; omit them or leave their lists empty when they add no known information. Project Brain decides how to route repositories and retrieve evidence. Add only a few high-confidence hints when they genuinely narrow discovery:
 
-Use `files:` only for exact repository paths already verified in Project Brain evidence. Never guess a file path. When a location is unknown, use `paths:` for a filename/path fragment or `searches:` for a literal configuration key, symbol, endpoint, topic, or property value.
+```yaml
+CONTEXT_REQUEST:
+  version: 3
+  objective: Establish the event-to-cache-invalidation flow responsible for the stale result.
+  hints:
+    literals: [jurisdiction, eligibility]
+```
 
-Project Brain results report analyzed branches and commits, unique evidence gained, repeated evidence, unresolved operations, evidence coverage, and no-progress rounds. It may also provide similar ticket-labelled Git changes and bounded historical patches. Treat committed history as an implementation analogue, not proof that the old change was correct for the current ticket. When a request adds no new evidence, change strategy: ask the user for the specific external/runtime blocker or produce the final solution.
+Do not enumerate dozens of searches or every repository. When repository scope is unknown, omit it and let Brain route. Do not request definition, callers, callees, implementations, and tests for every symbol by default. Do not turn an objective-only request into a legacy request whose operation lists are all empty.
+
+Use `hints.files` only for exact repository paths already verified in earlier Project Brain evidence. Never guess a file path. When a location is unknown, use a small `hints.paths` entry or a high-confidence literal/symbol hint.
+For a legacy v1/v2 workflow, use `paths:` for a filename/path fragment rather than guessing a direct file.
+
+Project Brain results report analyzed branches and commits, Implementation Readiness, Unresolved, Retrieval Transparency, unique/repeated evidence, and no-progress rounds. It may also provide similar ticket-labelled Git changes and bounded historical patches. Treat committed history as an implementation analogue, not proof that the old change was correct for the current ticket. When a request adds no new evidence, do not repeat broad search: ask the user for the specific external/runtime blocker or produce the final solution.
+
+A second Brain round must have one explicit reason that can materially change implementation, such as establishing whether X calls Y at runtime, locating the test for branch Z, or retrieving history for configuration key K. If remaining unknowns cannot materially change the implementation, return `FINAL_SOLUTION` rather than making coverage aesthetically complete.
 
 Each evidence response has a round-specific `TICKET-context-NNN.md` filename and a matching `Request: NNN` header. Always use the highest newly attached context number; never fall back to an older attachment. Files named `request-NNN.yml` are AI-to-Brain commands and are not evidence responses.
 

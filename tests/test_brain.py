@@ -27,6 +27,7 @@ from brain.cli import main
 from brain.agent import archive_final_solution, create_m365_agent_kit, response_preview
 from brain.core import (
     BrainError,
+    ContextBundle,
     add_external_evidence,
     chunk_text,
     create_context,
@@ -68,6 +69,8 @@ from brain.models import _open_model_download, autotune_pack, benchmark_pack, in
 from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, Chunk, SEMANTIC_CARD_CODE_CHARS, _bounded_embedding_batches, _excluded, build_semantic_index, chunk_source, search_semantic
 from brain.ops import gc
 from brain.evaluation import evaluate_golden
+from brain.retrieval import compile_request, explain_plan
+from brain.retrieval.models import RetrievalTrace
 
 
 REQUEST = """
@@ -290,6 +293,53 @@ path = "batch-service"
         self.assertIn("Validation error", repair)
         self.assertIn("version: 1", repair)
 
+    def test_v3_objective_only_empty_hints_and_fail_closed_validation(self) -> None:
+        objective_only = """CONTEXT_REQUEST:
+  version: 3
+  objective: Locate the production flow and tests for EligibilityEvaluator.
+"""
+        preview = request_preview(objective_only, self.settings)
+        self.assertEqual(3, preview["protocol_version"])
+        self.assertGreater(preview["operation_count"], 0)
+        self.assertLessEqual(preview["effective_operation_count"], self.settings.max_effective_operations)
+        self.assertEqual([], preview["request"]["hints"]["repos"])
+
+        empty_hints = parse_context_request("""CONTEXT_REQUEST:
+  version: 3
+  objective: Determine the root cause.
+  hints:
+    repos: []
+    literals: []
+    symbols: []
+    paths: []
+    files: []
+    history: []
+""")
+        self.assertEqual(3, empty_hints["version"])
+        self.assertTrue(empty_hints["searches"])
+        with self.assertRaisesRegex(BrainError, "unknown keys"):
+            parse_context_request(objective_only.replace("objective:", "unexpected: true\n  objective:"))
+        repair = request_repair_prompt("bad request")
+        self.assertIn("version: 3", repair)
+        self.assertNotIn("searches: []", repair)
+
+    def test_operation_fusion_and_effective_budget_are_explainable(self) -> None:
+        request = {
+            "version": 1,
+            "objective": "Find EligibilityEvaluator.",
+            "searches": [{"query": "eligibility", "repos": []}] * 30,
+            "symbols": [
+                {"name": "EligibilityEvaluator", "repos": [], "include": ["definition", "callers"]},
+                {"name": "EligibilityEvaluator", "repos": [], "include": ["tests", "implementations"]},
+            ],
+            "paths": [], "files": [], "history": [], "expand": [],
+        }
+        explained = explain_plan(compile_request(request, max_effective_operations=15))
+        self.assertEqual(34, explained["requested_operations"])
+        self.assertEqual(2, explained["effective_operations"])
+        symbol = next(item for item in explained["operations"] if item["kind"] == "symbol")
+        self.assertEqual(["callers", "definition", "implementations", "tests"], symbol["includes"])
+
     def test_cross_repo_search_symbol_and_trace(self) -> None:
         hits = search(self.settings, "JURISDICTION_CHANGED", fixed=True)
         self.assertEqual({"customer-service", "trading-service"}, {hit.repo for hit in hits})
@@ -474,6 +524,55 @@ else:
         self.assertIn("## Unresolved", context)
         self.assertIn("## Investigation progress", context)
         self.assertIn("New unique evidence regions:", context)
+
+    def test_concurrent_tickets_keep_request_state_and_artifacts_isolated(self) -> None:
+        tickets = ["CONCURRENT-A", "CONCURRENT-B"]
+        for ticket in tickets:
+            start_session(self.settings, ticket, f"Investigate {ticket}.")
+        entered = threading.Barrier(2)
+        results: dict[str, tuple[str, Path, int]] = {}
+        errors: list[BaseException] = []
+
+        def retrieve(*args: object, **kwargs: object) -> ContextBundle:
+            entered.wait(timeout=3)
+            return ContextBundle(
+                objective="Concurrent isolation check.",
+                metrics={"total_ms": 1.0, "candidates": 0},
+                trace={
+                    "trace_schema_version": 2,
+                    "requested_operations": 1,
+                    "effective_operations": 1,
+                    "physical_backend_operations": 0,
+                    "planner": {},
+                },
+            )
+
+        def create(ticket: str) -> None:
+            try:
+                results[ticket] = create_context(self.settings, ticket, REQUEST)
+            except BaseException as error:  # pragma: no cover - asserted below
+                errors.append(error)
+
+        with mock.patch("brain.core.retrieve_context", side_effect=retrieve):
+            threads = [threading.Thread(target=create, args=(ticket,)) for ticket in tickets]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=3)
+
+        self.assertEqual([], errors)
+        self.assertEqual(set(tickets), set(results))
+        for ticket in tickets:
+            _, path, number = results[ticket]
+            self.assertEqual(1, number)
+            self.assertEqual(self.settings.runs_dir / ticket / "context-001.md", path)
+            self.assertTrue(path.is_file())
+            state = session_state(self.settings, ticket)
+            self.assertEqual(1, state["requests"])
+            self.assertEqual(1, len(state["request_history"]))
+            trace = state["request_history"][0]["retrieval"]["trace"]
+            self.assertIn("context_pack_ms", trace)
+            self.assertEqual(trace["wall_ms"], trace["total_ms"])
 
     def test_missing_requested_file_is_unresolved_without_half_written_round(self) -> None:
         start_session(self.settings, "ABC-MISSING", "Find the implementation even if one guessed file is absent.")
@@ -1295,14 +1394,115 @@ else:
         state_path.write_text(json.dumps(stale_schema), encoding="utf-8")
         self.assertEqual([], search_semantic(self.settings, "eligibility", repos={"trading-service"}, embed=embed))
 
+    def test_semantic_shards_search_in_parallel_with_deterministic_merge(self) -> None:
+        self.settings.semantic_shard_workers = 2
+        active = 0
+        maximum = 0
+        guard = threading.Lock()
+
+        class Match:
+            key = 0
+            distance = 0.1
+
+        class FakeIndex:
+            @classmethod
+            def restore(cls, path, view=True):
+                return cls()
+
+            def search(self, vector, limit):
+                nonlocal active, maximum
+                with guard:
+                    active += 1
+                    maximum = max(maximum, active)
+                time.sleep(0.03)
+                with guard:
+                    active -= 1
+                return [Match()]
+
+        class FakeNumpy:
+            float32 = "float32"
+
+            @staticmethod
+            def asarray(value, dtype=None):
+                return value
+
+        shards = []
+        for index, repo in enumerate(self.settings.repositories):
+            path = self.settings.state_dir / f"semantic-{index}.usearch"
+            path.touch()
+            shards.append({
+                "repo": repo.name,
+                "snapshot": repo.source_sha or "working-tree",
+                "path": str(path),
+                "entries": [{"path": f"src/{index}.py", "line": 1, "chunk_id": f"chunk-{index}"}],
+            })
+        (self.settings.state_dir / "semantic-index.json").write_text(json.dumps({
+            "chunk_schema_version": CHUNK_SCHEMA_VERSION,
+            "card_version": CARD_VERSION,
+            "backend": "usearch",
+            "pack_id": "parallel-test",
+            "dimension": 2,
+            "stale": False,
+            "shards": shards,
+        }), encoding="utf-8")
+        trace = RetrievalTrace()
+        with mock.patch("brain.semantic._usearch", return_value=(FakeIndex, FakeNumpy)):
+            results = search_semantic(self.settings, "eligibility", embed=lambda values: [[1.0, 0.0]], trace=trace)
+        self.assertGreater(maximum, 1)
+        self.assertLessEqual(maximum, self.settings.semantic_shard_workers)
+        self.assertEqual(len(shards), trace.physical_backend_operations)
+        self.assertIn("semantic_query_embedding_ms", trace.stage_ms)
+        self.assertIn("semantic_shard_search_ms", trace.stage_ms)
+        self.assertIn("semantic_total_ms", trace.stage_ms)
+        self.assertEqual(sorted(item["repo"] for item in results), [item["repo"] for item in results])
+
     def test_local_reranker_only_reorders_bounded_nonprotected_candidates(self) -> None:
         protected = SearchHit("trading-service", "src/Eligibility.java", 10, "class Eligibility", "definition", 100, ["symbol"])
         first = SearchHit("trading-service", "README.md", 2, "release note", "code", 50, ["search"])
         second = SearchHit("risk-service", "src/Risk.java", 8, "eligibility risk check", "code", 50, ["search"])
-        reranked = rerank_candidates(self.settings, "eligibility", [protected, first, second], runtime=DeterministicRuntime(), limit=1)
+        trace = RetrievalTrace()
+        reranked = rerank_candidates(
+            self.settings,
+            "eligibility",
+            [protected, first, second],
+            runtime=DeterministicRuntime(),
+            limit=1,
+            trace=trace,
+        )
         self.assertEqual(100, reranked[0].score)
         self.assertEqual(50, reranked[2].score)
         self.assertIn("local reranker", reranked[1].found_by)
+        self.assertIn("reranker_inference_ms", trace.stage_ms)
+
+    def test_model_lane_serializes_concurrent_reranking(self) -> None:
+        active = 0
+        maximum = 0
+        guard = threading.Lock()
+
+        class SlowRuntime:
+            def rerank(self, query, documents, instruction=""):
+                nonlocal active, maximum
+                with guard:
+                    active += 1
+                    maximum = max(maximum, active)
+                time.sleep(0.03)
+                with guard:
+                    active -= 1
+                return [float(index) for index, _ in enumerate(documents)]
+
+            def shutdown(self):
+                return None
+
+        def run_rerank() -> None:
+            hits = [SearchHit("trading-service", "src/A.java", index + 1, f"line {index}") for index in range(3)]
+            rerank_candidates(self.settings, "eligibility", hits, runtime=SlowRuntime(), limit=3)
+
+        threads = [threading.Thread(target=run_rerank) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+        self.assertEqual(1, maximum)
 
     def test_brain_owned_model_runtimes_shutdown_on_query_and_index_paths(self) -> None:
         hit = SearchHit("trading-service", "README.md", 2, "eligibility evidence", "code", 50, ["search"])
@@ -1609,6 +1809,44 @@ else:
         state, _ = snapshot_indexes(self.settings)
         self.assertIn("Catalog generation unavailable", str(state["trading-service"].get("warning")))
         self.assertTrue(search(self.settings, "EligibilityEvaluator", ["trading-service"], fixed=True))
+
+
+class SyntheticFanoutTest(unittest.TestCase):
+    def test_fifty_repository_repetitive_request_is_fused_routed_and_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = ['[project]', 'name="fanout"', '[graph]', 'enabled=false']
+            for index in range(50):
+                repo = root / f"repo-{index:02d}"
+                repo.mkdir()
+                if index == 37:
+                    (repo / "Needle.java").write_text("class NeedleSymbol {}\n", encoding="utf-8")
+                rows.extend(["[[repositories]]", f'name="repo-{index:02d}"', f'path="repo-{index:02d}"'])
+            config = root / "brain.toml"
+            config.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            settings = load_settings(config)
+            payload = {
+                "CONTEXT_REQUEST": {
+                    "version": 1,
+                    "objective": "Locate NeedleSymbol and its tests.",
+                    "searches": [{"query": "NeedleSymbol", "repos": []} for _ in range(50)],
+                    "paths": [],
+                    "symbols": [
+                        {"name": "NeedleSymbol", "repos": [], "include": ["definition", "callers", "tests"]}
+                        for _ in range(10)
+                    ],
+                    "files": [], "history": [], "expand": [],
+                }
+            }
+            request = parse_context_request(json.dumps(payload))
+            bundle = retrieve_context(settings, request)
+
+        self.assertEqual(80, bundle.trace["requested_operations"])
+        self.assertEqual(2, bundle.trace["effective_operations"])
+        self.assertEqual(56, bundle.trace["physical_backend_operations"])
+        self.assertLessEqual(len(bundle.trace["initial_repo_scope"]), 6)
+        self.assertEqual("repo-37", bundle.trace["initial_repo_scope"][0])
+        self.assertLessEqual(bundle.trace["candidates_after_prune"], 200)
 
 
 class ExperienceTest(unittest.TestCase):
@@ -2038,6 +2276,12 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("v9.9.9/project-brain-v9.9.9-macos-arm64.tar.gz", formula)
         self.assertIn('sha256 "a" * 64', formula.replace('"' + "a" * 64 + '"', '"a" * 64'))
         self.assertNotIn("bottle do", formula)
+        rc_values = {name.replace("v9.9.9", "v9.9.9-rc2"): digest for name, digest in values.items()}
+        rc_formula = module.render("9.9.9-rc2", rc_values, release_candidate=True)
+        self.assertIn("class ProjectBrainRc < Formula", rc_formula)
+        self.assertIn('version "9.9.9-rc2"', rc_formula)
+        self.assertIn('conflicts_with "project-brain"', rc_formula)
+        self.assertIn("v9.9.9-rc2/project-brain-v9.9.9-rc2-macos-arm64.tar.gz", rc_formula)
         with self.assertRaisesRegex(ValueError, "missing standalone"):
             module.render("9.9.9", {})
         workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -2047,6 +2291,10 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("Check tap authorization", workflow)
         self.assertIn("steps.authorization.outputs.available == 'true'", workflow)
         self.assertNotIn("if: ${{ secrets.HOMEBREW_TAP_TOKEN", workflow)
+        self.assertIn("--prerelease", workflow)
+        self.assertIn("Formula/project-brain-rc.rb", workflow)
+        self.assertIn("--release-candidate", workflow)
+        self.assertIn("!contains(github.ref_name, '-')", workflow)
 
     def test_semantic_pack_workflow_pins_official_inputs_and_never_bundles_core(self) -> None:
         root = Path(__file__).resolve().parents[1]

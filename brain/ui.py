@@ -31,6 +31,7 @@ from .core import (
     start_session,
 )
 from .experience import load_experience_index
+from .locks import WorkspaceOperationBusy, ticket_exclusive
 from .ops import progress_event
 
 
@@ -94,7 +95,11 @@ def _sessions(settings: Settings) -> list[dict[str, Any]]:
     return sorted(sessions, key=lambda item: item["updated_at"], reverse=True)
 
 
-def project_status(settings: Settings) -> dict[str, Any]:
+def project_status(
+    settings: Settings,
+    jobs: list[dict[str, Any]] | None = None,
+    auto_refresh: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from .catalog import current_generation
     from .metrics import benchmark_report
     from .ops import dashboard_status, storage
@@ -140,6 +145,14 @@ def project_status(settings: Settings) -> dict[str, Any]:
             "warning": source.get("warning"),
         })
     brain = dashboard_status(settings)
+    sessions = _sessions(settings)
+    active_jobs = [item for item in (jobs or []) if item.get("status") in {"pending", "running"}]
+    by_ticket = {str(item.get("ticket")): item for item in active_jobs if item.get("ticket")}
+    for session in sessions:
+        job = by_ticket.get(str(session["ticket"]))
+        if job:
+            session["status"] = "retrieving"
+            session["job"] = job
     return {
         "project": {"name": settings.name, "config": settings.config_path.name},
         "summary": {
@@ -150,7 +163,8 @@ def project_status(settings: Settings) -> dict[str, Any]:
             "evaluated_sessions": int(evaluation.get("evaluated_sessions") or 0),
         },
         "repositories": repositories,
-        "sessions": _sessions(settings),
+        "sessions": sessions,
+        "jobs": active_jobs,
         "retrieval": {
             "edition": brain["edition"],
             "generation": (current_generation(settings) or {}).get("generation"),
@@ -159,6 +173,10 @@ def project_status(settings: Settings) -> dict[str, Any]:
             "storage": storage(settings),
         },
         "brain": brain,
+        "auto_refresh": auto_refresh or {
+            "mode": "off", "last_check": None, "last_refresh": None,
+            "pending": False, "pending_reason": None, "status": "off",
+        },
     }
 
 
@@ -221,6 +239,7 @@ def _artifact(settings: Settings, ticket: str, name: str) -> dict[str, Any]:
     return {"name": name, "content": path.read_text(encoding="utf-8")}
 
 
+@ticket_exclusive
 def _delete_session(settings: Settings, ticket: str) -> list[str]:
     directory = session_dir(settings, ticket)
     if not directory.is_dir() or directory.is_symlink():
@@ -241,28 +260,46 @@ def _delete_session(settings: Settings, ticket: str) -> list[str]:
 
 
 class _OperationCoordinator:
-    """Bounded in-memory coordinator for UI mutations; no source is retained."""
+    """Coordinate one workspace mutation or bounded independent ticket jobs."""
 
     _RETAINED = 20
 
-    def __init__(self) -> None:
+    def __init__(self, max_retrievals: int = 2) -> None:
         self._lock = threading.Lock()
-        self._active: str | None = None
+        self._active_mutation: str | None = None
+        self._active_retrievals: dict[str, str] = {}
+        self._max_retrievals = max(1, max_retrievals)
         self._jobs: dict[str, dict[str, Any]] = {}
 
-    def _claim(self, name: str) -> str:
+    def _claim(self, name: str, *, kind: str = "mutation", ticket: str | None = None) -> str:
         with self._lock:
-            if self._active is not None:
-                active = self._jobs.get(self._active) or {}
+            if kind == "mutation" and (self._active_mutation is not None or self._active_retrievals):
+                active_id = self._active_mutation or next(iter(self._active_retrievals.values()))
+                active = self._jobs.get(active_id) or {}
                 raise BrainError(f"Another state-changing operation is already running: {active.get('name') or 'operation'}")
+            if kind == "retrieval":
+                if self._active_mutation is not None:
+                    active = self._jobs.get(self._active_mutation) or {}
+                    raise BrainError(f"A workspace mutation is already running: {active.get('name') or 'operation'}")
+                if not ticket:
+                    raise BrainError("Ticket identifier is required for retrieval")
+                if ticket in self._active_retrievals:
+                    raise BrainError("Another request for this ticket is already running")
+                if len(self._active_retrievals) >= self._max_retrievals:
+                    raise BrainError(f"The {self._max_retrievals} concurrent investigation limit is active")
             job_id = secrets.token_urlsafe(12)
-            self._active = job_id
+            if kind == "mutation":
+                self._active_mutation = job_id
+            else:
+                self._active_retrievals[str(ticket)] = job_id
             self._jobs[job_id] = {
                 "id": job_id,
                 "name": name,
+                "kind": kind,
+                "ticket": ticket,
                 "status": "pending",
                 "phase": "Queued",
-                "progress": progress_event("discovery", elapsed_ms=0, phase_label="Queued"),
+                "progress": progress_event("queued", elapsed_ms=0),
                 "started_at_ms": round(time.time() * 1000),
                 "result": None,
                 "error": None,
@@ -279,7 +316,12 @@ class _OperationCoordinator:
                 # Errors from refresh/model runtimes can contain a local path or
                 # transport context.  The UI receives only a safe class label.
                 message = str(error).strip()
-                safe_validation = isinstance(error, (BrainError, ValueError)) and "://" not in message and len(message) <= 280
+                safe_validation = (
+                    job.get("name") != "auto-refresh"
+                    and isinstance(error, (BrainError, ValueError))
+                    and "://" not in message
+                    and len(message) <= 280
+                )
                 job.update({
                     "status": "failed",
                     "phase": "Failed",
@@ -287,8 +329,11 @@ class _OperationCoordinator:
                     "result": None,
                     "error": message if safe_validation else f"Operation failed ({type(error).__name__}).",
                 })
-            if self._active == job_id:
-                self._active = None
+            if job.get("kind") == "mutation" and self._active_mutation == job_id:
+                self._active_mutation = None
+            ticket = str(job.get("ticket") or "")
+            if ticket and self._active_retrievals.get(ticket) == job_id:
+                self._active_retrievals.pop(ticket, None)
             completed = [key for key, item in self._jobs.items() if item["status"] in {"succeeded", "failed"}]
             for key in completed[:-self._RETAINED]:
                 self._jobs.pop(key, None)
@@ -308,8 +353,8 @@ class _OperationCoordinator:
                     )
                 self._jobs[job_id].update({"status": "running", "phase": safe["phase_label"], "progress": safe})
 
-    def start(self, name: str, operation: Any) -> dict[str, Any]:
-        job_id = self._claim(name)
+    def start(self, name: str, operation: Any, *, kind: str = "mutation", ticket: str | None = None) -> dict[str, Any]:
+        job_id = self._claim(name, kind=kind, ticket=ticket)
 
         def run() -> None:
             try:
@@ -323,8 +368,8 @@ class _OperationCoordinator:
         threading.Thread(target=run, name=f"project-brain-{name}", daemon=True).start()
         return self.get(job_id)
 
-    def foreground(self, name: str, operation: Any) -> Any:
-        job_id = self._claim(name)
+    def foreground(self, name: str, operation: Any, *, kind: str = "mutation", ticket: str | None = None) -> Any:
+        job_id = self._claim(name, kind=kind, ticket=ticket)
         try:
             self._progress(job_id, "Running")
             result = operation()
@@ -341,15 +386,52 @@ class _OperationCoordinator:
                 raise BrainError("Operation does not exist")
             return {key: value for key, value in job.items() if not key.startswith("_")}
 
+    def list(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                {key: value for key, value in job.items() if not key.startswith("_")}
+                for job in sorted(self._jobs.values(), key=lambda item: int(item["started_at_ms"]), reverse=True)
+            ]
+
+    def is_idle(self) -> bool:
+        with self._lock:
+            return self._active_mutation is None and not self._active_retrievals
+
+    def active_retrieval_count(self) -> int:
+        with self._lock:
+            return len(self._active_retrievals)
+
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address: tuple[str, int], settings: Settings, token: str):
+        from .auto_refresh import AutoRefreshService
+
         self.settings = settings
         self.token = token
-        self.operations = _OperationCoordinator()
+        self.operations = _OperationCoordinator(settings.max_concurrent_investigations)
+        self.auto_refresh = AutoRefreshService(
+            settings,
+            refresher=self._auto_refresh,
+            is_idle=self.operations.is_idle,
+        )
         super().__init__(address, _Handler)
+        self.auto_refresh.start()
+
+    def _auto_refresh(self) -> Any:
+        from .ops import refresh_brain
+
+        try:
+            return self.operations.foreground("auto-refresh", lambda: refresh_brain(self.settings, fetch=True, discover=True))
+        except BrainError as error:
+            if not self.operations.is_idle():
+                raise WorkspaceOperationBusy("workspace is not idle") from error
+            raise
+
+    def server_close(self) -> None:
+        self.auto_refresh.stop()
+        super().server_close()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -417,13 +499,19 @@ class _Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         try:
             if parsed.path == "/api/status":
-                self._json({"ok": True, "data": project_status(self.server.settings)})
+                self._json({"ok": True, "data": project_status(
+                    self.server.settings,
+                    self.server.operations.list(),
+                    self.server.auto_refresh.status(),
+                )})
             elif parsed.path == "/api/models":
                 from .ops import model_status
 
                 self._json({"ok": True, "data": model_status(self.server.settings)})
             elif parsed.path == "/api/job":
                 self._json({"ok": True, "data": self.server.operations.get(_one(query, "id"))})
+            elif parsed.path == "/api/jobs":
+                self._json({"ok": True, "data": self.server.operations.list()})
             elif parsed.path == "/api/diagnostics":
                 from .models import model_download_trust_status
                 from .ops import dashboard_status
@@ -464,10 +552,28 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     self._json({"ok": True, "data": data})
                 return
+            if parsed.path == "/api/auto-refresh":
+                self._json({
+                    "ok": True,
+                    "data": self.server.auto_refresh.set_mode(str(body.get("mode") or "")),
+                })
+                return
             if parsed.path in {"/api/refresh", "/api/model", "/api/edition"}:
                 self._start_operation(parsed.path, body)
+            elif parsed.path == "/api/retrieval":
+                self._start_retrieval(body)
+            elif parsed.path == "/api/agent-kit":
+                self._action(parsed.path, body)
             else:
-                self.server.operations.foreground(parsed.path, lambda: self._action(parsed.path, body))
+                ticket = str(body.get("ticket") or "").strip() or None
+                ticket_paths = {"/api/start", "/api/context", "/api/continue", "/api/feedback", "/api/session/delete"}
+                kind = "retrieval" if parsed.path in ticket_paths else "mutation"
+                self.server.operations.foreground(
+                    parsed.path,
+                    lambda: self._action(parsed.path, body),
+                    kind=kind,
+                    ticket=ticket if kind == "retrieval" else None,
+                )
         except (BrainError, OSError, RuntimeError, ValueError) as exc:
             self._error(exc)
 
@@ -503,6 +609,49 @@ class _Handler(BaseHTTPRequestHandler):
                 lambda progress: self._model_job(settings, action, value, progress),
             )
         self._json({"ok": True, "data": job}, HTTPStatus.ACCEPTED)
+
+    def _start_retrieval(self, body: dict[str, Any]) -> None:
+        ticket = str(body.get("ticket") or "").strip()
+        if not ticket:
+            raise BrainError("Ticket identifier is required")
+        job = self.server.operations.start(
+            "retrieval",
+            lambda progress: self._retrieval_job(self.server.settings, body, progress),
+            kind="retrieval",
+            ticket=ticket,
+        )
+        self._json({"ok": True, "data": job}, HTTPStatus.ACCEPTED)
+
+    @staticmethod
+    def _retrieval_job(settings: Settings, body: dict[str, Any], progress: Any) -> dict[str, Any]:
+        ticket = str(body.get("ticket") or "").strip()
+        text = str(body.get("text") or "")
+        preview = response_preview(text, settings, ticket)
+        if preview["kind"] == "conversation":
+            return {"ticket": ticket, **preview, "session": _session_detail(settings, ticket)}
+        if preview["kind"] == "final_solution":
+            artifact = archive_final_solution(settings, ticket, text)
+            if _target(body) == "m365":
+                deliver(settings, ticket, text, "m365", copy=False)
+            return {"ticket": ticket, **preview, "path": artifact.name, "session": _session_detail(settings, ticket)}
+        if preview.get("duplicate_of"):
+            raise BrainError(f"This retrieval plan already ran as request {preview['duplicate_of']:03d}.")
+        content, artifact, number = create_context(
+            settings,
+            ticket,
+            text,
+            bool(body.get("include_diff")),
+            progress=progress,
+        )
+        deliver(settings, ticket, content, _target(body), copy=False)
+        return {
+            "ticket": ticket,
+            **preview,
+            "request": number,
+            "path": artifact.name,
+            "delivery": _delivery(settings, ticket),
+            "session": _session_detail(settings, ticket),
+        }
 
     @staticmethod
     def _model_job(settings: Settings, action: str, value: str | None, progress: Any) -> dict[str, Any]:

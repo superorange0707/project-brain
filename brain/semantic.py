@@ -7,13 +7,14 @@ import math
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 from urllib.error import URLError
 
 from .models import active_pack, embedding_batch_size, embedding_request_bytes, runtime_for_pack
-from .locks import workspace_exclusive
+from .locks import MODEL_LANE, workspace_exclusive
 
 if TYPE_CHECKING:
     from .core import Repository, Settings
@@ -40,6 +41,7 @@ SEMANTIC_MAX_REQUEST_BODY_BYTES = 24_576
 # model-pack card schema contract.
 SEMANTIC_EMBEDDING_INPUT_VERSION = "2"
 SYMBOL = re.compile(r"(?m)^\s*(?:class|interface|record|enum|def|function|fun|func)\s+([A-Za-z_$][\w$]*)")
+_SHARD_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="brain-semantic-shard")
 
 
 @dataclass(frozen=True)
@@ -718,7 +720,15 @@ def _query_vector(settings: Settings, query: str, *, pack_id: str, dimension: in
     return [float(number) for number in vector]
 
 
-def search_semantic(settings: Settings, query: str, *, repos: set[str] | None = None, limit: int = 40, embed: Callable[[list[str]], list[list[float]]] | None = None) -> list[dict[str, object]]:
+def search_semantic(
+    settings: Settings,
+    query: str,
+    *,
+    repos: set[str] | None = None,
+    limit: int = 40,
+    embed: Callable[[list[str]], list[list[float]]] | None = None,
+    trace: Any | None = None,
+) -> list[dict[str, object]]:
     try:
         state = json.loads(_state_path(settings).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -729,48 +739,102 @@ def search_semantic(settings: Settings, query: str, *, repos: set[str] | None = 
     dimension = int(state.get("dimension") or 0)
     if not pack_id or dimension <= 0:
         return []
+    if trace is not None and trace.physical_budget_remaining <= 0:
+        trace.stop_reason = "physical_budget"
+        return []
+    semantic_started = time.perf_counter()
     runtime = None
-    manifest = active_pack(settings, "embedding") if embed is None else None
-    if embed is None:
-        if manifest is None or manifest.get("pack_id") != pack_id:
-            return []
-        runtime = runtime_for_pack(manifest)
-        query_instruction = str(manifest.get("query_instruction") or "")
-        embed = lambda values: runtime.embed(values, instruction=query_instruction, dimension=dimension)
+    owns_runtime = embed is None
+    if owns_runtime:
+        lane_started = time.perf_counter()
+        MODEL_LANE.acquire()
+        if trace is not None:
+            trace.add_stage("model_lane_wait_ms", (time.perf_counter() - lane_started) * 1000)
     try:
+        manifest = active_pack(settings, "embedding") if embed is None else None
+        if embed is None:
+            if manifest is None or manifest.get("pack_id") != pack_id:
+                return []
+            runtime_started = time.perf_counter()
+            runtime = runtime_for_pack(manifest)
+            if trace is not None:
+                trace.add_stage("embedding_runtime_start_ms", (time.perf_counter() - runtime_started) * 1000)
+            query_instruction = str(manifest.get("query_instruction") or "")
+            embed = lambda values: runtime.embed(values, instruction=query_instruction, dimension=dimension)
+        embedding_started = time.perf_counter()
         vector = _query_vector(settings, query, pack_id=pack_id, dimension=dimension, embed=embed)
+        if trace is not None:
+            elapsed = (time.perf_counter() - embedding_started) * 1000
+            trace.add_stage("semantic_query_embedding_ms", elapsed)
+            trace.add_stage("embedding_inference_ms", elapsed)
         snapshots = {repo.name: repo.source_sha or "working-tree" for repo in settings.repositories}
         if state.get("backend") == "exact-mock":
+            backend_started = time.perf_counter()
             scored = [
                 (float(_cosine(vector, list(item["vector"]))), item)
                 for item in state.get("entries") or []
                 if isinstance(item, dict) and (not repos or item.get("repo") in repos) and snapshots.get(str(item.get("repo"))) == item.get("snapshot")
             ]
+            if trace is not None:
+                elapsed = (time.perf_counter() - backend_started) * 1000
+                trace.add_backend("semantic-exact", elapsed, raw_hits=len(scored))
+                trace.add_stage("semantic_shard_search_ms", elapsed)
             return [{key: value for key, value in item.items() if key != "vector"} | {"score": score} for score, item in sorted(scored, key=lambda pair: (-pair[0], str(pair[1].get("chunk_id"))))[:limit]]
         backend = _usearch()
         if backend is None:
             return []
         Index, numpy = backend
-        results: list[dict[str, object]] = []
-        for shard in state.get("shards") or []:
-            if not isinstance(shard, dict) or (repos and shard.get("repo") not in repos) or snapshots.get(str(shard.get("repo"))) != shard.get("snapshot"):
-                continue
+        eligible = [
+            shard for shard in state.get("shards") or []
+            if isinstance(shard, dict)
+            and (not repos or shard.get("repo") in repos)
+            and snapshots.get(str(shard.get("repo"))) == shard.get("snapshot")
+        ]
+        if trace is not None and len(eligible) > trace.physical_budget_remaining:
+            eligible = eligible[:trace.physical_budget_remaining]
+            trace.stop_reason = "physical_budget"
+
+        def search_shard(shard: dict[str, object]) -> list[dict[str, object]]:
+            backend_started = time.perf_counter()
             path = Path(str(shard.get("path") or ""))
             if not path.is_file():
-                continue
+                if trace is not None:
+                    trace.add_backend("semantic-shard", (time.perf_counter() - backend_started) * 1000)
+                return []
             try:
                 index = Index.restore(str(path), view=True)
                 matches = index.search(numpy.asarray(vector, dtype=numpy.float32), limit)
             except Exception:
                 # A corrupt optional shard cannot invalidate Core or a healthy shard
                 # from another repository/snapshot.
-                continue
+                if trace is not None:
+                    trace.add_backend("semantic-shard", (time.perf_counter() - backend_started) * 1000)
+                return []
+            rows: list[dict[str, object]] = []
             for match in matches:
                 key = int(match.key)
                 entries = shard.get("entries") or []
                 if 0 <= key < len(entries) and isinstance(entries[key], dict):
-                    results.append({"repo": shard["repo"], "snapshot": shard["snapshot"], **entries[key], "score": 1 - float(match.distance)})
+                    rows.append({"repo": shard["repo"], "snapshot": shard["snapshot"], **entries[key], "score": 1 - float(match.distance)})
+            if trace is not None:
+                trace.add_backend("semantic-shard", (time.perf_counter() - backend_started) * 1000, raw_hits=len(rows))
+            return rows
+
+        shard_search_started = time.perf_counter()
+        results: list[dict[str, object]] = []
+        for offset in range(0, len(eligible), settings.semantic_shard_workers):
+            futures = [
+                _SHARD_EXECUTOR.submit(search_shard, shard)
+                for shard in eligible[offset:offset + settings.semantic_shard_workers]
+            ]
+            results.extend(item for future in futures for item in future.result())
+        if trace is not None:
+            trace.add_stage("semantic_shard_search_ms", (time.perf_counter() - shard_search_started) * 1000)
         return sorted(results, key=lambda item: (-float(item["score"]), str(item["repo"]), str(item["chunk_id"])))[:limit]
     finally:
         if runtime is not None:
             runtime.shutdown()
+        if owns_runtime:
+            MODEL_LANE.release()
+        if trace is not None:
+            trace.add_stage("semantic_total_ms", (time.perf_counter() - semantic_started) * 1000)

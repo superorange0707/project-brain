@@ -127,9 +127,9 @@ def _parser() -> argparse.ArgumentParser:
     gc = commands.add_parser("gc", help="remove unpinned old index generations")
     gc.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True)
     gc.add_argument("--keep-recent", type=int, default=2)
-    watch = commands.add_parser("watch", help="refresh selected remote snapshots on a fixed interval")
-    watch.add_argument("--once", action="store_true", help="run one refresh and exit")
-    watch.add_argument("--interval", type=int, help="seconds between refreshes")
+    watch = commands.add_parser("watch", help="check freshness and refresh once the workspace is idle")
+    watch.add_argument("--once", action="store_true", help="run one freshness check and exit")
+    watch.add_argument("--interval", type=int, help="seconds between freshness checks")
 
     start = commands.add_parser("start", help="start a ticket investigation")
     start.add_argument("ticket")
@@ -287,6 +287,16 @@ def _init(args: argparse.Namespace) -> int:
         "hydrate_limit = 18",
         "max_regions_per_file = 2",
         "max_regions_per_repo = 8",
+        "",
+        "[retrieval]",
+        "max_concurrent_investigations = 2",
+        "repo_workers = 4",
+        "initial_repo_limit = 6",
+        "widen_repo_limit = 16",
+        "max_effective_operations = 15",
+        "max_backend_operations = 200",
+        "pre_rerank_candidate_limit = 200",
+        "semantic_shard_workers = 4",
         "",
         "[delivery]",
         "clipboard_chunk_chars = 180000",
@@ -553,10 +563,21 @@ def execute(args: argparse.Namespace) -> int:
                 print(f"{metric}: p50 {timing['p50']:.3f} ms, p95 {timing['p95']:.3f} ms, max {timing['max']:.3f} ms")
         return 0
     if args.command == "explain":
-        from .retrieval import compile_request, explain_plan
+        from .retrieval.planner import route_repositories
 
         plan = request_preview(_request_text(args), settings)
-        report = {**explain_plan(compile_request(plan["request"])), "request_signature": plan["signature"]}
+        routed = route_repositories(
+            settings.repositories,
+            plan["request"],
+            limit=min(settings.initial_repo_limit, len(settings.repositories)),
+        )
+        report = {
+            **plan["planner"],
+            "repo_routing": {"initial_scope": routed, "workspace_repositories": len(settings.repositories)},
+            "physical_backend_budget": settings.max_backend_operations,
+            "pre_rerank_candidate_limit": settings.pre_rerank_candidate_limit,
+            "request_signature": plan["signature"],
+        }
         print(json.dumps(report, indent=2) if args.json else "\n".join(f"L{item['tier']} {item['kind']}: {item['value']} — {item['reason']}" for item in report["operations"]))
         return 0
     if args.command == "edition":
@@ -602,14 +623,23 @@ def execute(args: argparse.Namespace) -> int:
             print(json.dumps(gc(settings, dry_run=args.dry_run, keep_recent=max(1, args.keep_recent)), indent=2))
         return 0
     if args.command == "watch":
+        from .auto_refresh import AutoRefreshService
+
         interval = max(10, args.interval or settings.watch_interval_seconds)
+        service = AutoRefreshService(
+            settings,
+            mode="when_idle",
+            persist=False,
+            interval_seconds=interval,
+            debounce_seconds=0 if args.once else 5,
+        )
         while True:
-            _, results, _ = _refresh_all(settings, fetch=True, discover=False)
-            _print_sync(results)
+            state = service.poll(force_check=not service.status()["pending"])
+            print(json.dumps(state, indent=2))
             if args.once:
                 return 0
             try:
-                time.sleep(interval)
+                time.sleep(0.5 if state["pending"] else interval)
             except KeyboardInterrupt:
                 return 0
     if args.command == "experience":
