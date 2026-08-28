@@ -53,6 +53,13 @@ def _hash(*values: object) -> str:
     return "sha256:" + hashlib.sha256("\0".join(str(value) for value in values).encode("utf-8")).hexdigest()
 
 
+def _investigation_evidence_id(item: Any) -> str:
+    identity = "\0".join(str(value) for value in (
+        item.repo, item.path, item.line_start, item.line_end, item.content,
+    ))
+    return "E-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
 def _language(path: str) -> str:
     return {
         ".py": "python", ".java": "java", ".kt": "kotlin", ".kts": "kotlin", ".ts": "typescript",
@@ -1057,7 +1064,7 @@ def update_investigation(memory: dict[str, Any], coverage: dict[str, str], bundl
             if item.repo not in {"external", "knowledge"}]
     memory["verified_references"] = list(dict.fromkeys([*(memory.get("verified_references") or []), *refs]))[-500:]
     facts = [
-        {"evidence_id": f"E-{hashlib.sha256(f'{item.repo}\0{item.path}\0{item.line_start}\0{item.line_end}\0{item.content}'.encode()).hexdigest()[:24]}",
+        {"evidence_id": _investigation_evidence_id(item),
          "reference": f"{item.repo}:{item.path}:{item.line_start}-{item.line_end}", "kind": item.kind,
          "verified_by": list(item.found_by)}
         for item in bundle.evidence if item.repo not in {"external", "knowledge"}

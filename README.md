@@ -136,7 +136,7 @@ Download the archive for your CPU from the
 extract it, and place all four executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.9.1-macos-arm64.tar.gz
+tar -xzf project-brain-v0.9.2-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp zoekt zoekt-index ~/.local/bin/
 ```
@@ -147,19 +147,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.2"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.2"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.9.1/project_brain_context-0.9.1-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.9.2/project_brain_context-0.9.2-py3-none-any.whl
 ```
 
 Then verify:
@@ -325,9 +325,9 @@ The AI then permanently knows that it should talk to you directly
 for business, document, runtime, and environment facts, and emit a
 `INVESTIGATION_REQUEST` only for local repository evidence.
 
-After upgrading to v0.9.1, rerun `brain agent-kit m365`, replace Instructions
+After upgrading to v0.9.2, rerun `brain agent-kit m365`, replace Instructions
 and `PROJECT_KNOWLEDGE.md`, and optionally refresh Suggested Prompts. The kit's
-`AGENT_KIT.json` identifies Brain 0.9.1, kit version 3, and protocol v4. Existing
+`AGENT_KIT.json` identifies Brain 0.9.2, kit version 3, and protocol v4. Existing
 Agents need not be rebuilt; start a new conversation when validating delta lineage.
 
 ```bash

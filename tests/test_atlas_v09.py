@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -344,6 +345,21 @@ class AtlasV09Tests(unittest.TestCase):
         bundle.trace["cross_repo_relationships"] = True
         update_investigation(memory, coverage, bundle, "ctx-two")
         self.assertEqual("verified", coverage["cross_repo_integration"])
+
+    def test_investigation_evidence_id_preserves_null_delimited_content_identity(self) -> None:
+        memory = initial_investigation_memory("identity")
+        coverage = initial_coverage_map()
+        content = "class Service:\n    pass\n"
+        bundle = SimpleNamespace(
+            evidence=[Evidence("service", "src/service.py", 1, 2, content, "code", 90, ["test"])],
+            relationships=[], history=[], unresolved=[], trace={},
+        )
+        update_investigation(memory, coverage, bundle, "ctx-one")
+        identity = "\0".join(("service", "src/service.py", "1", "2", content))
+        expected = "E-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        self.assertEqual(expected, memory["verified_facts"][0]["evidence_id"])
+        update_investigation(memory, coverage, bundle, "ctx-two")
+        self.assertEqual(1, len(memory["verified_facts"]))
 
     def test_investigation_memory_retains_failed_searches_and_unresolved_blockers(self) -> None:
         memory = initial_investigation_memory("flow")

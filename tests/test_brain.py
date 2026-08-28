@@ -2399,6 +2399,8 @@ class ReleaseSafetyTest(unittest.TestCase):
 
     def test_standalone_release_builds_source_pinned_zoekt(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn('python-version: ["3.11", "3.12", "3.13", "3.14"]', workflow)
+        self.assertIn("needs: [compatibility, build, standalone]", workflow)
         self.assertIn('go-version: "1.24.7"', workflow)
         self.assertIn("github.com/sourcegraph/zoekt/cmd/zoekt@$ZOEKTVERSION", workflow)
         self.assertIn("github.com/sourcegraph/zoekt/cmd/zoekt-index@$ZOEKTVERSION", workflow)
@@ -2408,7 +2410,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn(
             "github-release:\n"
             "    name: Publish GitHub release\n"
-            "    needs: [build, standalone]\n",
+            "    needs: [compatibility, build, standalone]\n",
             workflow,
         )
         self.assertIn('gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md', workflow)

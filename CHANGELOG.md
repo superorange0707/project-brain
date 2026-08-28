@@ -2,6 +2,16 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.9.2] - 2026-08-28
+
+### Fixed
+
+- Replace one Python-3.12-only nested f-string in Investigation Memory evidence
+  identity construction with Python 3.11-compatible syntax while preserving the
+  exact NUL-delimited hash input and resulting Atlas evidence IDs.
+- Gate stable release publication on the complete declared Python 3.11–3.14
+  test and compilation matrix.
+
 ## [0.9.1] - 2026-08-28
 
 ### Fixed
@@ -440,6 +450,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.9.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.2
 [0.9.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.1
 [0.9.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.0
 [0.8.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.8.0

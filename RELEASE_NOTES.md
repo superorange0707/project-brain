@@ -1,29 +1,20 @@
-# Project Brain v0.9.1 — Semantic / Atlas Alignment Hotfix
+# Project Brain v0.9.2 — Python 3.11 Compatibility Hotfix
 
-Project Brain v0.9.1 is the stable correctness hotfix for Semantic and Precision
-workspaces upgrading to the v0.9 Workspace Intelligence Atlas.
+Project Brain v0.9.2 restores the declared Python 3.11 compatibility of the
+v0.9 Workspace Intelligence Atlas.
 
-- Compatible Semantic state is registered for the current Atlas generation
-  without embedding calls when snapshots, source signature, schemas, pack,
-  dimension, backend, and shard manifest all match.
-- Incompatible v0.8/v0.9 state is rebuilt through the existing managed Semantic
-  pipeline while preserving model packs, old generations, and compatible
-  source-card embedding cache entries.
-- Repo/Module/Entity Atlas cards now use the bounded Semantic input contract, so
-  an oversized hierarchical card is truncated safely instead of aborting the
-  Semantic build.
-- Semantic component publication validates immutable artifact identity, shard
-  references and sizes, component metadata, and content hash before reporting
-  `aligned=true`.
-- Precision refresh reports ready only after authoritative Atlas component
-  registration. A Semantic failure may publish explicit Core fallback, but is
-  never presented as Precision-ready.
-- Ticket generation pins and reachability GC continue to preserve old Semantic
-  components until no live session can reach them.
+- Investigation Memory evidence identity no longer uses nested f-string syntax
+  that Python 3.11 rejects at parse time.
+- The exact UTF-8, NUL-delimited content identity and resulting Atlas evidence
+  IDs are unchanged.
+- Stable release publication now waits for tests and source compilation on
+  Python 3.11, 3.12, 3.13, and 3.14.
 
-After upgrading, run `brain refresh`. No Semantic reset, model reinstall,
-embedding-cache deletion, Atlas deletion, or ticket-session migration is
-required. This release does not publish model packs or begin v1.0 work.
+This is a syntax-compatibility-only patch. It requires no Atlas schema
+migration, Semantic or model reset, embedding-cache deletion, Atlas rebuild, or
+ticket-session migration. A normal `brain refresh` remains optional workspace
+operation rather than an upgrade requirement. This release does not begin v1.0
+implementation.
 
 ---
 

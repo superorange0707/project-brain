@@ -1,6 +1,6 @@
 # Project Brain milestone readiness report
 
-**Snapshot:** 2026-08-28 · **v0.9.1 stable hotfix gate:** 171/171 tests pass; remaining target-machine/private measurements are nonblocking · **Prior published Core release:** 0.9.0
+**Snapshot:** 2026-08-28 · **v0.9.2 stable compatibility gate:** 172/172 tests pass across Python 3.11–3.14; remaining target-machine/private measurements are nonblocking · **Prior published Core release:** 0.9.1
 
 This report separates completed, locally tested engineering from validations
 that must run later on the target machine or private local data. It contains no
@@ -33,7 +33,7 @@ intentional local-only validation steps, not engineering blockers.
 
 ## Completed local verification for this snapshot
 
-The full local regression suite (171 public/synthetic tests for this stable release) covers deterministic retrieval, generations,
+The full local regression suite (172 public/synthetic tests for this stable release) covers deterministic retrieval, generations,
 incremental indexes, semantic/reranker failure fallback, corrupt local state,
 pack tampering, production-manifest provenance, public synthetic conformance,
 machine-profile privacy, low-disk preflight, UI loopback protection, release
@@ -95,10 +95,12 @@ brain model autotune PACK --latency-budget-ms 3000
   published release, and the `v0.6.2` tag was never released: its
   CI/release-workflow defects were discovered before any artifact or tap
   mutation.
-- `v0.9.1` is authorized for stable publication from this exact reviewed gate.
+- `v0.9.2` is authorized for stable publication from this exact reviewed gate.
   The immutable Git tag, GitHub Release, workflow, checksums, and Homebrew tap
   provide the external publication evidence; model-pack releases remain
   separate and untouched.
+- Project Brain v1.0 starts from the latest verified v0.9.x baseline, currently
+  v0.9.2; its release gate must run the complete Python 3.11–3.14 matrix.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.
 - The Semantic pack's packaging download is a release-engineering operation
