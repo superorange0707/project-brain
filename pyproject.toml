@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "project-brain-context"
-version = "0.8.0"
+version = "0.9.0"
 description = "Give any chat AI read-only, multi-repository codebase exploration"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,7 @@ license = "MIT"
 authors = [{name = "Project Brain contributors"}]
 keywords = ["code-search", "coding-agent", "multi-repository", "claude", "copilot"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Operating System :: OS Independent",

@@ -17,7 +17,7 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
     stripped = text.strip()
     if not stripped:
         raise BrainError("The AI response is empty")
-    request_position = text.rfind("CONTEXT_REQUEST:")
+    request_position = max(text.rfind("CONTEXT_REQUEST:"), text.rfind("INVESTIGATION_REQUEST:"))
     final_matches = list(re.finditer(r"(?im)^\s*(?:#+\s*)?FINAL_SOLUTION\b", text))
     if final_matches and final_matches[-1].start() > request_position:
         return {
@@ -29,7 +29,7 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
             "actions": [],
         }
     looks_like_request = request_position >= 0 or (
-        stripped.startswith("{") and ("CONTEXT_REQUEST" in stripped or '"objective"' in stripped)
+        stripped.startswith("{") and ("CONTEXT_REQUEST" in stripped or "INVESTIGATION_REQUEST" in stripped or '"objective"' in stripped)
     )
     if looks_like_request:
         result = request_preview(text, settings)
@@ -74,6 +74,9 @@ def archive_final_solution(settings: Settings, ticket: str, text: str) -> Path:
     state = session_state(settings, ticket)
     state["status"] = "ready_to_implement"
     state["finalized_at"] = datetime.now(UTC).isoformat()
+    from .atlas import record_investigation
+
+    record_investigation(settings, ticket, state)
     save_session(settings, ticket, state)
     return path
 
@@ -108,7 +111,7 @@ Investigate this ticket as a read-only coding agent. I will attach the latest Pr
 
 ## Continue with Brain evidence
 
-Continue using the latest Project Brain handoff. Update VERIFIED, INFERRED, BLOCKING UNKNOWN, and NON-BLOCKING UNKNOWN. Request at most one focused follow-up for one fact that can materially change the implementation; otherwise return FINAL_SOLUTION.
+Continue using the latest Project Brain handoff and context_id. Update VERIFIED, INFERRED, BLOCKING UNKNOWN, and NON-BLOCKING UNKNOWN from the delta. Request at most one focused follow-up for one fact that can materially change the implementation; otherwise return FINAL_SOLUTION.
 
 ## Read internal documentation
 
@@ -116,7 +119,7 @@ Use the attached internal IPF documentation together with the ticket and reposit
 
 ## Produce the implementation plan
 
-Decide whether enough evidence now exists to implement safely. If yes, return FINAL_SOLUTION with exact repositories, files, methods, configuration, suggested changes, tests, validation commands, edge cases, and implementation order. Otherwise ask only the specific blocking question or return one focused CONTEXT_REQUEST.
+Decide whether enough evidence now exists to implement safely. If yes, return FINAL_SOLUTION with exact repositories, files, methods, configuration, suggested changes, tests, validation commands, edge cases, and implementation order. Otherwise ask only the specific blocking question or return one focused INVESTIGATION_REQUEST v4 using the latest base_context_id.
 """
     suggested_path = directory / "SUGGESTED_PROMPTS.md"
     suggested_path.write_text(suggested, encoding="utf-8")
@@ -133,9 +136,9 @@ Decide whether enough evidence now exists to implement safely. If yes, return FI
 
 Starter prompt:
 
-> Investigate this ticket as a read-only coding agent. I will attach the Project Brain start package. Ask me directly for business, document, or runtime facts; emit a CONTEXT_REQUEST only when local repository evidence is required; return FINAL_SOLUTION when the implementation is ready.
+> Investigate this ticket as a read-only coding agent. I will attach the Project Brain start package. Ask me directly for business, document, or runtime facts; emit an INVESTIGATION_REQUEST v4 only when local repository evidence is required; return FINAL_SOLUTION when the implementation is ready.
 
-This kit uses Project Brain CONTEXT_REQUEST protocol v3. After upgrading Brain, rerun `brain agent-kit m365`, replace Agent Builder Instructions and PROJECT_KNOWLEDGE.md, and optionally refresh Suggested Prompts. A new M365 conversation is recommended for protocol validation.
+This kit uses Project Brain INVESTIGATION_REQUEST protocol v4 and delta context lineage. After upgrading Brain, rerun `brain agent-kit m365`, replace Agent Builder Instructions and PROJECT_KNOWLEDGE.md, and optionally refresh Suggested Prompts. A new M365 conversation is recommended for protocol validation.
 
 For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365` and upload the printed `generated/handoffs/TICKET-start.md`. For every later repository round, upload only the newly printed `generated/handoffs/TICKET-context-NNN.md`. Never upload the internal `.runs/TICKET/request-NNN.yml`; it is the AI-to-Brain command, while `context-NNN.md` is Brain's evidence response. The changing filename prevents M365 from reusing an older attachment; `TICKET-current.md` is only a local alias.
 """
@@ -143,8 +146,8 @@ For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365`
     setup_path.write_text(setup, encoding="utf-8")
     manifest = {
         "project_brain_version": __version__,
-        "agent_kit_version": 2,
-        "context_request_protocol": 3,
+        "agent_kit_version": 3,
+        "context_request_protocol": 4,
     }
     manifest_path = directory / "AGENT_KIT.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

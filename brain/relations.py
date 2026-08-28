@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
+from .locks import workspace_exclusive
+
 if TYPE_CHECKING:
     from .core import Repository, Settings
 
@@ -278,13 +280,28 @@ def _source_signature(settings: Settings) -> list[list[str | None]]:
     return [[repo.name, repo.source_ref, repo.source_sha] for repo in settings.repositories]
 
 
-def _cached_relationships(settings: Settings) -> list[Relationship] | None:
-    path = settings.state_dir / "relationships.json"
+def _cached_relationships(settings: Settings, generation: object | None = None) -> list[Relationship] | None:
+    if generation is not None:
+        component = generation.component("relationships")  # type: ignore[attr-defined]
+        if component.get("status") != "ready" or not component.get("artifact_ref"):
+            return []
+        path = (settings.state_dir / str(component["artifact_ref"])).resolve()
+        if not path.is_relative_to(settings.state_dir.resolve()):
+            return []
+    else:
+        if getattr(settings, "atlas_generation_mode", "current") == "legacy_source_pin":
+            return []
+        path = settings.state_dir / "relationships.json"
     if not path.is_file():
         return None
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        if value.get("version") != 1 or value.get("sources") != _source_signature(settings):
+        expected = (
+            [[repo.name, repo.source_ref, generation.snapshots.get(repo.name)] for repo in settings.repositories]  # type: ignore[attr-defined]
+            if generation is not None
+            else _source_signature(settings)
+        )
+        if value.get("version") != 1 or value.get("sources") != expected:
             return None
         return [Relationship(**item) for item in value.get("relationships") or []]
     except (AttributeError, OSError, json.JSONDecodeError, TypeError):
@@ -297,11 +314,14 @@ def related_relationships(
     evidence_paths: set[tuple[str, str]],
     *,
     limit: int = 12,
+    generation: object | None = None,
 ) -> list[Relationship]:
     """Return a bounded, evidence-backed contract-graph slice for the current retrieval."""
-    relationships = _cached_relationships(settings)
-    if relationships is None:
+    relationships = _cached_relationships(settings, generation)
+    if relationships is None and generation is None and getattr(settings, "atlas_generation_mode", "current") != "legacy_source_pin":
         _, relationships = analyze_relationships(settings)
+    elif relationships is None:
+        relationships = []
     terms = {
         value.lower()
         for query in queries
@@ -349,6 +369,7 @@ def _runtime_workflows(relationships: list[Relationship]) -> list[str]:
     return sorted(workflows)
 
 
+@workspace_exclusive
 def generate_relationship_map(settings: Settings) -> str:
     facts, relationships = analyze_relationships(settings)
     workflows = _runtime_workflows(relationships)

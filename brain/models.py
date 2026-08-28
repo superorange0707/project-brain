@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
-from .locks import MODEL_LANE
+from .locks import model_lane
 
 if TYPE_CHECKING:
     from .core import Settings
@@ -1169,7 +1169,8 @@ def rerank_candidates(
     if not query or not hits:
         return hits
     lane_started = time.perf_counter()
-    MODEL_LANE.acquire()
+    lane = model_lane(settings)
+    lane.__enter__()
     if trace is not None:
         trace.add_stage("model_lane_wait_ms", (time.perf_counter() - lane_started) * 1000)
     owns_runtime = runtime is None
@@ -1225,7 +1226,7 @@ def rerank_candidates(
     finally:
         if owns_runtime and runtime is not None:
             runtime.shutdown()
-        MODEL_LANE.release()
+        lane.__exit__(None, None, None)
 
 
 def _percentile(values: list[float], percentile: float) -> float:

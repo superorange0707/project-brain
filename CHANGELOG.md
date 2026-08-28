@@ -2,6 +2,37 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.9.0] - 2026-08-28
+
+### Added
+
+- One catalog-authoritative Workspace Intelligence Atlas generation that binds
+  repository snapshots to module/file/entity/region hierarchy, provenance-backed
+  typed relationships, change intelligence, Repo/Module/Entity semantic cards,
+  and generation-scoped routing caches.
+- Blob-level incremental Atlas refresh with unchanged entity/edge/region reuse,
+  card/embedding content reuse, deterministic added/modified/deleted/renamed
+  deltas, atomic publication, ticket pinning, and reachability GC.
+- Ticket-prefetched hierarchical Repo → Module → Entity routing, bounded graph
+  expansion, generation-validated similar-investigation priors, and a deterministic
+  Next-Best-Evidence value/cost decision.
+- Session-authoritative Investigation Memory and Coverage Map, stable evidence and
+  candidate IDs, protocol v4 `INVESTIGATION_REQUEST`, full/delta context lineage,
+  stale-base checkpoint recovery, and M365 Agent Kit v3.
+- Atlas-aware local evaluation metrics for Repo Recall@4/6/8/16, module/entity/
+  graph/evidence recall, first-result timings, physical operations, cache/prefetch,
+  late candidates, delta reduction, next-evidence usefulness, and rounds to final.
+
+### Changed
+
+- Retrieval now routes through the Atlas before targeted lexical/path/semantic
+  fallback while preserving global exact lookup, progressive widening, optional
+  bounded reranking, and exact pinned-source hydration as the evidence boundary.
+- The local model lane now uses a filesystem lock as well as a thread lock, so
+  embedding and reranking are serialized across Brain CLI/UI processes.
+- v1/v2/v3 request parsing and old sessions remain compatible; legacy state is
+  migrated lazily without changing the v0.8 release candidate.
+
 ## [0.8.0] - 2026-08-27
 
 ### Added
@@ -396,6 +427,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.9.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.0
+[0.8.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.8.0
 [0.6.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.6.0
 [0.5.4]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.4
 [0.5.3]: https://github.com/superorange0707/project-brain/releases/tag/v0.5.3

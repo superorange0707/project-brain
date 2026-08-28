@@ -25,6 +25,13 @@ directories can still be searched.
 brew install superorange0707/tap/project-brain
 ```
 
+Upgrade an existing stable installation with:
+
+```bash
+brew update
+brew upgrade project-brain
+```
+
 This installs prebuilt executables and does not compile against the local Xcode
 toolchain. Homebrew maps `superorange0707/tap` to the separate
 [`homebrew-tap`](https://github.com/superorange0707/homebrew-tap) formula index.
@@ -39,7 +46,7 @@ same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.8.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.0"
 ```
 
 Upgrade later with:
@@ -51,7 +58,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.8.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.0"
 ```
 
 ### From a source checkout
@@ -579,7 +586,7 @@ Recommended settings:
 
 The M365 Agent remains the user-facing investigator. It asks the developer
 directly for business, document, runtime, and environment facts. It emits a
-`CONTEXT_REQUEST` only when local repository evidence is required. Project Brain
+`INVESTIGATION_REQUEST` only when local repository evidence is required. Project Brain
 does not install a connector, request an M365 credential, or call the cloud.
 
 ## 7. Local investigation cockpit
@@ -617,8 +624,8 @@ work, stay in the page:
    snapshots: Semantic must be aligned, and Precision must also have its
    verified compatible reranker. If either condition fails, the ticket is not
    started unless you explicitly choose the displayed degraded continuation.
-5. Use **Continue with AI** for the complete reply containing a v3
-   `CONTEXT_REQUEST`. Retrieval runs as a background ticket job, so a second
+5. Use **Continue with AI** for the complete reply containing a v4
+   `INVESTIGATION_REQUEST`. Retrieval runs as a background ticket job, so a second
    investigation may progress independently. Then inspect Evidence and
    Retrieval transparency.
 
@@ -681,10 +688,14 @@ The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
 sent into Brain, while `ABC-1234-context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
-After upgrading to v0.8.0, rerun `brain agent-kit m365`, replace Agent Builder
+After upgrading to v0.9.0, rerun `brain agent-kit m365`, replace Agent Builder
 Instructions and `PROJECT_KNOWLEDGE.md`, and optionally refresh Suggested
 Prompts. `AGENT_KIT.json` records the Brain, kit, and protocol versions.
-Existing Agents need not be rebuilt; use a new conversation to validate v3.
+Existing Agents need not be rebuilt; use a new conversation to validate v4 delta lineage.
+
+```bash
+brain agent-kit m365 --json
+```
 
 ## 9. Continue an AI investigation
 
@@ -696,7 +707,7 @@ brain continue ABC-1234 --clipboard --target claude
 
 It deterministically routes the reply:
 
-- `CONTEXT_REQUEST`: validate, retrieve, and deliver local evidence;
+- `INVESTIGATION_REQUEST` (or legacy `CONTEXT_REQUEST`): validate, retrieve, and deliver local evidence;
 - normal conversation: tell the developer to answer the AI directly;
 - `FINAL_SOLUTION`: archive the plan and mark the ticket ready to implement.
 
@@ -708,57 +719,55 @@ brain continue ABC-1234 --file ai-response.txt --target m365
 
 Then upload the newly printed `TICKET-context-NNN.md` handoff. Use the same M365 Agent
 conversation so it retains earlier documents, human answers, and evidence. The
-`Request: NNN` header and filename must both show the new round.
+`Request: NNN` header and filename must both show the new round. Pass the latest
+`context_id` as the next `base_context_id`; normal follow-ups are compact deltas.
 
 The strict `brain ctx` command remains useful for automation when the input is
-known to contain a `CONTEXT_REQUEST`.
+known to contain an investigation/context request.
 
 If the AI guesses a direct file path that does not exist, Brain records that
 operation under `Unresolved`, completes the remaining batched operations, and
 still produces the numbered `context-NNN.md`. Unsafe paths remain rejected. A
 request number is committed only when its context artifact is also produced.
-The generated AI instructions permit `hints.files` only for paths already
-verified in Brain evidence; unknown locations use small `hints.paths`,
-`hints.symbols`, or `hints.literals` values.
+The generated AI instructions tell the investigator to express one material
+unknown through `resolve`, while Brain selects repositories, modules, entities,
+graph edges, paths, and literals. Candidate metadata is not evidence until the
+returned context contains exact source from the pinned generation.
 
 Old investigations can be removed from **Project overview** with **Delete
 history**. The confirmation names the ticket; this deletes only `.runs/TICKET`
 and that ticket's generated handoffs. Repositories, branches, and source files
 are never deleted.
 
-### `CONTEXT_REQUEST` format
+### `INVESTIGATION_REQUEST` v4 format
 
 The AI should either ask for evidence or return a final solution. The normal
 request is objective-first; every optional hint list may be omitted or empty:
 
 ```yaml
-CONTEXT_REQUEST:
-  version: 3
+INVESTIGATION_REQUEST:
+  version: 4
   objective: Determine the online eligibility recalculation flow.
-  hints:
-    literals: [JURISDICTION_CHANGED, customer.updated]
-    symbols: [EligibilityEvaluator]
-    paths: [application.properties]
-  coverage:
-    production: required
-    tests: auto
-    relationships: auto
-    configuration: auto
-    history: auto
+  runtime_facts: [The issue is observed only after customer.updated.]
+  hypotheses: [The event consumer may bypass EligibilityEvaluator.]
+  required: [main execution flow, tests]
+  resolve: [Which consumer handles JURISDICTION_CHANGED?]
+  base_context_id: ctx-copy-from-the-latest-context
 ```
 
 This is also valid and does not require a repair round:
 
 ```yaml
-CONTEXT_REQUEST:
-  version: 3
+INVESTIGATION_REQUEST:
+  version: 4
   objective: Locate the production flow and tests responsible for this behavior.
 ```
 
-Brain performs bounded global discovery, ranks repositories, starts expensive
-work in the top six, fuses duplicate/shared-symbol work, prunes before Precision
-reranking, and widens to 16/all only when required coverage is missing and
-budgets allow. Legacy v1/v2 explicit operations remain valid.
+Brain starts from stored Investigation Memory, the Coverage Map, ticket prefetch,
+and generation-validated similar investigations. It routes Repo, Module, and
+Entity Cards, expands typed relationships, then performs targeted lexical/path/
+semantic fallback and exact source verification. It widens 4/6 → 8/16 → all only
+when required coverage is missing. Legacy v1/v2/v3 CONTEXT_REQUEST remains valid.
 
 From the clipboard:
 

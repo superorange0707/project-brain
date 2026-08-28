@@ -33,7 +33,7 @@ class TicketOperationBusy(RuntimeError):
 
 
 _LOCAL = threading.local()
-MODEL_LANE = threading.Lock()
+_MODEL_THREAD_LANE = threading.Lock()
 T = TypeVar("T")
 
 
@@ -67,6 +67,47 @@ def _release(handle: Any) -> None:
     elif msvcrt is not None:  # pragma: no cover - Windows-only fallback
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextmanager
+def model_lane(settings: Settings) -> Iterator[None]:
+    """Serialize local model inference across threads and Brain processes."""
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    path = settings.state_dir / "model-lane.lock"
+    key = f"model:{path.resolve()}"
+    held = _held()
+    existing = held.get(key)
+    if existing is not None:
+        handle, depth = existing
+        held[key] = (handle, depth + 1)
+        try:
+            yield
+        finally:
+            handle, depth = held[key]
+            held[key] = (handle, depth - 1)
+        return
+    with _MODEL_THREAD_LANE:
+        handle = path.open("a+b")
+        try:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:  # pragma: no cover - Windows-only fallback
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:  # pragma: no cover
+                raise RuntimeError("model lane locking is unavailable on this platform")
+            held[key] = (handle, 1)
+            try:
+                yield
+            finally:
+                held.pop(key, None)
+                _release(handle)
+        finally:
+            handle.close()
 
 
 @contextmanager

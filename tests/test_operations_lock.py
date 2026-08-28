@@ -63,7 +63,10 @@ class WorkspaceOperationLockTests(unittest.TestCase):
             settings = load_settings(config)
             commands = [
                 ["refresh", "--no-fetch", "--no-discover"],
+                ["index", "rebuild", "--backend", "lexical"],
                 ["index", "rebuild", "--backend", "semantic"],
+                ["map"],
+                ["experience", "--rebuild"],
                 ["edition", "set", "core"],
                 ["model", "remove", "not-installed"],
                 ["gc", "--no-dry-run"],

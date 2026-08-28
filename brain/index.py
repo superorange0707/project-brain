@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from .core import Repository, Settings
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 INDEXABLE_NAMES = {
     "Dockerfile", "Jenkinsfile", "Makefile", "Procfile", "build.gradle", "gradlew", "mvnw", "pom.xml",
 }
@@ -32,6 +32,14 @@ def _database(settings: Settings) -> Path:
 
 def _connect(settings: Settings) -> sqlite3.Connection:
     connection = sqlite3.connect(_database(settings), timeout=30)
+    try:
+        return _initialize_connection(connection)
+    except Exception:
+        connection.close()
+        raise
+
+
+def _initialize_connection(connection: sqlite3.Connection) -> sqlite3.Connection:
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA synchronous=NORMAL")
     connection.executescript(
@@ -61,11 +69,63 @@ def _connect(settings: Settings) -> sqlite3.Connection:
         CREATE VIRTUAL TABLE IF NOT EXISTS path_fts USING fts5(
             repo UNINDEXED, path, tokenize='trigram'
         );
+        CREATE TABLE IF NOT EXISTS indexed_snapshots (
+            repo TEXT NOT NULL,
+            snapshot_sha TEXT NOT NULL,
+            indexed_at TEXT NOT NULL,
+            file_count INTEGER NOT NULL,
+            PRIMARY KEY (repo, snapshot_sha)
+        );
+        CREATE TABLE IF NOT EXISTS file_membership (
+            repo TEXT NOT NULL,
+            snapshot_sha TEXT NOT NULL,
+            path TEXT NOT NULL,
+            blob TEXT NOT NULL REFERENCES blobs(blob),
+            PRIMARY KEY (repo, snapshot_sha, path)
+        );
+        CREATE INDEX IF NOT EXISTS file_membership_blob ON file_membership(blob);
+        CREATE VIRTUAL TABLE IF NOT EXISTS path_membership_fts USING fts5(
+            repo UNINDEXED, snapshot_sha UNINDEXED, path, tokenize='trigram'
+        );
         """
     )
     version = connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
-    if version and int(version[0]) != SCHEMA_VERSION:
+    try:
+        schema_version = int(version[0]) if version else 0
+    except (TypeError, ValueError) as error:
+        raise sqlite3.DatabaseError("search index schema version is invalid") from error
+    if schema_version > SCHEMA_VERSION:
         raise sqlite3.DatabaseError(f"unsupported search index schema {version[0]}")
+    if schema_version < 2:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for repo, path, blob, sha, indexed_at in connection.execute(
+                "SELECT f.repo, f.path, f.blob, COALESCE(r.sha, 'working-tree'), r.indexed_at "
+                "FROM files f JOIN repositories r ON r.name=f.repo"
+            ):
+                connection.execute(
+                    "INSERT OR IGNORE INTO file_membership(repo, snapshot_sha, path, blob) VALUES (?, ?, ?, ?)",
+                    (repo, sha, path, blob),
+                )
+                connection.execute(
+                    "INSERT INTO path_membership_fts(repo, snapshot_sha, path) VALUES (?, ?, ?)",
+                    (repo, sha, path),
+                )
+            connection.execute(
+                "INSERT OR REPLACE INTO indexed_snapshots(repo, snapshot_sha, indexed_at, file_count) "
+                "SELECT name, COALESCE(sha, 'working-tree'), indexed_at, file_count FROM repositories"
+            )
+            old_count = int(connection.execute("SELECT COUNT(*) FROM files").fetchone()[0])
+            migrated_count = int(connection.execute(
+                "SELECT COUNT(*) FROM file_membership m JOIN repositories r ON r.name=m.repo "
+                "WHERE m.snapshot_sha=COALESCE(r.sha, 'working-tree')"
+            ).fetchone()[0])
+            if old_count != migrated_count:
+                raise sqlite3.DatabaseError("search index v1 migration validation failed")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
     connection.execute(
         "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -191,6 +251,7 @@ def build_index_generation(
         refresh_stats: dict[str, tuple[int, int]] = {}
         for repo in settings.repositories:
             sha = repo.source_sha
+            snapshot = sha or "working-tree"
             previous = connection.execute(
                 "SELECT sha FROM repositories WHERE name=?", (repo.name,)
             ).fetchone()
@@ -232,6 +293,9 @@ def build_index_generation(
                     if not connection.execute("SELECT 1 FROM blobs WHERE blob=?", (blob,)).fetchone():
                         additions[blob] = (content.decode("utf-8", errors="replace"), len(content))
 
+            connection.execute("DELETE FROM file_membership WHERE repo=? AND snapshot_sha=?", (repo.name, snapshot))
+            connection.execute("DELETE FROM path_membership_fts WHERE repo=? AND snapshot_sha=?", (repo.name, snapshot))
+            # v1 tables remain a current-only compatibility projection.
             connection.execute("DELETE FROM files WHERE repo=?", (repo.name,))
             connection.execute("DELETE FROM path_fts WHERE repo=?", (repo.name,))
             for blob, (content, size) in additions.items():
@@ -239,6 +303,14 @@ def build_index_generation(
                     connection.execute("INSERT INTO blobs(blob, content, size) VALUES (?, ?, ?)", (blob, content, size))
                     connection.execute("INSERT INTO blob_fts(blob, content) VALUES (?, ?)", (blob, content))
             for path, blob in records:
+                connection.execute(
+                    "INSERT INTO file_membership(repo, snapshot_sha, path, blob) VALUES (?, ?, ?, ?)",
+                    (repo.name, snapshot, path, blob),
+                )
+                connection.execute(
+                    "INSERT INTO path_membership_fts(repo, snapshot_sha, path) VALUES (?, ?, ?)",
+                    (repo.name, snapshot, path),
+                )
                 connection.execute("INSERT INTO files(repo, path, blob) VALUES (?, ?, ?)", (repo.name, path, blob))
                 connection.execute("INSERT INTO path_fts(repo, path) VALUES (?, ?)", (repo.name, path))
 
@@ -247,14 +319,18 @@ def build_index_generation(
                 "INSERT OR REPLACE INTO repositories(name, sha, indexed_at, file_count) VALUES (?, ?, ?, ?)",
                 (repo.name, sha, indexed_at, len(records)),
             )
+            connection.execute(
+                "INSERT OR REPLACE INTO indexed_snapshots(repo, snapshot_sha, indexed_at, file_count) VALUES (?, ?, ?, ?)",
+                (repo.name, snapshot, indexed_at, len(records)),
+            )
             refresh_stats[repo.name] = (len(additions), sum(size for _, size in additions.values()))
             updated.append(repo.name)
 
         if updated:
             generation += 1
             connection.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES ('generation', ?)", (str(generation),))
-        connection.execute("DELETE FROM blob_fts WHERE blob NOT IN (SELECT DISTINCT blob FROM files)")
-        connection.execute("DELETE FROM blobs WHERE blob NOT IN (SELECT DISTINCT blob FROM files)")
+        connection.execute("DELETE FROM blob_fts WHERE blob NOT IN (SELECT DISTINCT blob FROM file_membership)")
+        connection.execute("DELETE FROM blobs WHERE blob NOT IN (SELECT DISTINCT blob FROM file_membership)")
         connection.commit()
 
         for name, sha, indexed_at, file_count in connection.execute(
@@ -281,11 +357,15 @@ def _quoted(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-def _current(connection: sqlite3.Connection, repo: Repository) -> bool:
-    if not repo.source_sha or not repo.source_path:
-        return False
-    row = connection.execute("SELECT sha FROM repositories WHERE name=?", (repo.name,)).fetchone()
-    return bool(row and row[0] == repo.source_sha)
+def _snapshot(repo: Repository, snapshot_sha: str | None) -> str:
+    return snapshot_sha or repo.source_sha or "working-tree"
+
+
+def _available(connection: sqlite3.Connection, repo: Repository, snapshot_sha: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM indexed_snapshots WHERE repo=? AND snapshot_sha=?", (repo.name, snapshot_sha)
+    ).fetchone()
+    return bool(row)
 
 
 def query_index(
@@ -294,14 +374,16 @@ def query_index(
     query: str,
     *,
     max_results: int,
+    snapshot_sha: str | None = None,
 ) -> list[tuple[str, int, str]] | None:
     """Return exact, case-sensitive line matches, or None when fallback is required."""
     path = _database(settings)
     if not path.is_file():
         return None
     try:
-        connection = sqlite3.connect(path, timeout=2)
-        if not _current(connection, repo):
+        connection = _connect(settings)
+        snapshot = _snapshot(repo, snapshot_sha)
+        if not _available(connection, repo, snapshot):
             return None
         if len(query) >= 3:
             rows = connection.execute(
@@ -309,21 +391,21 @@ def query_index(
                 SELECT f.path, b.content
                 FROM blob_fts
                 JOIN blobs b ON b.blob=blob_fts.blob
-                JOIN files f ON f.blob=b.blob
-                WHERE blob_fts MATCH ? AND f.repo=?
+                JOIN file_membership f ON f.blob=b.blob
+                WHERE blob_fts MATCH ? AND f.repo=? AND f.snapshot_sha=?
                 LIMIT ?
                 """,
-                (_quoted(query), repo.name, max(100, max_results * 20)),
+                (_quoted(query), repo.name, snapshot, max(100, max_results * 20)),
             )
         else:
             rows = connection.execute(
                 """
                 SELECT f.path, b.content
-                FROM blobs b JOIN files f ON f.blob=b.blob
-                WHERE f.repo=? AND instr(b.content, ?) > 0
+                FROM blobs b JOIN file_membership f ON f.blob=b.blob
+                WHERE f.repo=? AND f.snapshot_sha=? AND instr(b.content, ?) > 0
                 LIMIT ?
                 """,
-                (repo.name, query, max(100, max_results * 20)),
+                (repo.name, snapshot, query, max(100, max_results * 20)),
             )
         hits: list[tuple[str, int, str]] = []
         for file_path, content in rows:
@@ -346,23 +428,28 @@ def query_paths(
     query: str,
     *,
     limit: int,
+    snapshot_sha: str | None = None,
 ) -> list[str] | None:
     path = _database(settings)
     if not path.is_file():
         return None
     tokens = [token for token in query.lower().replace("\\", "/").split() if len(token) >= 3]
     try:
-        connection = sqlite3.connect(path, timeout=2)
-        if not _current(connection, repo):
+        connection = _connect(settings)
+        snapshot = _snapshot(repo, snapshot_sha)
+        if not _available(connection, repo, snapshot):
             return None
         if tokens:
             expression = " AND ".join(_quoted(token) for token in tokens)
             rows = connection.execute(
-                "SELECT path FROM path_fts WHERE path_fts MATCH ? AND repo=? LIMIT ?",
-                (expression, repo.name, max(100, limit * 20)),
+                "SELECT path FROM path_membership_fts WHERE path_membership_fts MATCH ? AND repo=? AND snapshot_sha=? LIMIT ?",
+                (expression, repo.name, snapshot, max(100, limit * 20)),
             )
         else:
-            rows = connection.execute("SELECT path FROM files WHERE repo=? ORDER BY path", (repo.name,))
+            rows = connection.execute(
+                "SELECT path FROM file_membership WHERE repo=? AND snapshot_sha=? ORDER BY path",
+                (repo.name, snapshot),
+            )
         return [row[0] for row in rows]
     except sqlite3.Error:
         return None
@@ -371,17 +458,25 @@ def query_paths(
             connection.close()
 
 
-def read_indexed_file(settings: Settings, repo: Repository, file_path: str) -> str | None:
+def read_indexed_file(
+    settings: Settings,
+    repo: Repository,
+    file_path: str,
+    *,
+    snapshot_sha: str | None = None,
+) -> str | None:
     path = _database(settings)
     if not path.is_file():
         return None
     try:
-        connection = sqlite3.connect(path, timeout=2)
-        if not _current(connection, repo):
+        connection = _connect(settings)
+        snapshot = _snapshot(repo, snapshot_sha)
+        if not _available(connection, repo, snapshot):
             return None
         row = connection.execute(
-            "SELECT b.content FROM files f JOIN blobs b ON b.blob=f.blob WHERE f.repo=? AND f.path=?",
-            (repo.name, file_path.replace(os.sep, "/")),
+            "SELECT b.content FROM file_membership f JOIN blobs b ON b.blob=f.blob "
+            "WHERE f.repo=? AND f.snapshot_sha=? AND f.path=?",
+            (repo.name, snapshot, file_path.replace(os.sep, "/")),
         ).fetchone()
         return str(row[0]) if row else None
     except sqlite3.Error:
@@ -389,6 +484,80 @@ def read_indexed_file(settings: Settings, repo: Repository, file_path: str) -> s
     finally:
         if "connection" in locals():
             connection.close()
+
+
+def lexical_component(settings: Settings, state: dict[str, object]) -> dict[str, object]:
+    """Describe and verify the exact multi-snapshot membership being published."""
+    connection = _connect(settings)
+    try:
+        digest = hashlib.sha256()
+        file_count = 0
+        snapshots: dict[str, str] = {}
+        for repo, raw in sorted(state.items()):
+            if not isinstance(raw, dict):
+                continue
+            snapshot = str(raw.get("sha") or "working-tree")
+            snapshots[repo] = snapshot
+            indexed = connection.execute(
+                "SELECT file_count FROM indexed_snapshots WHERE repo=? AND snapshot_sha=?", (repo, snapshot)
+            ).fetchone()
+            rows = list(connection.execute(
+                "SELECT path, blob FROM file_membership WHERE repo=? AND snapshot_sha=? ORDER BY path",
+                (repo, snapshot),
+            ))
+            if indexed is None or int(indexed[0]) != len(rows):
+                return {
+                    "schema_version": str(SCHEMA_VERSION),
+                    "status": "unavailable",
+                    "details": {"reason": "snapshot membership validation failed"},
+                }
+            for path, blob in rows:
+                digest.update(f"{repo}\0{snapshot}\0{path}\0{blob}\n".encode("utf-8"))
+            file_count += len(rows)
+        return {
+            "schema_version": str(SCHEMA_VERSION),
+            "status": "ready",
+            "content_hash": "sha256:" + digest.hexdigest(),
+            "details": {"snapshots": snapshots, "files": file_count},
+        }
+    finally:
+        connection.close()
+
+
+def prune_memberships(settings: Settings, retain: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Remove only snapshot memberships unreachable from current, retained, or legacy pins."""
+    connection = _connect(settings)
+    try:
+        existing = {
+            (str(repo), str(snapshot))
+            for repo, snapshot in connection.execute("SELECT repo, snapshot_sha FROM indexed_snapshots")
+        }
+        removable = sorted(existing - retain)
+        connection.execute("BEGIN IMMEDIATE")
+        for repo, snapshot in removable:
+            connection.execute("DELETE FROM file_membership WHERE repo=? AND snapshot_sha=?", (repo, snapshot))
+            connection.execute("DELETE FROM path_membership_fts WHERE repo=? AND snapshot_sha=?", (repo, snapshot))
+            connection.execute("DELETE FROM indexed_snapshots WHERE repo=? AND snapshot_sha=?", (repo, snapshot))
+        connection.execute("DELETE FROM blob_fts WHERE blob NOT IN (SELECT DISTINCT blob FROM file_membership)")
+        connection.execute("DELETE FROM blobs WHERE blob NOT IN (SELECT DISTINCT blob FROM file_membership)")
+        connection.commit()
+        return removable
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def membership_snapshots(settings: Settings) -> set[tuple[str, str]]:
+    connection = _connect(settings)
+    try:
+        return {
+            (str(repo), str(snapshot))
+            for repo, snapshot in connection.execute("SELECT repo, snapshot_sha FROM indexed_snapshots")
+        }
+    finally:
+        connection.close()
 
 
 def write_state(settings: Settings, state: dict[str, object]) -> None:

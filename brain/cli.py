@@ -103,7 +103,7 @@ def _parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--json", action="store_true", help="print machine-readable p50/p95 metrics")
     benchmark.add_argument("--machine", action="store_true", help="record a non-identifying local machine profile for later comparison")
 
-    explain = commands.add_parser("explain", help="compile a CONTEXT_REQUEST without searching")
+    explain = commands.add_parser("explain", help="compile an investigation/context request without searching")
     explain.add_argument("ticket", nargs="?", help="optional ticket label for command ergonomics")
     explain_source = explain.add_mutually_exclusive_group(required=True)
     explain_source.add_argument("--file")
@@ -142,7 +142,7 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="analyze a feature branch in one repository")
     start.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
-    context = commands.add_parser("ctx", help="fulfil a CONTEXT_REQUEST")
+    context = commands.add_parser("ctx", help="fulfil an investigation/context request")
     context.add_argument("ticket")
     source = context.add_mutually_exclusive_group()
     source.add_argument("--file")
@@ -450,13 +450,30 @@ def execute(args: argparse.Namespace) -> int:
             return 0
         if args.action == "rebuild" and args.backend in {"semantic", "all"}:
             from .semantic import build_semantic_index
+            from .atlas import build_atlas
+            from .core import load_index_state
+            from .locks import workspace_operation
 
-            print(json.dumps(build_semantic_index(settings), indent=2))
+            with workspace_operation(settings):
+                atlas_payload = build_atlas(settings, load_index_state(settings))
+                settings.atlas_cards = atlas_payload["cards"]
+                try:
+                    built = build_semantic_index(settings)
+                finally:
+                    settings.atlas_cards = None
+                from .catalog import publish_current_components
+
+                publish_current_components(settings, atlas_payload=atlas_payload)
+            print(json.dumps(built, indent=2))
             if args.backend == "semantic":
                 return 0
-        _, updated = snapshot_indexes(settings)
+        from .locks import workspace_operation
+
+        with workspace_operation(settings):
+            _, updated = snapshot_indexes(settings)
+            graphs = index_graph(settings, changed_only=False)
         print("Search index updated: " + ", ".join(updated))
-        _print_graph(index_graph(settings, changed_only=False))
+        _print_graph(graphs)
         return 0
     if args.command == "sync":
         _print_sync(
@@ -774,7 +791,8 @@ def execute(args: argparse.Namespace) -> int:
         elif plan["kind"] == "final_solution":
             print("Ready to implement; no repository retrieval required.")
         else:
-            print(f"Valid CONTEXT_REQUEST v{plan['protocol_version']}: {plan['operation_count']} operations")
+            label = "INVESTIGATION_REQUEST" if plan["protocol_version"] == 4 else "CONTEXT_REQUEST"
+            print(f"Valid {label} v{plan['protocol_version']}: {plan['operation_count']} operations")
             print(f"Objective: {plan['objective']}")
             for action in plan["actions"]:
                 scope = ", ".join(action["repos"]) or "all repositories"

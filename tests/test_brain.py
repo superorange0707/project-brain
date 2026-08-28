@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import gc as garbage_collector
 import hashlib
 import http.server
 import importlib.util
@@ -18,6 +19,7 @@ import threading
 import time
 import tomllib
 import unittest
+import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -1375,6 +1377,17 @@ else:
         state = json.loads((self.settings.state_dir / "semantic-index.json").read_text(encoding="utf-8"))
         self.assertTrue(all(Path(shard["path"]).is_file() for shard in state["shards"]))
         self.assertTrue(search_semantic(self.settings, "eligibility", repos={"trading-service"}))
+        before = {str(shard["repo"]): str(shard["path"]) for shard in state["shards"]}
+        changed = self.root / "trading-service/src/main/java/demo/TradingEligibilityService.java"
+        changed.write_text(changed.read_text(encoding="utf-8") + "\n// semantic shard change\n", encoding="utf-8")
+        events: list[dict[str, object]] = []
+        build_semantic_index(self.settings, progress=events.append)
+        state = json.loads((self.settings.state_dir / "semantic-index.json").read_text(encoding="utf-8"))
+        after = {str(shard["repo"]): str(shard["path"]) for shard in state["shards"]}
+        self.assertEqual(len(self.settings.repositories) - 1, events[-1]["semantic_shards_reused"])
+        self.assertEqual(1, events[-1]["semantic_shards_rebuilt"])
+        self.assertNotEqual(before["trading-service"], after["trading-service"])
+        self.assertTrue(all(before[name] == after[name] for name in before if name != "trading-service"))
 
     def test_mock_semantic_pipeline_is_snapshot_filtered(self) -> None:
         def embed(cards: list[str]) -> list[list[float]]:
@@ -1806,7 +1819,11 @@ else:
             self.assertEqual([], search_semantic(self.settings, "eligibility", embed=lambda values: [[1.0, 0.0, 0.0]]))
 
         (self.settings.state_dir / "catalog.sqlite3").write_bytes(b"corrupt catalog")
-        state, _ = snapshot_indexes(self.settings)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            state, _ = snapshot_indexes(self.settings)
+            garbage_collector.collect()
+        self.assertFalse([item for item in caught if issubclass(item.category, ResourceWarning)])
         self.assertIn("Catalog generation unavailable", str(state["trading-service"].get("warning")))
         self.assertTrue(search(self.settings, "EligibilityEvaluator", ["trading-service"], fixed=True))
 

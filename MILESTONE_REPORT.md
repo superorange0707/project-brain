@@ -1,6 +1,6 @@
 # Project Brain milestone readiness report
 
-**Snapshot:** 2026-08-27 · **v0.8.0 implementation gate:** complete locally; target-machine private replay remains · **Published Core release at this snapshot:** 0.6.7
+**Snapshot:** 2026-08-28 · **v0.9.0 stable Atlas gate:** 164/164 tests pass; remaining target-machine/private measurements are nonblocking · **Prior published Core release:** 0.6.7
 
 This report separates completed, locally tested engineering from validations
 that must run later on the target machine or private local data. It contains no
@@ -29,10 +29,11 @@ intentional local-only validation steps, not engineering blockers.
 | M18 | COMPLETE | One shared CLI/UI full-refresh operation, snapshot-aware Semantic alignment status, explicit requested-Edition validation before UI ticket pinning (including Precision reranker availability), loopback operations dashboard, official-pack-only UI controls, bounded local operation jobs with single-writer rejection, and a re-entrant cross-process workspace lock for refresh/Semantic publication/edition/model/GC mutations. Structured source-free refresh progress comes from the real Semantic manifest/cache/batch/shard loop, with safe diagnostics, planner explanation, and retrieval transparency. |
 | v0.8 M00–M10 | COMPLETE | Trace schema v2 and stage accounting; objective-first CONTEXT_REQUEST v3; deterministic repo routing/widening; operation fusion and request-local memoization; physical/effective/candidate budgets; bounded shared repository and Semantic shard parallelism; one model lane; shared-workspace/per-ticket locks; two-ticket UI jobs and investigation board; M365 kit v2/protocol v3; 50-repository synthetic fan-out and concurrency coverage. Exact pinned-source hydration, v1/v2, Core fallback, and workspace mutation exclusion remain intact. |
 | v0.8 M11 | COMPLETE | Opt-in Auto Refresh: When idle; read-only selected-ref/Core/Semantic/repository-discovery checks shared with `brain watch`; debounce and one coalesced authoritative refresh after retrieval idle; bounded cooldown/backoff; non-refreshable Action Required latching; pinned-session preservation; and source-free local status/preference persistence. |
+| v0.9 M00–M15 | COMPLETE | Real immutable generation pinning; catalog-native repository/module/file/entity/region hierarchy; provenance-backed typed graph; change intelligence; Repo/Module/Entity semantic cards; blob-level incremental refresh; generation-scoped cache; session Investigation Memory/Coverage Map; completed-investigation priors; hierarchical routing; deterministic Next-Best-Evidence; ticket prefetch; protocol v4 full/delta lineage; M365 Agent Kit v3; expanded local evaluation; and cross-process model-lane serialization. |
 
 ## Completed local verification for this snapshot
 
-The full local regression suite (141 public/synthetic tests for this candidate) covers deterministic retrieval, generations,
+The full local regression suite (164 public/synthetic tests for this stable release) covers deterministic retrieval, generations,
 incremental indexes, semantic/reranker failure fallback, corrupt local state,
 pack tampering, production-manifest provenance, public synthetic conformance,
 machine-profile privacy, low-disk preflight, UI loopback protection, release
@@ -94,10 +95,10 @@ brain model autotune PACK --latency-budget-ms 3000
   published release, and the `v0.6.2` tag was never released: its
   CI/release-workflow defects were discovered before any artifact or tap
   mutation.
-- At this snapshot, `v0.8.0` has completed its local implementation gate but has no tag,
-  GitHub Release, Homebrew/tap change, deployed artifact, or publication
-  action. The v0.6.7 model-pack releases and public Core artifacts remain
-  untouched.
+- `v0.9.0` is authorized for stable publication from this exact reviewed gate.
+  The immutable Git tag, GitHub Release, workflow, checksums, and Homebrew tap
+  provide the external publication evidence; model-pack releases remain
+  separate and untouched.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.
 - The Semantic pack's packaging download is a release-engineering operation

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable
 from urllib.error import URLError
 
 from .models import active_pack, embedding_batch_size, embedding_request_bytes, runtime_for_pack
-from .locks import MODEL_LANE, workspace_exclusive
+from .locks import model_lane, workspace_exclusive
 
 if TYPE_CHECKING:
     from .core import Repository, Settings
@@ -54,6 +54,7 @@ class Chunk:
     kind: str
     symbol: str
     card: str
+    target_id: str | None = None
 
 
 class SemanticEmbeddingError(RuntimeError):
@@ -395,7 +396,8 @@ def _chunk_groups(repo: Repository) -> list[Chunk]:
 
 def _entries(chunks: list[Chunk]) -> list[dict[str, object]]:
     return [
-        {"path": chunk.path, "line": chunk.start_line, "end_line": chunk.end_line, "chunk_id": chunk.chunk_id, "kind": chunk.kind, "symbol": chunk.symbol}
+        {"path": chunk.path, "line": chunk.start_line, "end_line": chunk.end_line, "chunk_id": chunk.chunk_id,
+         "kind": chunk.kind, "symbol": chunk.symbol, "target_id": chunk.target_id}
         for chunk in chunks
     ]
 
@@ -416,6 +418,33 @@ def _state_is_reusable(
     pack_id: str,
     dimension: int,
 ) -> bool:
+    if not _state_is_compatible(state, backend=backend, pack_id=pack_id, dimension=dimension):
+        return False
+    expected = {(repo.name, snapshot): _entries(chunks) for repo, snapshot, chunks in groups if chunks}
+    if backend == "exact-mock":
+        actual: dict[tuple[str, str], list[dict[str, object]]] = {}
+        for item in state.get("entries") or []:
+            if not isinstance(item, dict):
+                return False
+            repo, snapshot = str(item.get("repo") or ""), str(item.get("snapshot") or "")
+            entry = {key: item.get(key) for key in ("path", "line", "end_line", "chunk_id", "kind", "symbol", "target_id")}
+            actual.setdefault((repo, snapshot), []).append(entry)
+        return actual == expected
+    actual = {}
+    for shard in state.get("shards") or []:
+        if not isinstance(shard, dict) or not Path(str(shard.get("path") or "")).is_file():
+            return False
+        actual[(str(shard.get("repo") or ""), str(shard.get("snapshot") or ""))] = shard.get("entries")
+    return actual == expected
+
+
+def _state_is_compatible(
+    state: dict[str, object] | None,
+    *,
+    backend: str,
+    pack_id: str,
+    dimension: int,
+) -> bool:
     if (
         not state
         or state.get("stale")
@@ -426,22 +455,7 @@ def _state_is_reusable(
         return False
     if state.get("backend") != backend or state.get("pack_id") != pack_id or int(state.get("dimension") or 0) != dimension:
         return False
-    expected = {(repo.name, snapshot): _entries(chunks) for repo, snapshot, chunks in groups if chunks}
-    if backend == "exact-mock":
-        actual: dict[tuple[str, str], list[dict[str, object]]] = {}
-        for item in state.get("entries") or []:
-            if not isinstance(item, dict):
-                return False
-            repo, snapshot = str(item.get("repo") or ""), str(item.get("snapshot") or "")
-            entry = {key: item.get(key) for key in ("path", "line", "end_line", "chunk_id", "kind", "symbol")}
-            actual.setdefault((repo, snapshot), []).append(entry)
-        return actual == expected
-    actual = {}
-    for shard in state.get("shards") or []:
-        if not isinstance(shard, dict) or not Path(str(shard.get("path") or "")).is_file():
-            return False
-        actual[(str(shard.get("repo") or ""), str(shard.get("snapshot") or ""))] = shard.get("entries")
-    return actual == expected
+    return True
 
 
 def _state_result(state: dict[str, object]) -> dict[str, object]:
@@ -501,6 +515,7 @@ def build_semantic_index(
     embed: Callable[[list[str]], list[list[float]]] | None = None,
     pack_id: str | None = None,
     progress: SemanticProgress | None = None,
+    atlas_cards: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Build per-repository, per-snapshot USearch shards from an approved local pack.
 
@@ -508,6 +523,8 @@ def build_semantic_index(
     production indexing refuses to silently substitute a hash embedding for a pack.
     """
     started = time.perf_counter()
+    if atlas_cards is None:
+        atlas_cards = getattr(settings, "atlas_cards", None)
     progress_state: dict[str, object] = {}
 
     def emit(phase: str, **details: object) -> None:
@@ -550,6 +567,20 @@ def build_semantic_index(
         emit("semantic_manifest", semantic_repository_current=0, semantic_repository_total=semantic_repo_total, semantic_cards_discovered=0, generation_state="checking")
         for position, repo in enumerate(settings.repositories, start=1):
             chunks = _chunk_groups(repo)
+            for card in atlas_cards or []:
+                if str(card.get("repo") or "") != repo.name:
+                    continue
+                level = str(card.get("level") or "entity")
+                content = str(card.get("content") or "")
+                chunk_id = str(card.get("card_id") or hashlib.sha256(content.encode()).hexdigest())
+                metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
+                line_start = max(1, int(metadata.get("line_start") or 1))
+                line_end = max(line_start, int(metadata.get("line_end") or line_start))
+                chunks.append(Chunk(
+                    chunk_id, str(card.get("content_hash") or chunk_id), str(card.get("path") or ""), line_start, line_end,
+                    f"atlas_{level}_card", str(card.get("target_id") or level), content,
+                    str(card.get("target_id") or "") or None,
+                ))
             groups.append((repo, repo.source_sha or "working-tree", chunks))
             card_total += len(chunks)
             emit(
@@ -570,13 +601,15 @@ def build_semantic_index(
                 "semantic_reuse",
                 semantic_cards_discovered=card_total,
                 semantic_cards_total=card_total,
-                cached_embeddings_reused=0,
+                cached_embeddings_reused=card_total,
                 new_embeddings_completed=0,
                 remaining_embeddings=0,
                 embedding_batch_size=0,
                 embedding_batches_completed=0,
                 semantic_shards_completed=shard_total,
                 semantic_shards_total=shard_total,
+                semantic_shards_reused=shard_total,
+                semantic_shards_rebuilt=0,
                 generation_state="reused",
             )
             return _state_result(published)
@@ -590,11 +623,39 @@ def build_semantic_index(
         shard_total = sum(bool(chunks) for _, _, chunks in groups)
         last_semantic_position = max((position for position, (_, _, chunks) in enumerate(groups, start=1) if chunks), default=0)
         completed_shards = 0
+        reused_shards = 0
+        rebuilt_shards = 0
         cached_total = 0
         embedded_total = 0
         batches_total = 0
+        prior_shards = {
+            (str(shard.get("repo") or ""), str(shard.get("snapshot") or "")): shard
+            for shard in (published.get("shards") or [] if _state_is_compatible(
+                published, backend=backend_name, pack_id=pack_id, dimension=dimension,
+            ) else [])
+            if isinstance(shard, dict) and Path(str(shard.get("path") or "")).is_file()
+        }
         for position, (repo, snapshot, chunks) in enumerate(groups, start=1):
             if not chunks:
+                continue
+            entries = _entries(chunks)
+            prior_shard = prior_shards.get((repo.name, snapshot))
+            if backend is not None and prior_shard and prior_shard.get("entries") == entries:
+                state_shards.append(dict(prior_shard))
+                cached_total += len(chunks)
+                completed_shards += 1
+                reused_shards += 1
+                emit(
+                    "semantic_shard",
+                    semantic_repository_current=position,
+                    semantic_repository_total=semantic_repo_total,
+                    cached_embeddings_reused=cached_total,
+                    new_embeddings_completed=embedded_total,
+                    semantic_shards_completed=completed_shards,
+                    semantic_shards_total=shard_total,
+                    semantic_shards_reused=reused_shards,
+                    semantic_shards_rebuilt=rebuilt_shards,
+                )
                 continue
             if not dimension:
                 dimension = _probe_embedding_dimension(
@@ -633,7 +694,6 @@ def build_semantic_index(
             cached_total += repo_progress["cached"]
             embedded_total += repo_progress["embedded"]
             batches_total += repo_progress["batches"]
-            entries = _entries(chunks)
             if backend is None:
                 all_mock_entries.extend([{**entry, "repo": repo.name, "snapshot": snapshot, "vector": vector} for entry, vector in zip(entries, repo_vectors, strict=True)])
             else:
@@ -650,12 +710,15 @@ def build_semantic_index(
                 temporary.replace(shard)
                 state_shards.append({"repo": repo.name, "snapshot": snapshot, "path": str(shard), "entries": entries})
             completed_shards += 1
+            rebuilt_shards += 1
             emit(
                 "semantic_shard",
                 semantic_repository_current=position,
                 semantic_repository_total=semantic_repo_total,
                 semantic_shards_completed=completed_shards,
                 semantic_shards_total=shard_total,
+                semantic_shards_reused=reused_shards,
+                semantic_shards_rebuilt=rebuilt_shards,
             )
 
         state = {
@@ -667,6 +730,7 @@ def build_semantic_index(
             "dimension": dimension,
             "embedding_input_version": SEMANTIC_EMBEDDING_INPUT_VERSION,
             "stale": False,
+            "snapshots": {repo.name: snapshot for repo, snapshot, _ in groups},
             "shards": state_shards,
             "entries": all_mock_entries,
         }
@@ -675,14 +739,12 @@ def build_semantic_index(
             "semantic_publish",
             semantic_shards_completed=completed_shards,
             semantic_shards_total=shard_total,
+            cached_embeddings_reused=cached_total,
+            new_embeddings_completed=embedded_total,
+            semantic_shards_reused=reused_shards,
+            semantic_shards_rebuilt=rebuilt_shards,
             generation_state="rebuilt",
         )
-        # Only the current snapshot can be queried.  Old immutable shards have no
-        # session dependency after their evidence was materialized, so trim them.
-        keep = {Path(str(shard["path"])).resolve() for shard in state_shards}
-        for stale in shard_root.glob("*.usearch"):
-            if stale.resolve() not in keep:
-                stale.unlink(missing_ok=True)
         return _state_result(state)
     except Exception:
         emit("semantic_embedding", generation_state="failed")
@@ -720,6 +782,31 @@ def _query_vector(settings: Settings, query: str, *, pack_id: str, dimension: in
     return [float(number) for number in vector]
 
 
+def _serving_state(settings: Settings, generation: Any | None) -> dict[str, object] | None:
+    if generation is None:
+        if getattr(settings, "atlas_generation_mode", "current") == "legacy_source_pin":
+            return None
+        return _published_state(settings)
+    component = generation.component("semantic")
+    if component.get("status") != "ready" or not component.get("artifact_ref"):
+        return None
+    path = (settings.state_dir / str(component["artifact_ref"])).resolve()
+    if not path.is_relative_to(settings.state_dir.resolve()):
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return None
+        snapshots = {str(name): str(sha) for name, sha in (value.get("snapshots") or {}).items()}
+        if not snapshots:
+            for item in [*(value.get("shards") or []), *(value.get("entries") or [])]:
+                if isinstance(item, dict) and item.get("repo") and item.get("snapshot"):
+                    snapshots[str(item["repo"])] = str(item["snapshot"])
+        return value if snapshots == generation.snapshots else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def search_semantic(
     settings: Settings,
     query: str,
@@ -728,10 +815,10 @@ def search_semantic(
     limit: int = 40,
     embed: Callable[[list[str]], list[list[float]]] | None = None,
     trace: Any | None = None,
+    generation: Any | None = None,
 ) -> list[dict[str, object]]:
-    try:
-        state = json.loads(_state_path(settings).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    state = _serving_state(settings, generation)
+    if not state:
         return []
     if state.get("stale") or state.get("chunk_schema_version") != CHUNK_SCHEMA_VERSION or state.get("card_version") != CARD_VERSION:
         return []
@@ -745,29 +832,54 @@ def search_semantic(
     semantic_started = time.perf_counter()
     runtime = None
     owns_runtime = embed is None
-    if owns_runtime:
-        lane_started = time.perf_counter()
-        MODEL_LANE.acquire()
-        if trace is not None:
-            trace.add_stage("model_lane_wait_ms", (time.perf_counter() - lane_started) * 1000)
+    lane = None
+
+    def close_runtime() -> None:
+        nonlocal runtime, lane
+        if runtime is not None:
+            runtime.shutdown()
+            runtime = None
+        if lane is not None:
+            lane.__exit__(None, None, None)
+            lane = None
+
     try:
         manifest = active_pack(settings, "embedding") if embed is None else None
         if embed is None:
             if manifest is None or manifest.get("pack_id") != pack_id:
                 return []
-            runtime_started = time.perf_counter()
-            runtime = runtime_for_pack(manifest)
-            if trace is not None:
-                trace.add_stage("embedding_runtime_start_ms", (time.perf_counter() - runtime_started) * 1000)
             query_instruction = str(manifest.get("query_instruction") or "")
-            embed = lambda values: runtime.embed(values, instruction=query_instruction, dimension=dimension)
+
+            def lazy_embed(values: list[str]) -> list[list[float]]:
+                nonlocal runtime, lane
+                lane_started = time.perf_counter()
+                lane = model_lane(settings)
+                lane.__enter__()
+                if trace is not None:
+                    trace.add_stage("model_lane_wait_ms", (time.perf_counter() - lane_started) * 1000)
+                try:
+                    runtime_started = time.perf_counter()
+                    runtime = runtime_for_pack(manifest)
+                    if trace is not None:
+                        trace.add_stage("embedding_runtime_start_ms", (time.perf_counter() - runtime_started) * 1000)
+                    return runtime.embed(values, instruction=query_instruction, dimension=dimension)
+                except Exception:
+                    close_runtime()
+                    raise
+
+            embed = lazy_embed
         embedding_started = time.perf_counter()
         vector = _query_vector(settings, query, pack_id=pack_id, dimension=dimension, embed=embed)
         if trace is not None:
             elapsed = (time.perf_counter() - embedding_started) * 1000
             trace.add_stage("semantic_query_embedding_ms", elapsed)
             trace.add_stage("embedding_inference_ms", elapsed)
-        snapshots = {repo.name: repo.source_sha or "working-tree" for repo in settings.repositories}
+        # Query vectors are plain data. Do not hold the cross-process model lane
+        # while independent USearch shards restore and search.
+        close_runtime()
+        snapshots = generation.snapshots if generation is not None else {
+            repo.name: repo.source_sha or "working-tree" for repo in settings.repositories
+        }
         if state.get("backend") == "exact-mock":
             backend_started = time.perf_counter()
             scored = [
@@ -832,9 +944,6 @@ def search_semantic(
             trace.add_stage("semantic_shard_search_ms", (time.perf_counter() - shard_search_started) * 1000)
         return sorted(results, key=lambda item: (-float(item["score"]), str(item["repo"]), str(item["chunk_id"])))[:limit]
     finally:
-        if runtime is not None:
-            runtime.shutdown()
-        if owns_runtime:
-            MODEL_LANE.release()
+        close_runtime()
         if trace is not None:
             trace.add_stage("semantic_total_ms", (time.perf_counter() - semantic_started) * 1000)

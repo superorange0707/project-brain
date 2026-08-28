@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import threading
 import time
@@ -316,6 +317,19 @@ CONTEXT_REQUEST:
         build.assert_called_once_with(self.settings)
         self.assertEqual("ready", outcome.semantic["status"])
         self.assertTrue(outcome.semantic["aligned"])
+
+    def test_mandatory_atlas_publication_failure_is_not_reported_as_refresh_success(self) -> None:
+        with patch("brain.core.discover_and_configure_repositories", return_value=[]), patch(
+            "brain.sync.sync_repositories", return_value=[]
+        ), patch("brain.core.snapshot_indexes", return_value=({}, [])), patch("brain.core.generate_map"), patch(
+            "brain.relations.generate_relationship_map"
+        ), patch("brain.experience.build_experience_index", return_value={"cases": []}), patch(
+            "brain.experience.evaluate_sessions", return_value={"evaluated_sessions": 0}
+        ), patch("brain.graph.index_graph", return_value=[]), patch(
+            "brain.editions.current_edition", return_value="core"
+        ), patch("brain.catalog.publish_generation", side_effect=sqlite3.DatabaseError("synthetic publication failure")):
+            with self.assertRaises(sqlite3.DatabaseError):
+                refresh_brain(self.settings)
 
     def test_shared_refresh_emits_ordered_safe_structured_events_and_cli_uses_them(self) -> None:
         semantic = {"required": True, "status": "ready", "aligned": True, "chunks": 3, "reason": None}

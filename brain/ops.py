@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from .catalog import current_generation, diagnose, generation_root
+from .catalog import current_generation, current_generation_ref, diagnose, generation_root, generations as catalog_generations
 from .editions import capabilities, current_edition
 from .locks import workspace_exclusive
 
@@ -153,10 +154,20 @@ def semantic_status(settings: Settings) -> dict[str, Any]:
     """Return safe, snapshot-aware semantic readiness without loading a model."""
     from .semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, SEMANTIC_EMBEDDING_INPUT_VERSION
 
-    try:
-        state = json.loads((settings.state_dir / "semantic-index.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    atlas = current_generation_ref(settings)
+    component = atlas.component("semantic") if atlas is not None else {}
+    if atlas is not None and component.get("status") != "ready":
         state = {}
+    else:
+        path = (
+            settings.state_dir / str(component["artifact_ref"])
+            if component.get("artifact_ref")
+            else settings.state_dir / "semantic-index.json"
+        )
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state = {}
     expected = {repo.name: repo.source_sha or "working-tree" for repo in settings.repositories}
     actual: dict[str, str] = {}
     for shard in state.get("shards") or []:
@@ -194,7 +205,7 @@ def semantic_status(settings: Settings) -> dict[str, Any]:
         "generation": str(state.get("generation") or "unknown")[:12] if state else None,
         "backend": state.get("backend"),
         "pack_id": state.get("pack_id"),
-        "reason": reason,
+        "reason": reason if atlas is None or component.get("status") == "ready" else "Semantic is unavailable for the current Atlas generation.",
     }
 
 
@@ -235,7 +246,7 @@ def refresh_brain(
     emit("sync", repository_current=0, repository_total=len(settings.repositories))
     results = sync_repositories(settings, fetch=fetch, branch_overrides=parse_branch_overrides(settings, branch_values or []))
     emit("core_index", repository_current=0, repository_total=len(results))
-    _, updated = snapshot_indexes(settings, changed_only=True)
+    index_state, updated = snapshot_indexes(settings, changed_only=True, publish=False)
     emit(
         "core_index",
         repository_current=len(results),
@@ -250,6 +261,9 @@ def refresh_brain(
     evaluation = evaluate_sessions(settings, experience)
     emit("graph")
     graphs = index_graph(settings, defer_lazy=True)
+    from .atlas import build_atlas
+
+    atlas_payload = build_atlas(settings, index_state)
 
     edition = current_edition(settings)
     if edition in {"semantic", "precision"}:
@@ -264,7 +278,11 @@ def refresh_brain(
                 details.pop("elapsed_ms", None)
                 emit(phase, **details)
 
-            built = build_semantic_index(settings, progress=semantic_progress) if progress is not None else build_semantic_index(settings)
+            settings.atlas_cards = atlas_payload["cards"]
+            try:
+                built = build_semantic_index(settings, progress=semantic_progress) if progress is not None else build_semantic_index(settings)
+            finally:
+                settings.atlas_cards = None
             semantic = {**semantic_status(settings), "required": True, "status": "ready", "build": built}
         except (OSError, RuntimeError, ValueError) as error:
             # Do not leak source, endpoint, proxy, or certificate details to an
@@ -276,12 +294,37 @@ def refresh_brain(
                 "status": "failed",
                 "error": f"Semantic indexing failed ({type(error).__name__}).",
             }
-            emit("complete", phase_label="Core refresh complete; Semantic needs attention", semantic_status="failed")
     else:
         semantic = {**semantic_status(settings), "required": False, "status": "not-required"}
-        emit("complete", semantic_status="not-required")
-    if semantic["status"] == "ready":
-        emit("complete", semantic_status="ready")
+    try:
+        from .catalog import collect_generation_components, publish_generation
+        from .index import write_state
+
+        components = collect_generation_components(
+            settings,
+            index_state,
+            semantic_failed=semantic["status"] == "failed",
+            atlas_payload=atlas_payload,
+        )
+        atlas = publish_generation(
+            settings,
+            index_state,
+            backends=["sqlite-fts5"] + (["zoekt"] if components["zoekt"]["status"] == "ready" else []),
+            components=components,
+            atlas_payload=atlas_payload,
+        )
+        for item in index_state.values():
+            if isinstance(item, dict):
+                item["generation"] = atlas["generation"]
+        write_state(settings, index_state)
+    except (OSError, sqlite3.Error):
+        # Mandatory component failure leaves the previous Atlas pointer intact,
+        # but must not be reported to UI/CLI callers as a successful refresh.
+        raise
+    if semantic["status"] == "failed":
+        emit("complete", phase_label="Core refresh complete; Semantic needs attention", semantic_status="failed")
+    else:
+        emit("complete", semantic_status="ready" if semantic["status"] == "ready" else "not-required")
     return RefreshOutcome(
         additions=additions,
         sync=results,
@@ -472,15 +515,24 @@ def freshness(settings: Settings) -> dict[str, Any]:
     from .core import git_head, load_index_state
 
     indexed = load_index_state(settings)
+    atlas = current_generation_ref(settings)
     rows = []
     for repo in settings.repositories:
         source = repo.source_sha or git_head(repo)
-        index = (indexed.get(repo.name) or {}).get("sha")
+        index = atlas.snapshots.get(repo.name) if atlas is not None else (indexed.get(repo.name) or {}).get("sha")
         rows.append({"repo": repo.name, "source_sha": source, "index_sha": index, "current": not index or not source or index == source, "warning": repo.source_warning})
     from .backends.zoekt import status as zoekt_status
 
     zoekt = zoekt_status()
-    return {"generation": current_generation(settings), "repositories": rows, "zoekt": {"available": zoekt.available, "reason": zoekt.reason}}
+    return {
+        "generation": current_generation(settings),
+        "atlas_identity": atlas.identity if atlas is not None else None,
+        "components": {
+            name: value.get("status") for name, value in atlas.components.items()
+        } if atlas is not None else {},
+        "repositories": rows,
+        "zoekt": {"available": zoekt.available, "reason": zoekt.reason},
+    }
 
 
 def storage(settings: Settings) -> dict[str, Any]:
@@ -541,40 +593,107 @@ def _snapshot_removals(settings: Settings, keep_recent: int) -> list[Path]:
     return removable
 
 
-def _semantic_shard_removals(settings: Settings) -> list[Path]:
+def _component_state(settings: Settings, generation: Any, component_name: str) -> dict[str, Any]:
+    component = generation.component(component_name)
+    if component.get("status") != "ready" or not component.get("artifact_ref"):
+        return {}
+    path = (settings.state_dir / str(component["artifact_ref"])).resolve()
+    if not path.is_relative_to(settings.state_dir.resolve()):
+        return {}
     try:
-        state = json.loads((settings.state_dir / "semantic-index.json").read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
     except (OSError, json.JSONDecodeError):
-        state = {}
+        return {}
+
+
+def _semantic_shard_removals(settings: Settings, retained: list[Any]) -> list[Path]:
     keep = {
         Path(str(item.get("path"))).resolve()
-        for item in state.get("shards") or []
+        for generation in retained
+        for item in _component_state(settings, generation, "semantic").get("shards") or []
         if isinstance(item, dict) and item.get("path")
     }
     root = settings.state_dir / "semantic-shards"
     return [path for path in root.glob("*.usearch") if path.resolve() not in keep]
 
 
+def _legacy_snapshot_memberships(settings: Settings) -> set[tuple[str, str]]:
+    retained: set[tuple[str, str]] = set()
+    for session in settings.runs_dir.glob("*/session.json") if settings.runs_dir.is_dir() else []:
+        try:
+            sources = json.loads(session.read_text(encoding="utf-8")).get("sources") or {}
+            retained.update(
+                (str(repo), str(item.get("sha") or "working-tree"))
+                for repo, item in sources.items()
+                if isinstance(item, dict)
+            )
+        except (OSError, json.JSONDecodeError):
+            continue
+    return retained
+
+
+def _zoekt_shard_removals(settings: Settings, retain: set[tuple[str, str]]) -> list[Path]:
+    root = settings.state_dir / "zoekt"
+    if not root.is_dir():
+        return []
+    return [
+        snapshot
+        for repository in root.iterdir() if repository.is_dir()
+        for snapshot in repository.iterdir() if snapshot.is_dir()
+        if (repository.name, snapshot.name) not in retain
+    ]
+
+
 @workspace_exclusive
 def gc(settings: Settings, *, dry_run: bool = True, keep_recent: int = 2) -> dict[str, Any]:
     root = generation_root(settings)
     pinned = _pinned_generations(settings)
-    generations = sorted((path for path in root.glob("generation-*") if path.is_dir()), key=lambda path: path.name)
-    protected = {path.name for path in generations[-max(1, keep_recent):]}
+    generation_dirs = sorted((path for path in root.glob("generation-*") if path.is_dir()), key=lambda path: path.name)
+    protected = {path.name for path in generation_dirs[-max(1, keep_recent):]}
+    current = current_generation_ref(settings)
+    if current is not None:
+        protected.add(f"generation-{current.generation:06d}")
+    protected.update(f"generation-{number:06d}" for number in pinned)
     removable = [
-        path for path in generations
+        path for path in generation_dirs
         if path.name not in protected and int(path.name.rsplit("-", 1)[-1]) not in pinned
     ]
+    protected_numbers = {
+        int(name.rsplit("-", 1)[-1]) for name in protected
+        if name.rsplit("-", 1)[-1].isdigit()
+    }
+    retained_generations = [item for item in catalog_generations(settings) if item.generation in protected_numbers]
+    retained_memberships = {
+        (repo, sha)
+        for generation in retained_generations
+        for repo, sha in generation.snapshots.items()
+    } | _legacy_snapshot_memberships(settings)
+    from .index import membership_snapshots
+
+    lexical_removable = sorted(membership_snapshots(settings) - retained_memberships)
     snapshot_removable = _snapshot_removals(settings, keep_recent)
-    semantic_removable = _semantic_shard_removals(settings)
-    targets = [("generation", path) for path in removable] + [("snapshot", path) for path in snapshot_removable] + [("semantic_shard", path) for path in semantic_removable]
+    semantic_removable = _semantic_shard_removals(settings, retained_generations)
+    zoekt_removable = _zoekt_shard_removals(settings, retained_memberships)
+    targets = (
+        [("generation", path) for path in removable]
+        + [("snapshot", path) for path in snapshot_removable]
+        + [("semantic_shard", path) for path in semantic_removable]
+        + [("zoekt_shard", path) for path in zoekt_removable]
+    )
     rows = [{"kind": kind, "path": str(path), "bytes": path.stat().st_size if path.is_file() else sum(item.stat().st_size for item in path.rglob("*") if item.is_file())} for kind, path in targets]
+    rows.extend({"kind": "lexical_membership", "path": f"{repo}@{sha}", "bytes": 0} for repo, sha in lexical_removable)
     if not dry_run:
+        from .catalog import delete_generations
+        from .index import prune_memberships
+
+        delete_generations(settings, {int(path.name.rsplit("-", 1)[-1]) for path in removable})
         for _, item in targets:
             if item.is_dir():
                 shutil.rmtree(item)
             else:
                 item.unlink(missing_ok=True)
+        prune_memberships(settings, retained_memberships)
     return {
         "dry_run": dry_run,
         "pinned_generations": sorted(pinned),

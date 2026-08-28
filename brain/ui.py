@@ -89,6 +89,9 @@ def _sessions(settings: Settings) -> list[dict[str, Any]]:
             "feedbacks": int(state.get("feedbacks") or 0),
             "status": str(state.get("status") or "investigating"),
             "no_progress_rounds": int(state.get("no_progress_rounds") or 0),
+            "atlas_generation": state.get("generation"),
+            "context_id": state.get("last_context_id"),
+            "prefetch_status": (state.get("prefetch") or {}).get("status"),
             "started_at": state.get("started_at"),
             "updated_at": datetime.fromtimestamp(state_path.stat().st_mtime, UTC).isoformat(),
         })
@@ -171,6 +174,7 @@ def project_status(
             "capabilities": brain["capabilities"],
             "benchmark": benchmark_report(settings),
             "storage": storage(settings),
+            "atlas_components": brain["freshness"].get("components") or {},
         },
         "brain": brain,
         "auto_refresh": auto_refresh or {
@@ -224,6 +228,13 @@ def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
         "no_progress_rounds": int(state.get("no_progress_rounds") or 0),
         "request_history": history,
         "retrieval": latest.get("retrieval") if isinstance(latest, dict) else {},
+        "atlas_generation": state.get("generation"),
+        "atlas_generation_id": state.get("atlas_generation_id"),
+        "context_id": state.get("last_context_id"),
+        "context_lineage": state.get("context_lineage") or [],
+        "investigation_memory": state.get("investigation_memory") or {},
+        "coverage_map": state.get("coverage_map") or {},
+        "prefetch": state.get("prefetch") or {},
         "artifacts": _session_artifacts(settings, ticket),
         "delivery": _delivery(settings, ticket),
     }

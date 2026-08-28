@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
+from .locks import workspace_exclusive
+
 if TYPE_CHECKING:
     from .core import SearchHit, Settings
 
@@ -92,6 +94,7 @@ def _invoke(settings: Settings, tool: str, arguments: dict[str, Any], *, timeout
     return None, "no JSON response"
 
 
+@workspace_exclusive
 def index_graph(
     settings: Settings,
     *,
@@ -211,8 +214,15 @@ def _hits(settings: Settings, repo_name: str, payload: Any, kind: str) -> list[S
     return hits
 
 
+def _serves_generation(settings: Settings) -> bool:
+    generation = getattr(settings, "atlas_generation", None)
+    if generation is not None:
+        return generation.component("structural").get("status") == "ready"
+    return getattr(settings, "atlas_generation_mode", "current") != "legacy_source_pin"
+
+
 def graph_symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
-    if not settings.graph_enabled or not find_backend():
+    if not _serves_generation(settings) or not settings.graph_enabled or not find_backend():
         return []
     selected_names = list(repos or [])
     if settings.graph_lazy and selected_names:
@@ -235,7 +245,7 @@ def graph_symbol_hits(settings: Settings, query: str, repos: Iterable[str] | Non
 
 
 def graph_trace(settings: Settings, query: str, repos: Iterable[str] | None = None) -> tuple[list[SearchHit], list[str]]:
-    if not settings.graph_enabled or not find_backend():
+    if not _serves_generation(settings) or not settings.graph_enabled or not find_backend():
         return [], []
     selected_names = list(repos or [])
     if settings.graph_lazy and selected_names:

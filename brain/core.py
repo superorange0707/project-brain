@@ -20,14 +20,14 @@ from importlib.resources import files as package_files
 from pathlib import Path
 from typing import Any, Iterable
 
-from .locks import ticket_exclusive, ticket_retrieval_exclusive, ticket_snapshot_exclusive
+from .locks import ticket_exclusive, ticket_retrieval_exclusive, ticket_snapshot_exclusive, workspace_exclusive
 
 
 IGNORED_DIRS = {".git", ".idea", ".venv", "node_modules", "target", "build", "dist"}
 SENSITIVE_FILE_NAMES = {".env", ".envrc", "credentials", "credentials.json", "service-account.json", "id_rsa", "id_ed25519", "keystore"}
 SENSITIVE_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".jks"}
 DISCOVERY_IGNORED_DIRS = IGNORED_DIRS | {".runs", ".codex", ".agents", "state", "generated", "knowledge"}
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 LEGACY_DEFAULT_PROTOCOL_VERSION = 1
 MAX_REQUEST_ITEMS = 50
 MAX_REQUEST_TEXT_CHARS = 100_000
@@ -108,6 +108,11 @@ class Settings:
     max_backend_operations: int = 200
     pre_rerank_candidate_limit: int = 200
     semantic_shard_workers: int = 4
+    ticket_prefetch_enabled: bool = True
+    context_checkpoint_interval: int = 5
+    atlas_generation: Any | None = None
+    atlas_generation_mode: str = "current"
+    atlas_cards: list[dict[str, Any]] | None = None
 
     def repos(self, names: Iterable[str] | None = None) -> list[Repository]:
         wanted = set(names or [])
@@ -219,6 +224,7 @@ class ContextBundle:
     additional_candidates: list[SearchHit] = field(default_factory=list)
     metrics: dict[str, int | float] = field(default_factory=dict)
     trace: dict[str, Any] = field(default_factory=dict)
+    atlas_generation: Any | None = None
 
 
 def run(args: list[str], cwd: Path | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -508,6 +514,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
         max_backend_operations=bounded_retrieval("max_backend_operations", 200, 500),
         pre_rerank_candidate_limit=bounded_retrieval("pre_rerank_candidate_limit", 200, 500),
         semantic_shard_workers=bounded_retrieval("semantic_shard_workers", 4, 4),
+        ticket_prefetch_enabled=bool(retrieval.get("ticket_prefetch_enabled", True)),
+        context_checkpoint_interval=bounded_retrieval("context_checkpoint_interval", 5, 100),
     )
     try:
         re.compile(settings.ticket_pattern)
@@ -663,7 +671,12 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
 
     def one(repo: Repository) -> list[SearchHit]:
         # A busy first repository must not hide evidence in later repositories.
-        zoekt = zoekt_search(settings, repo, pattern, fixed=fixed, max_results=settings.max_results)
+        generation = settings.atlas_generation
+        zoekt = (
+            zoekt_search(settings, repo, pattern, fixed=fixed, max_results=settings.max_results)
+            if generation is None or generation.component("zoekt").get("status") == "ready"
+            else None
+        )
         if zoekt is not None:
             rows, stats = zoekt
             _record_backend("zoekt", float(stats["elapsed_ms"]), raw_hits=int(stats["raw_hits"]), cache_hit=True)
@@ -671,10 +684,17 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
                 SearchHit(repo.name, path, line, text, score=90 + min(9, score), found_by=["zoekt local shard"])
                 for path, line, text, score in rows
             ]
-        indexed = query_index(settings, repo, pattern, max_results=settings.max_results) if fixed else None
+        indexed_started = time.perf_counter()
+        indexed = (
+            query_index(settings, repo, pattern, max_results=settings.max_results, snapshot_sha=repo.source_sha)
+            if fixed and (generation is None or generation.component("lexical").get("status") == "ready")
+            else None
+        )
         if indexed is None:
+            if settings.atlas_generation_mode == "pinned" and repo.source_sha and repo.source_path is None:
+                return []
             return search_repo(repo, pattern, fixed=fixed, max_results=settings.max_results)
-        _record_backend("sqlite-fts5", 0.0, raw_hits=len(indexed), cache_hit=True)
+        _record_backend("sqlite-fts5", (time.perf_counter() - indexed_started) * 1000, raw_hits=len(indexed), cache_hit=True)
         return [
             SearchHit(repo.name, path, line, text, score=95, found_by=["sqlite trigram index"])
             for path, line, text in indexed
@@ -709,10 +729,21 @@ def path_hits(settings: Settings, query: str, repos: Iterable[str] | None = None
     def one(repo: Repository) -> list[SearchHit]:
         root = repo.scan_path
         matches: list[SearchHit] = []
-        indexed = query_paths(settings, repo, needle, limit=settings.path_result_limit)
-        _record_backend("path-index" if indexed is not None else "path-scan", 0.0, raw_hits=len(indexed or []), cache_hit=indexed is not None)
+        generation = settings.atlas_generation
+        indexed_started = time.perf_counter()
+        indexed = (
+            query_paths(settings, repo, needle, limit=settings.path_result_limit, snapshot_sha=repo.source_sha)
+            if generation is None or generation.component("lexical").get("status") == "ready"
+            else None
+        )
+        _record_backend(
+            "path-index" if indexed is not None else "path-scan",
+            (time.perf_counter() - indexed_started) * 1000,
+            raw_hits=len(indexed or []), cache_hit=indexed is not None,
+        )
         paths = indexed if indexed is not None else (
-            (str(path.relative_to(root)) for path in _walk_files(root)) if root.is_dir() else []
+            [] if settings.atlas_generation_mode == "pinned" and repo.source_sha and repo.source_path is None
+            else (str(path.relative_to(root)) for path in _walk_files(root)) if root.is_dir() else []
         )
         for relative in paths:
             lowered = relative.lower()
@@ -802,12 +833,19 @@ def read_source(settings: Settings, hit: SearchHit, *, full: bool = False, lines
         raise BrainError(f"Unsafe or missing file: {hit.repo}:{hit.path}")
     if path.name.lower() in SENSITIVE_FILE_NAMES or path.suffix.lower() in SENSITIVE_SUFFIXES:
         raise BrainError(f"Sensitive source path is excluded from automatic retrieval: {hit.repo}:{hit.path}")
-    if path.is_file():
+    indexed_only = settings.atlas_generation_mode == "pinned" and repo.source_sha and repo.source_path is None
+    if indexed_only:
+        from .index import read_indexed_file
+
+        source = read_indexed_file(settings, repo, hit.path, snapshot_sha=repo.source_sha)
+        if source is None:
+            raise BrainError(f"Pinned indexed source is unavailable: {hit.repo}:{hit.path}")
+    elif path.is_file():
         source = path.read_text(encoding="utf-8", errors="replace")
     else:
         from .index import read_indexed_file
 
-        source = read_indexed_file(settings, repo, hit.path)
+        source = read_indexed_file(settings, repo, hit.path, snapshot_sha=repo.source_sha)
         if source is None:
             raise BrainError(f"Unsafe or missing file: {hit.repo}:{hit.path}")
     content = source.splitlines()
@@ -902,6 +940,7 @@ def _pom_dependencies(path: Path) -> list[str]:
     return dependencies
 
 
+@workspace_exclusive
 def generate_map(settings: Settings) -> str:
     output = ["# Generated Project Facts", "", f"Generated: {datetime.now(UTC).isoformat()}", ""]
     annotation = r"@(RestController|Controller|Service|Repository|FeignClient|KafkaListener|Scheduled|Entity|Table|RequestMapping|GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping)\b"
@@ -945,7 +984,7 @@ def _request_body(text: str) -> dict[str, Any]:
     if not stripped:
         raise BrainError("The AI response is empty")
     if len(text) > MAX_REQUEST_TEXT_CHARS:
-        raise BrainError(f"CONTEXT_REQUEST exceeds the {MAX_REQUEST_TEXT_CHARS:,}-character input limit")
+        raise BrainError(f"Project Brain request exceeds the {MAX_REQUEST_TEXT_CHARS:,}-character input limit")
 
     loaded: Any = None
     if stripped.startswith("{"):
@@ -957,11 +996,12 @@ def _request_body(text: str) -> dict[str, Any]:
     if loaded is None:
         # A textarea or copied chat can contain an earlier request followed by
         # the AI's new one. The newest directive is the one to execute.
-        marker = text.rfind("CONTEXT_REQUEST:")
+        markers = [(text.rfind(name + ":"), name) for name in ("CONTEXT_REQUEST", "INVESTIGATION_REQUEST")]
+        marker, marker_name = max(markers)
         if marker < 0:
             raise BrainError(
-                "Input does not contain CONTEXT_REQUEST:. Copy the AI's complete response, "
-                "or ask it to return a Project Brain CONTEXT_REQUEST YAML block."
+                "Input does not contain CONTEXT_REQUEST: or INVESTIGATION_REQUEST:. Copy the AI's complete response, "
+                "or ask it to return one Project Brain request block."
             )
         payload = text[marker:]
         closing_fence = payload.find("\n```")
@@ -977,22 +1017,30 @@ def _request_body(text: str) -> dict[str, Any]:
             except Exception as exc:
                 raise BrainError(f"Invalid CONTEXT_REQUEST YAML: {exc}") from exc
 
-    if isinstance(loaded, dict) and "CONTEXT_REQUEST" not in loaded and "objective" in loaded:
-        loaded = {"CONTEXT_REQUEST": loaded}
-    if not isinstance(loaded, dict) or not isinstance(loaded.get("CONTEXT_REQUEST"), dict):
-        raise BrainError("CONTEXT_REQUEST must be a YAML mapping or JSON object")
-    unknown_wrapper = sorted(set(loaded) - {"CONTEXT_REQUEST", "version"})
+    if isinstance(loaded, dict) and not ({"CONTEXT_REQUEST", "INVESTIGATION_REQUEST"} & set(loaded)) and "objective" in loaded:
+        wrapper = "INVESTIGATION_REQUEST" if loaded.get("version") == 4 else "CONTEXT_REQUEST"
+        loaded = {wrapper: loaded}
+    if not isinstance(loaded, dict):
+        raise BrainError("Project Brain request must be a YAML mapping or JSON object")
+    wrappers = [name for name in ("CONTEXT_REQUEST", "INVESTIGATION_REQUEST") if isinstance(loaded.get(name), dict)]
+    if len(wrappers) != 1:
+        raise BrainError("Provide exactly one CONTEXT_REQUEST or INVESTIGATION_REQUEST mapping")
+    wrapper = wrappers[0]
+    unknown_wrapper = sorted(set(loaded) - {wrapper, "version"})
     if unknown_wrapper:
         raise BrainError(f"CONTEXT_REQUEST wrapper has unknown keys: {', '.join(unknown_wrapper)}")
-    request = dict(loaded["CONTEXT_REQUEST"])
+    request = dict(loaded[wrapper])
     version = request.get("version", loaded.get("version", LEGACY_DEFAULT_PROTOCOL_VERSION))
-    if version not in {1, 2, 3}:
-        raise BrainError(f"Unsupported CONTEXT_REQUEST version {version!r}; this build supports versions 1, 2, and 3")
+    if version not in {1, 2, 3, 4}:
+        raise BrainError(f"Unsupported Project Brain request version {version!r}; this build supports versions 1, 2, 3, and 4")
+    if version == 4 and wrapper != "INVESTIGATION_REQUEST":
+        raise BrainError("version 4 must use the INVESTIGATION_REQUEST wrapper")
     request["version"] = version
     allowed = {
         1: {"version", "objective", "searches", "paths", "symbols", "files", "history", "expand"},
         2: {"version", "objective", "searches", "paths", "symbols", "files", "history", "expand"},
         3: {"version", "objective", "hints", "coverage", "expand"},
+        4: {"version", "objective", "runtime_facts", "hypotheses", "required", "resolve", "base_context_id", "checkpoint"},
     }[version]
     unknown = sorted(set(request) - allowed)
     if unknown:
@@ -1004,7 +1052,46 @@ def _request_body(text: str) -> dict[str, Any]:
         raise BrainError("objective exceeds the 4,000-character limit")
     request["objective"] = objective
 
-    if version == 3:
+    if version == 4:
+        for key in ("runtime_facts", "hypotheses", "required", "resolve"):
+            value = request.get(key) or []
+            if not isinstance(value, list) or len(value) > MAX_REQUEST_ITEMS:
+                raise BrainError(f"{key} must be a list of at most {MAX_REQUEST_ITEMS} items")
+            normalized: list[str] = []
+            for index, item in enumerate(value):
+                text_value = str(item).strip()
+                if not text_value or len(text_value) > 500:
+                    raise BrainError(f"{key}[{index}] must be a non-empty value up to 500 characters")
+                normalized.append(text_value)
+            request[key] = list(dict.fromkeys(normalized))
+        base_context_id = str(request.get("base_context_id") or "").strip()
+        if len(base_context_id) > 200:
+            raise BrainError("base_context_id exceeds 200 characters")
+        request["base_context_id"] = base_context_id or None
+        if not isinstance(request.get("checkpoint", False), bool):
+            raise BrainError("checkpoint must be true or false")
+        request["checkpoint"] = bool(request.get("checkpoint"))
+        from .retrieval.planner import objective_terms
+
+        resolve_terms = [*request["resolve"], *objective_terms(objective, limit=8)]
+        request["searches"] = [{"query": value, "repos": []} for value in list(dict.fromkeys(resolve_terms))[:12]]
+        request["paths"] = []
+        request["symbols"] = []
+        request["files"] = []
+        request["history"] = [
+            {"query": value, "repos": []} for value in request["resolve"]
+            if any(token in value.lower() for token in ("history", "commit", "change", "ticket"))
+        ][:4]
+        request["expand"] = []
+        required_text = " ".join(request["required"]).lower()
+        request["coverage"] = {
+            "production": "required",
+            "tests": "required" if "test" in required_text else "auto",
+            "relationships": "required" if any(value in required_text for value in ("flow", "integration", "relationship", "graph")) else "auto",
+            "configuration": "required" if "config" in required_text else "auto",
+            "history": "required" if any(value in required_text for value in ("history", "change", "commit")) else "auto",
+        }
+    elif version == 3:
         hints = request.get("hints") or {}
         coverage = request.get("coverage") or {}
         if not isinstance(hints, dict):
@@ -1191,6 +1278,8 @@ def request_preview(text: str, settings: Settings | None = None) -> dict[str, An
     public_request = (
         {key: request[key] for key in ("version", "objective", "hints", "coverage", "expand") if key in request}
         if request["version"] == 3
+        else {key: request[key] for key in ("version", "objective", "runtime_facts", "hypotheses", "required", "resolve", "base_context_id", "checkpoint") if key in request}
+        if request["version"] == 4
         else {key: request[key] for key in ("version", "objective", "searches", "paths", "symbols", "files", "history", "expand") if key in request}
     )
     return {
@@ -1210,7 +1299,7 @@ def request_preview(text: str, settings: Settings | None = None) -> dict[str, An
             "history": len(request["history"]),
         },
         "planner": planner,
-        "normalized_json": json.dumps({"CONTEXT_REQUEST": public_request}, indent=2, ensure_ascii=False) + "\n",
+        "normalized_json": json.dumps({"INVESTIGATION_REQUEST" if request["version"] == 4 else "CONTEXT_REQUEST": public_request}, indent=2, ensure_ascii=False) + "\n",
     }
 
 
@@ -1220,9 +1309,9 @@ def request_repair_prompt(error: str) -> str:
         "Your previous response could not be executed by Project Brain.\n\n"
         f"Validation error: {error}\n\n"
         "Return only one minimal fenced YAML block. State the repository fact to establish; do not invent repository names or enumerate command matrices.\n\n"
-        "Legacy requests remain supported (version: 1 and version: 2), but new repairs use v3.\n\n"
+        "Legacy CONTEXT_REQUEST version: 1, version: 2, and version: 3 remain supported; new repairs use investigation protocol v4.\n\n"
         "```yaml\n"
-        "CONTEXT_REQUEST:\n"
+        "INVESTIGATION_REQUEST:\n"
         f"  version: {PROTOCOL_VERSION}\n"
         "  objective: State the next repository fact that must be established.\n"
         "```\n"
@@ -1296,7 +1385,13 @@ def retrieve_context(
 ) -> ContextBundle:
     """Run a routed, fused, budgeted retrieval while preserving exact-source hydration."""
     started = time.perf_counter()
-    bundle = ContextBundle(str(request["objective"]).strip())
+    catalog_started = time.perf_counter()
+    if settings.atlas_generation is None and settings.atlas_generation_mode == "current":
+        from .catalog import current_generation_ref
+
+        settings = replace(settings, atlas_generation=current_generation_ref(settings))
+    catalog_open_ms = (time.perf_counter() - catalog_started) * 1000
+    bundle = ContextBundle(str(request["objective"]).strip(), atlas_generation=settings.atlas_generation)
     from .retrieval import compile_request
     from .retrieval.models import RetrievalTrace
     from .retrieval.planner import route_repositories
@@ -1320,18 +1415,56 @@ def retrieve_context(
             trace.stop_reason = "operation_budget"
 
         candidates: list[SearchHit] = []
+        from .atlas import route as route_atlas
+
+        atlas_started = time.perf_counter()
+        atlas_route = route_atlas(
+            settings,
+            bundle.objective,
+            request,
+            bundle.atlas_generation,
+            repo_limit=max(settings.widen_repo_limit, settings.initial_repo_limit),
+            entity_limit=settings.pre_rerank_candidate_limit,
+        )
+        atlas_route_ms = (time.perf_counter() - atlas_started) * 1000
+        trace.add_stage("atlas_route_ms", atlas_route_ms)
+        first_repo_ms = (time.perf_counter() - started) * 1000 if atlas_route.get("repos") else None
+        first_entity_ms = (time.perf_counter() - started) * 1000 if atlas_route.get("candidates") else None
+        first_verified_evidence_ms: float | None = None
+        candidates.extend(
+            SearchHit(
+                str(item["repo"]), str(item["path"]), int(item["line"]), "",
+                f"Atlas {item.get('kind') or 'entity'} candidate", round(float(item.get("score") or 0), 3),
+                list(item.get("found_by") or ["Atlas hierarchical router"]),
+            )
+            for item in atlas_route.get("candidates") or []
+        )
+        bundle.relationships.extend(
+            f"{item.get('source_repo') or item['repo']}:{item['source_id']}  {item['edge_type']}  "
+            f"{item['repo']}:{item['target_id']} | provenance {item['repo']}:{item['path']}:{item['line']} | confidence {item['confidence']}"
+            for item in atlas_route.get("graph_edges") or []
+        )
+        cross_repo_relationships = any(
+            str(item.get("source_repo") or item.get("repo")) != str(item.get("repo"))
+            for item in atlas_route.get("graph_edges") or []
+        )
+        atlas_repo_scope = [str(name) for name in atlas_route.get("repos") or []]
         emit("global_discovery", requested_operations=trace.requested_operations, effective_operations=trace.effective_operations)
         discovery_started = time.perf_counter()
         search_operations = [item for item in compiled_plan.operations if item.kind == "search"]
         lexical_started = time.perf_counter()
         for operation in search_operations:
-            repos = list(operation.repos)
+            repos = list(operation.repos) or atlas_repo_scope[: settings.initial_repo_limit]
             hits = search(settings, operation.value, repos, fixed=True)
             if not hits:
                 try:
                     hits = search(settings, operation.value, repos)
                 except BrainError:
                     hits = []
+            if not hits and not operation.repos and repos and len(repos) < len(settings.repositories):
+                hits = search(settings, operation.value, atlas_repo_scope[: settings.widen_repo_limit], fixed=True)
+            if not hits and not operation.repos and len(atlas_repo_scope) < len(settings.repositories):
+                hits = search(settings, operation.value, [], fixed=True)
             if not hits:
                 bundle.unresolved.append(f"Search `{operation.value}` returned no code matches in {repos or ['all repositories']}")
             candidates.extend(hits)
@@ -1339,6 +1472,7 @@ def retrieve_context(
         trace.add_stage("exact_lexical_ms", (time.perf_counter() - lexical_started) * 1000)
 
         semantic_started = time.perf_counter()
+        semantic_repo_scores: dict[str, float] = {}
         try:
             from .editions import current_edition
 
@@ -1352,13 +1486,20 @@ def retrieve_context(
                     bundle.objective,
                     repos={repo.name for repo in settings.repositories},
                     trace=trace,
+                    generation=bundle.atlas_generation,
                 )
+                for item in semantic:
+                    semantic_repo_scores[str(item["repo"])] = max(
+                        semantic_repo_scores.get(str(item["repo"]), -1.0), float(item.get("score") or 0)
+                    )
                 candidates.extend(
                     SearchHit(
                         str(item["repo"]), str(item["path"]), int(item["line"]), "", "semantic candidate",
                         round(50 + float(item.get("score") or 0) * 50, 3), ["local semantic index"],
                     )
                     for item in semantic
+                    if str(item.get("path") or "")
+                    and (not str(item.get("kind") or "").startswith("atlas_") or item.get("kind") == "atlas_entity_card")
                 )
                 if not semantic:
                     bundle.warnings.append("Semantic index is unavailable or stale; used Core retrieval only.")
@@ -1370,7 +1511,14 @@ def retrieve_context(
 
         emit("repo_routing", candidate_count=len(candidates))
         routing_started = time.perf_counter()
-        ordered_repos = route_repositories(settings.repositories, request, candidates, limit=len(settings.repositories))
+        fallback_repos = route_repositories(settings.repositories, request, candidates, limit=len(settings.repositories))
+        semantic_repos = sorted(semantic_repo_scores, key=lambda name: (-semantic_repo_scores[name], name))
+        explicit_repos = list(dict.fromkeys(
+            str(repo) for operation in compiled_plan.operations for repo in operation.repos
+        ))
+        ordered_repos = list(dict.fromkeys([*explicit_repos, *semantic_repos, *atlas_repo_scope, *fallback_repos]))
+        if first_repo_ms is None and ordered_repos:
+            first_repo_ms = (time.perf_counter() - started) * 1000
         trace.repo_candidates = len(ordered_repos)
         initial_count = min(settings.initial_repo_limit, len(ordered_repos))
         widen_count = min(max(initial_count, settings.widen_repo_limit), len(ordered_repos))
@@ -1482,6 +1630,8 @@ def retrieve_context(
             if evidence:
                 bundle.evidence.append(evidence)
                 trace.bytes_read += len(evidence.content.encode("utf-8", errors="replace"))
+                if first_verified_evidence_ms is None:
+                    first_verified_evidence_ms = (time.perf_counter() - started) * 1000
             else:
                 bundle.unresolved.append(f"Requested file `{item['repo']}:{item['path']}` was not found")
 
@@ -1492,7 +1642,11 @@ def retrieve_context(
         if settings.experience_enabled:
             from .experience import render_similar_cases
 
-            bundle.experience = render_similar_cases(settings, bundle.objective)
+            bundle.experience = render_similar_cases(
+                settings,
+                bundle.objective,
+                generation=bundle.atlas_generation,
+            )
         trace.add_stage("experience_ms", (time.perf_counter() - experience_started) * 1000)
 
         relation_started = time.perf_counter()
@@ -1509,6 +1663,10 @@ def retrieve_context(
                 *((item.repo, item.path) for item in candidates),
                 *((item.repo, item.path) for item in bundle.evidence if item.repo not in {"external", "knowledge"}),
             },
+            generation=bundle.atlas_generation,
+        )
+        cross_repo_relationships = cross_repo_relationships or any(
+            relationship.source != relationship.target for relationship in related
         )
         for relationship in related:
             bundle.relationships.append(
@@ -1527,8 +1685,11 @@ def retrieve_context(
 
         prune_started = time.perf_counter()
         trace.unique_candidates_before_prune = len({(item.repo, item.path, item.line) for item in candidates})
+        raw_candidates = len(candidates)
         candidates, early_omitted = prune_candidates(settings, candidates, settings.pre_rerank_candidate_limit)
         trace.candidates_after_prune = len(candidates)
+        if first_entity_ms is None and candidates:
+            first_entity_ms = (time.perf_counter() - started) * 1000
         trace.add_stage("candidate_pruning_ms", (time.perf_counter() - prune_started) * 1000)
         trace.add_stage("dedup_fusion_ms", 0.0)
 
@@ -1571,16 +1732,19 @@ def retrieve_context(
             bundle.evidence.append(evidence)
             source_chars += len(evidence.content)
             trace.bytes_read += len(evidence.content.encode("utf-8", errors="replace"))
+            if first_verified_evidence_ms is None:
+                first_verified_evidence_ms = (time.perf_counter() - started) * 1000
         trace.add_stage("source_hydration_ms", (time.perf_counter() - hydrate_started) * 1000)
         bundle.additional_candidates = sorted(omitted, key=lambda item: (-item.score, item.repo, item.path, item.line))
         bundle.evidence = merge_evidence(bundle.evidence)
 
-        state = load_index_state(settings)
-        for repo in settings.repositories:
-            current = repo.source_sha or git_head(repo)
-            indexed = (state.get(repo.name) or {}).get("sha")
-            if indexed and current and indexed != current:
-                bundle.warnings.append(f"Index for {repo.name} is stale: indexed {indexed[:12]}, source {current[:12]}.")
+        if bundle.atlas_generation is None:
+            state = load_index_state(settings)
+            for repo in settings.repositories:
+                current = repo.source_sha or git_head(repo)
+                indexed = (state.get(repo.name) or {}).get("sha")
+                if indexed and current and indexed != current:
+                    bundle.warnings.append(f"Index for {repo.name} is stale: indexed {indexed[:12]}, source {current[:12]}.")
 
         trace.unique_candidates = len(candidates)
         trace.hydrated_regions = len(bundle.evidence)
@@ -1594,6 +1758,8 @@ def retrieve_context(
             "candidate_ms": round(trace.stage_ms.get("candidate_discovery_ms", 0.0), 3),
             "hydrate_ms": round(trace.stage_ms.get("source_hydration_ms", 0.0), 3),
             "planning_ms": trace.stage_ms.get("planning_ms", 0.0),
+            "catalog_open_ms": round(catalog_open_ms, 3),
+            "atlas_route_ms": trace.stage_ms.get("atlas_route_ms", 0.0),
             "repo_routing_ms": trace.stage_ms.get("repo_routing_ms", 0.0),
             "candidate_pruning_ms": trace.stage_ms.get("candidate_pruning_ms", 0.0),
             "rerank_ms": trace.stage_ms.get("rerank_ms", 0.0),
@@ -1601,13 +1767,45 @@ def retrieve_context(
             "source_hydration_ms": trace.stage_ms.get("source_hydration_ms", 0.0),
             "total_ms": round(total_ms, 3),
             "candidates": len(candidates),
+            "raw_candidates": raw_candidates,
             "hydrated_regions": len(bundle.evidence),
             "deferred_candidates": len(bundle.additional_candidates),
+            "late_candidates": len(bundle.additional_candidates),
+            "rerank_input_count": trace.rerank_input_count,
+            "time_to_first_repo_ms": round(first_repo_ms, 3) if first_repo_ms is not None else None,
+            "time_to_first_entity_ms": round(first_entity_ms, 3) if first_entity_ms is not None else None,
+            "time_to_first_verified_evidence_ms": (
+                round(first_verified_evidence_ms, 3) if first_verified_evidence_ms is not None else None
+            ),
             "requested_operations": trace.requested_operations,
             "effective_operations": trace.effective_operations,
             "physical_backend_operations": trace.physical_backend_operations,
         }
         bundle.trace = trace.as_dict()
+        bundle.trace["cross_repo_relationships"] = cross_repo_relationships
+        bundle.trace["atlas_generation"] = (
+            bundle.atlas_generation.generation if bundle.atlas_generation is not None else None
+        )
+        bundle.trace["atlas_generation_id"] = (
+            bundle.atlas_generation.identity if bundle.atlas_generation is not None else None
+        )
+        bundle.trace["atlas_components"] = (
+            {name: value.get("status") for name, value in bundle.atlas_generation.components.items()}
+            if bundle.atlas_generation is not None
+            else {}
+        )
+        bundle.trace["atlas_route"] = {
+            "cache_hit": bool(atlas_route.get("cache_hit")),
+            "prefetch_reused": int(atlas_route.get("prefetch_reused") or 0),
+            "investigation_reused": int(atlas_route.get("investigation_reused") or 0),
+            "repositories": list(atlas_route.get("repos") or []),
+            "modules": list(atlas_route.get("modules") or []),
+            "entities": len(atlas_route.get("entities") or []),
+            "entity_ids": [str(item.get("entity_id")) for item in atlas_route.get("entities") or [] if item.get("entity_id")],
+            "graph_edges": len(atlas_route.get("graph_edges") or []),
+            "schema": atlas_route.get("schema"),
+            "evaluation_ablation": list(atlas_route.get("evaluation_ablation") or []),
+        }
         bundle.trace["planner"] = {
             "requested_protocol": compiled_plan.protocol_version,
             "requested_operations": compiled_plan.requested_operations,
@@ -1641,6 +1839,126 @@ def _coverage(bundle: ContextBundle) -> dict[str, Any]:
     }
 
 
+def _evidence_id(item: Evidence) -> str:
+    digest = hashlib.sha256(
+        f"{item.repo}\0{item.path}\0{item.line_start}\0{item.line_end}\0{item.content}".encode("utf-8")
+    ).hexdigest()
+    return f"E-{digest[:24]}"
+
+
+def _candidate_id(generation: Any | None, item: SearchHit) -> str:
+    identity = generation.identity if generation is not None else "legacy"
+    return "K-" + hashlib.sha256(
+        f"{identity}\0{item.repo}\0{item.path}\0{item.line}".encode("utf-8")
+    ).hexdigest()[:24]
+
+
+def _restore_checkpoint_evidence(
+    settings: Settings,
+    records: Iterable[dict[str, Any]],
+    *,
+    max_chars: int | None = None,
+) -> tuple[list[Evidence], int]:
+    """Rehydrate prior verified regions when a client needs a full checkpoint."""
+    restored: list[Evidence] = []
+    missed = 0
+    restored_chars = 0
+    for record in records:
+        try:
+            repo_name = str(record["repo"])
+            relative = str(record["path"])
+            start = max(1, int(record["line_start"]))
+            end = max(start, int(record["line_end"]))
+            if repo_name == "external":
+                continue  # External evidence is loaded afresh on every request.
+            if repo_name == "knowledge":
+                root = settings.knowledge_dir.resolve()
+                source_path = (root / relative).resolve()
+                if not source_path.is_relative_to(root) or not source_path.is_file():
+                    missed += 1
+                    continue
+                lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                evidence = Evidence(
+                    "knowledge", relative, start, min(end, len(lines)),
+                    "\n".join(lines[start - 1:end]), "checkpoint recovery", 70,
+                    ["checkpoint lineage recovery"],
+                )
+            else:
+                evidence = read_source(
+                    settings,
+                    SearchHit(repo_name, relative, start, "", "checkpoint recovery", 90,
+                              ["checkpoint lineage recovery"]),
+                    lines=(start, end),
+                )
+            if hashlib.sha256(evidence.content.encode("utf-8")).hexdigest() != record.get("content_hash"):
+                missed += 1
+                continue
+            if max_chars is not None and restored_chars + len(evidence.content) > max_chars:
+                missed += 1
+                continue
+            restored.append(evidence)
+            restored_chars += len(evidence.content)
+        except (BrainError, KeyError, OSError, TypeError, ValueError):
+            missed += 1
+    return restored, missed
+
+
+def pack_delta_context(
+    settings: Settings,
+    ticket: str,
+    request_number: int,
+    bundle: ContextBundle,
+    progress: dict[str, Any],
+    new_evidence_ids: set[str],
+) -> str:
+    """Render only newly verified source plus deterministic investigation deltas."""
+    generation = bundle.atlas_generation
+    output = [
+        "# PROJECT BRAIN CONTEXT DELTA", "", f"Ticket: `{ticket}`", f"Request: `{request_number:03d}`",
+        f"Context ID: `{progress['context_id']}`", f"Base context ID: `{progress.get('base_context_id')}`", "",
+        "## Retrieval contract", "",
+        f"- Atlas generation: `{generation.generation if generation is not None else 'legacy_source_pin'}`",
+        f"- Atlas identity: `{generation.identity if generation is not None else 'unresolved legacy source pin'}`",
+        f"- Source signature: `{generation.source_signature if generation is not None else 'legacy'}`",
+        "- This is a delta. Candidate metadata is routing intelligence; only the source regions below are verified evidence.",
+        "", "## Coverage Map changes", "",
+    ]
+    changes = progress.get("coverage_changes") or {}
+    output.extend(f"- `{key}`: `{value.get('before')}` → `{value.get('after')}`" for key, value in sorted(changes.items()))
+    if not changes:
+        output.append("- None")
+    output.extend(["", "## Investigation Memory changes", ""])
+    memory_changes = progress.get("memory_changes") or {}
+    for key, value in sorted(memory_changes.items()):
+        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        output.append(f"- `{key}`: {rendered[:2_000]}")
+    if not memory_changes:
+        output.append("- None")
+    output.extend(["", "## Evidence lineage", ""])
+    output.append(f"- New evidence: `{len(new_evidence_ids)}`")
+    superseded = progress.get("superseded_evidence_ids") or []
+    output.append(f"- Invalidated/superseded evidence: `{', '.join(superseded) if superseded else 'none'}`")
+    output.extend(["", "## New source evidence", ""])
+    new_items = [item for item in bundle.evidence if _evidence_id(item) in new_evidence_ids]
+    if not new_items:
+        output.append("- None")
+    for item in new_items:
+        output.extend([
+            f"### {_evidence_id(item)} — {item.repo} — `{item.path}:{item.line_start}-{item.line_end}`", "",
+            f"Kind: {item.kind}  ", f"Found by: {', '.join(item.found_by)}", "",
+            f"```{_language(item.path)}", item.content, "```", "",
+        ])
+    output.extend(["## Stable candidate changes", ""])
+    for item in bundle.additional_candidates[:50]:
+        output.append(f"- `{_candidate_id(generation, item)}` `{item.repo}:{item.path}:{item.line}` — {item.kind} — score {item.score}")
+    if not bundle.additional_candidates:
+        output.append("- None")
+    output.extend(["", "## Unresolved", ""])
+    output.extend(f"- {item}" for item in bundle.unresolved) if bundle.unresolved else output.append("- None")
+    output.extend(["", "## Next-Best-Evidence", "", f"```json\n{json.dumps(progress.get('next_best_evidence') or {}, indent=2, sort_keys=True)}\n```", ""])
+    return "\n".join(output).rstrip() + "\n"
+
+
 def _language(path: str) -> str:
     suffix = Path(path).suffix.lower()
     return {
@@ -1662,6 +1980,13 @@ def pack_context(
         "# PROJECT BRAIN CONTEXT", "", f"Ticket: `{ticket}`", f"Request: `{request_number:03d}`", "",
         "## Objective", "", bundle.objective, "", "## Repository state", "",
     ]
+    if progress and progress.get("context_id"):
+        output[5:5] = [
+            f"Context ID: `{progress['context_id']}`",
+            f"Base context ID: `{progress.get('base_context_id') or 'none'}`",
+            "Context kind: `full checkpoint`",
+            "",
+        ]
     warnings = list(bundle.warnings)
     for repo in settings.repositories:
         local = git_head(repo)
@@ -1677,16 +2002,17 @@ def pack_context(
         output.extend(["", "## Warnings", ""])
         output.extend(f"- {warning}" for warning in warnings)
     try:
-        from .catalog import current_generation
         from .editions import current_edition
 
-        generation = current_generation(settings) or {}
+        generation = bundle.atlas_generation
         output.extend([
             "",
             "## Retrieval contract",
             "",
             f"- Edition: `{current_edition(settings)}`",
-            f"- Generation: `{generation.get('generation', 'fallback')}`",
+            f"- Generation: `{generation.generation if generation is not None else 'legacy_source_pin'}`",
+            f"- Atlas identity: `{generation.identity if generation is not None else 'unresolved legacy source pin'}`",
+            f"- Source signature: `{generation.source_signature if generation is not None else 'legacy'}`",
             "- Evidence is read and verified from the pinned source snapshot; indexes and models only supply candidates or rank signals.",
             f"- Candidate planner: `{bundle.trace.get('planner', {}).get('operations', 0)}` operations; `{bundle.trace.get('planner', {}).get('stop_reason', 'fixed safe plan')}`.",
             "",
@@ -1748,6 +2074,35 @@ def pack_context(
             output.append("- Suggested next action: ask for the external/runtime blocker or produce FINAL_SOLUTION; more identical searching will not help.")
         else:
             output.append("- Suggested next action: the AI must decide whether remaining unknowns can change the implementation; if not, produce FINAL_SOLUTION.")
+        coverage_map = progress.get("coverage_map") or {}
+        if coverage_map:
+            output.extend(["", "## Coverage Map", ""])
+            output.extend(f"- `{key}`: `{value}`" for key, value in sorted(coverage_map.items()))
+        investigation_memory = progress.get("investigation_memory") or {}
+        if investigation_memory:
+            output.extend([
+                "", "## Investigation Memory", "",
+                "```json",
+                json.dumps(investigation_memory, ensure_ascii=False, indent=2, sort_keys=True),
+                "```",
+            ])
+        if progress.get("next_best_evidence"):
+            output.extend([
+                "", "## Next-Best-Evidence", "",
+                f"```json\n{json.dumps(progress['next_best_evidence'], indent=2, sort_keys=True)}\n```",
+            ])
+        output.extend([
+            "", "## Evidence lineage", "",
+            f"- New stable evidence IDs: `{', '.join(progress.get('new_evidence_ids') or []) or 'none'}`",
+            f"- Invalidated/superseded evidence IDs: `{', '.join(progress.get('superseded_evidence_ids') or []) or 'none'}`",
+        ])
+        memory_changes = progress.get("memory_changes") or {}
+        if memory_changes:
+            output.extend(["", "## Investigation Memory changes", ""])
+            output.extend(
+                f"- `{key}`: {json.dumps(value, ensure_ascii=False, sort_keys=True)[:2_000]}"
+                for key, value in sorted(memory_changes.items())
+            )
     if bundle.relationships:
         output.extend(["", "## Static execution relationships", "", "```text", *sorted(set(bundle.relationships)), "```"])
     if bundle.experience:
@@ -1758,7 +2113,7 @@ def pack_context(
     for index, item in enumerate(bundle.evidence, 1):
         found = ", ".join(item.found_by)
         output.extend([
-            f"### {index}. {item.repo} — `{item.path}:{item.line_start}-{item.line_end}`",
+            f"### {index}. {_evidence_id(item)} — {item.repo} — `{item.path}:{item.line_start}-{item.line_end}`",
             "", f"Kind: {item.kind}  ", f"Found by: {found}", "",
             f"```{_language(item.path)}", item.content, "```", "",
         ])
@@ -1771,7 +2126,7 @@ def pack_context(
             "",
         ])
         output.extend(
-            f"- `C{index}` `{item.repo}:{item.path}:{item.line}` — {item.kind} — score {item.score}"
+            f"- `C{index}` / `{_candidate_id(bundle.atlas_generation, item)}` `{item.repo}:{item.path}:{item.line}` — {item.kind} — score {item.score}"
             for index, item in enumerate(bundle.additional_candidates[:50], 1)
         )
         if len(bundle.additional_candidates) > 50:
@@ -1798,7 +2153,13 @@ def load_index_state(settings: Settings) -> dict[str, Any]:
         return {}
 
 
-def snapshot_indexes(settings: Settings, changed_only: bool = False) -> tuple[dict[str, Any], list[str]]:
+@workspace_exclusive
+def snapshot_indexes(
+    settings: Settings,
+    changed_only: bool = False,
+    *,
+    publish: bool = True,
+) -> tuple[dict[str, Any], list[str]]:
     """Build the real local search index; kept as the public name for compatibility."""
     from .index import build_index_generation, write_state
     from .ops import ensure_write_capacity
@@ -1841,23 +2202,50 @@ def snapshot_indexes(settings: Settings, changed_only: bool = False) -> tuple[di
                 state[name]["zoekt"] = details
     except OSError:
         zoekt = {}
+    existing_generation = None
     try:
-        from .catalog import current_generation, publish_generation
-
-        existing_generation = current_generation(settings)
-        backends = ["sqlite-fts5"] + (["zoekt"] if zoekt else [])
-        generation = publish_generation(settings, state, backends=backends) if updated or existing_generation is None else existing_generation
+        from .catalog import collect_generation_components, current_generation_ref, publish_generation
         from .catalog import record_index_catalog
 
-        if updated:
+        existing_generation = current_generation_ref(settings)
+        backends = ["sqlite-fts5"] + (["zoekt"] if zoekt else [])
+        snapshots = {
+            name: str(item.get("sha") or "working-tree")
+            for name, item in state.items()
+            if isinstance(item, dict)
+        }
+        should_publish = publish and (
+            updated
+            or existing_generation is None
+            or not existing_generation.identity
+            or existing_generation.snapshots != snapshots
+            or existing_generation.component("lexical").get("status") != "ready"
+        )
+        if updated or existing_generation is None or not existing_generation.identity:
             record_index_catalog(settings, state)
-        for item in state.values():
-            if isinstance(item, dict):
-                item["generation"] = generation["generation"]
+        if should_publish:
+            from .atlas import build_atlas
+
+            atlas_payload = build_atlas(settings, state)
+            generation = publish_generation(
+                settings,
+                state,
+                backends=backends,
+                components=collect_generation_components(settings, state, atlas_payload=atlas_payload),
+                atlas_payload=atlas_payload,
+            )
+        else:
+            generation = existing_generation.manifest if existing_generation is not None else None
+        if generation is not None:
+            for item in state.values():
+                if isinstance(item, dict):
+                    item["generation"] = generation["generation"]
     except (OSError, sqlite3.Error) as exc:
         for item in state.values():
             if isinstance(item, dict):
                 item.setdefault("warning", f"Catalog generation unavailable ({type(exc).__name__})")
+        if publish and existing_generation is not None:
+            raise
     write_state(settings, state)
     from .metrics import record_metric
 
@@ -1962,12 +2350,79 @@ def save_session(settings: Settings, ticket: str, state: dict[str, Any]) -> None
     temporary.replace(path)
 
 
-@ticket_snapshot_exclusive
+def _session_snapshots(state: dict[str, Any]) -> dict[str, str]:
+    return {
+        str(name): str(value.get("sha") or "working-tree")
+        for name, value in (state.get("sources") or {}).items()
+        if isinstance(value, dict)
+    }
+
+
+def _resolve_session_generation(settings: Settings, state: dict[str, Any]) -> tuple[Any | None, bool]:
+    """Resolve a ticket once; ambiguous legacy state stays source-only instead of using current."""
+    from .catalog import matching_generations, resolve_generation
+
+    snapshots = _session_snapshots(state)
+    generation = None
+    identity = str(state.get("atlas_generation_id") or "")
+    if identity:
+        generation = resolve_generation(settings, identity=identity)
+    elif state.get("generation") is not None:
+        try:
+            generation = resolve_generation(settings, generation=int(state["generation"]))
+        except (TypeError, ValueError):
+            generation = None
+    if generation is not None and generation.snapshots != snapshots:
+        generation = None
+    if identity and generation is None:
+        raise BrainError(
+            "This ticket's pinned Atlas generation is unavailable; restore the retained generation "
+            "or start a new ticket instead of mixing repository generations"
+        )
+    if generation is None and not identity:
+        matches = matching_generations(settings, snapshots)
+        generation = matches[0] if len(matches) == 1 else None
+    before = json.dumps(state, sort_keys=True)
+    state["session_schema_version"] = 2
+    if generation is None:
+        state["generation_mode"] = "legacy_source_pin"
+        state["atlas_generation_id"] = None
+        state["generation"] = None
+    else:
+        state.update({
+            "generation_mode": "atlas",
+            "atlas_generation_id": generation.identity,
+            "generation": generation.generation,
+            "source_signature": generation.source_signature,
+        })
+    return generation, before != json.dumps(state, sort_keys=True)
+
+
+@workspace_exclusive
+@ticket_exclusive
 def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[str, Path]:
     from .experience import build_experience_index, load_experience_index, render_similar_cases
+    from .catalog import current_generation_ref, source_signature
+    from .atlas import initial_coverage_map, initial_investigation_memory, similar_investigations
 
     directory = session_dir(settings, ticket)
     directory.mkdir(parents=True, exist_ok=True)
+    sources = {
+        repo.name: {
+            "snapshot": str(repo.source_path) if repo.source_path else None,
+            "ref": repo.source_ref,
+            "sha": repo.source_sha,
+            "status": repo.source_status,
+            "fetched": repo.source_fetched,
+            "warning": repo.source_warning,
+        }
+        for repo in settings.repositories
+    }
+    snapshots = {
+        name: str(value.get("sha") or "working-tree") for name, value in sources.items()
+    }
+    current_atlas = current_generation_ref(settings)
+    pinned_atlas = current_atlas if current_atlas is not None and current_atlas.snapshots == snapshots else None
     ticket_path = directory / "ticket.md"
     ticket_path.write_text(ticket_text.rstrip() + "\n", encoding="utf-8")
     prompt = package_files("brain").joinpath("prompt.md").read_text(encoding="utf-8")
@@ -1985,7 +2440,12 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
     if settings.experience_enabled:
         if not load_experience_index(settings):
             build_experience_index(settings, changed_only=True)
-        historical = render_similar_cases(settings, f"{ticket}\n{ticket_text}", include_patches=True)
+        historical = render_similar_cases(
+            settings,
+            f"{ticket}\n{ticket_text}",
+            include_patches=True,
+            generation=pinned_atlas,
+        )
         if historical:
             sections.extend([historical.rstrip(), ""])
     ticket_knowledge = settings.knowledge_dir / "tickets" / f"{directory.name}.md"
@@ -2003,42 +2463,67 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
     start_path = directory / "start.md"
     start_path.write_text(content, encoding="utf-8")
     state = session_state(settings, ticket)
-    source_signature = hashlib.sha256(
-        json.dumps(
-            [(repo.name, repo.source_ref, repo.source_sha or git_head(repo)) for repo in settings.repositories],
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()
     state.update(
         {
             "ticket": ticket,
             "started_at": datetime.now(UTC).isoformat(),
             "status": "waiting_for_ai",
-            "source_signature": source_signature,
+            "session_schema_version": 2,
+            "generation_mode": "atlas" if pinned_atlas is not None else "legacy_source_pin",
+            "atlas_generation_id": pinned_atlas.identity if pinned_atlas is not None else None,
+            "generation": pinned_atlas.generation if pinned_atlas is not None else None,
+            "source_signature": pinned_atlas.source_signature if pinned_atlas is not None else source_signature(snapshots),
             "requests": state.get("requests", 0),
             "feedbacks": state.get("feedbacks", 0),
-            "sources": {
-                repo.name: {
-                    "snapshot": str(repo.source_path) if repo.source_path else None,
-                    "ref": repo.source_ref,
-                    "sha": repo.source_sha,
-                    "status": repo.source_status,
-                    "fetched": repo.source_fetched,
-                    "warning": repo.source_warning,
-                }
-                for repo in settings.repositories
-            },
+            "sources": sources,
+            "investigation_memory": initial_investigation_memory(ticket_text.strip()),
+            "coverage_map": initial_coverage_map(),
+            "similar_investigations": similar_investigations(settings, ticket_text, limit=settings.experience_similar_cases),
+            "context_lineage": [],
         }
     )
-    try:
-        from .catalog import current_generation
-
-        generation = current_generation(settings)
-        state["generation"] = generation.get("generation") if generation else None
-    except OSError:
-        state["generation"] = None
     save_session(settings, ticket, state)
+    if settings.ticket_prefetch_enabled and pinned_atlas is not None:
+        try:
+            prefetch_ticket(settings, ticket)
+        except (OSError, sqlite3.Error, BrainError):
+            state = session_state(settings, ticket)
+            state["prefetch"] = {"status": "failed", "generation": pinned_atlas.generation}
+            save_session(settings, ticket, state)
     return content, start_path
+
+
+@ticket_retrieval_exclusive
+def prefetch_ticket(settings: Settings, ticket: str) -> dict[str, Any]:
+    """Warm generation routing only; never create evidence or a request round."""
+    from .atlas import route as route_atlas
+
+    state = session_state(settings, ticket)
+    generation, migrated = _resolve_session_generation(settings, state)
+    if migrated:
+        save_session(settings, ticket, state)
+    if generation is None:
+        result = {"status": "unavailable", "generation": None, "candidate_ids": []}
+    else:
+        objective = str((state.get("investigation_memory") or {}).get("objective") or ticket)
+        from .retrieval.planner import objective_terms
+
+        routed = route_atlas(settings, objective, {
+            "version": 4, "objective": objective,
+            "searches": [{"query": value, "repos": []} for value in objective_terms(objective, limit=8)],
+            "paths": [], "symbols": [], "history": [], "required": [], "resolve": [],
+        }, generation,
+                             repo_limit=settings.widen_repo_limit, entity_limit=settings.pre_rerank_candidate_limit)
+        result = {
+            "status": "ready", "generation": generation.generation, "atlas_generation_id": generation.identity,
+            "cache_hit": bool(routed.get("cache_hit")), "repos": list(routed.get("repos") or []),
+            "modules": list(routed.get("modules") or []),
+            "candidate_ids": [str(item.get("entity_id")) for item in routed.get("entities") or []],
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+    state["prefetch"] = result
+    save_session(settings, ticket, state)
+    return result
 
 
 @ticket_retrieval_exclusive
@@ -2056,6 +2541,29 @@ def create_context(
     plan = request_preview(request_text, settings)
     request = plan["request"]
     state = session_state(settings, ticket)
+    atlas_generation, migrated = _resolve_session_generation(settings, state)
+    if migrated:
+        save_session(settings, ticket, state)
+    from .atlas import initial_coverage_map, initial_investigation_memory
+
+    memory = dict(state.get("investigation_memory") or initial_investigation_memory(plan["objective"]))
+    coverage_map = dict(state.get("coverage_map") or initial_coverage_map())
+    memory_before = json.loads(json.dumps(memory))
+    coverage_before = dict(coverage_map)
+    if request.get("version") == 4:
+        memory["objective"] = str(request["objective"])
+        memory["hypotheses"] = list(dict.fromkeys([*(memory.get("hypotheses") or []), *request.get("hypotheses", [])]))[-100:]
+        memory["runtime_facts"] = list(dict.fromkeys([*(memory.get("runtime_facts") or []), *request.get("runtime_facts", [])]))[-100:]
+        for required in request.get("required") or []:
+            coverage_map["explicit_requested"] = "candidate"
+            memory["blocking_unknowns"] = list(dict.fromkeys([*(memory.get("blocking_unknowns") or []), str(required)]))[-100:]
+    request["_prefetch"] = state.get("prefetch") or {}
+    request["_prior_entity_ids"] = [
+        *(str(entity_id) for entity_id in state.get("atlas_entity_ids") or []),
+        *(str(entity_id)
+          for prior in state.get("similar_investigations") or [] if isinstance(prior, dict)
+          for entity_id in prior.get("entity_ids") or []),
+    ]
     for previous in state.get("request_history") or []:
         if previous.get("signature") == plan["signature"] and previous.get("source_signature") == state.get("source_signature"):
             raise BrainError(
@@ -2063,20 +2571,24 @@ def create_context(
                 "Clear any old reply and paste only the AI's latest complete response. If the latest reply "
                 "is a human question, answer it directly in the AI chat; Brain should not create a new request."
             )
-    retrieval_settings = replace(settings, repositories=[replace(repo) for repo in settings.repositories])
+    retrieval_settings = replace(
+        settings,
+        repositories=[replace(repo) for repo in settings.repositories],
+        atlas_generation=atlas_generation,
+        atlas_generation_mode="pinned" if atlas_generation is not None else "legacy_source_pin",
+    )
     for repo in retrieval_settings.repositories:
         source = (state.get("sources") or {}).get(repo.name) or {}
         raw_snapshot = str(source.get("snapshot") or "")
         snapshot = Path(raw_snapshot)
         if raw_snapshot and (not snapshot.is_dir() or not snapshot.is_relative_to(settings.state_dir)):
             raise BrainError(f"Pinned source snapshot for {repo.name} is unavailable; refresh/start a new ticket instead of mixing commits")
-        if raw_snapshot:
-            repo.source_path = snapshot
-            repo.source_ref = str(source.get("ref") or "") or None
-            repo.source_sha = str(source.get("sha") or "") or None
-            repo.source_status = str(source.get("status") or "session snapshot")
-            repo.source_fetched = bool(source.get("fetched"))
-            repo.source_warning = str(source.get("warning") or "") or None
+        repo.source_path = snapshot if raw_snapshot else None
+        repo.source_ref = str(source.get("ref") or "") or None
+        repo.source_sha = str(source.get("sha") or "") or None
+        repo.source_status = str(source.get("status") or "session snapshot")
+        repo.source_fetched = bool(source.get("fetched"))
+        repo.source_warning = str(source.get("warning") or "") or None
     if request.get("version") == 3 and request.get("files"):
         established = {
             (str(item.get("repo") or ""), str(item.get("path") or ""))
@@ -2100,6 +2612,20 @@ def create_context(
                 "lines": f"{candidate['line']}-{candidate['line']}",
             })
     number = int(state.get("requests") or 0) + 1
+    requested_base = str(request.get("base_context_id") or "") or None
+    current_base = str(state.get("last_context_id") or "") or None
+    checkpoint_reason = None
+    full_checkpoint = request.get("version") != 4 or bool(request.get("checkpoint"))
+    if request.get("version") == 4:
+        if not requested_base:
+            full_checkpoint = True
+            checkpoint_reason = "base_missing"
+        elif requested_base != current_base:
+            full_checkpoint = True
+            checkpoint_reason = "base_mismatch"
+        elif number % settings.context_checkpoint_interval == 0:
+            full_checkpoint = True
+            checkpoint_reason = "checkpoint_interval"
     request_path = directory / f"request-{number:03d}.yml"
     path = directory / f"context-{number:03d}.md"
     trace_path = directory / f"trace-{number:03d}.json"
@@ -2108,6 +2634,23 @@ def create_context(
         from .query import merge_evidence
 
         bundle.evidence = merge_evidence(bundle.evidence + _external_evidence(settings, ticket))
+        if full_checkpoint and state.get("evidence_records"):
+            checkpoint_source_budget = max(
+                0,
+                settings.hard_context_chars
+                - 40_000
+                - sum(len(item.content) for item in bundle.evidence),
+            )
+            restored, missed = _restore_checkpoint_evidence(
+                retrieval_settings,
+                (item for item in state.get("evidence_records") or [] if isinstance(item, dict)),
+                max_chars=checkpoint_source_budget,
+            )
+            bundle.evidence = merge_evidence(bundle.evidence + restored)
+            if missed:
+                bundle.warnings.append(
+                    f"{missed} prior evidence region(s) could not be restored into this full checkpoint."
+                )
         evidence_keys = {
             hashlib.sha256(
                 f"{item.repo}\0{item.path}\0{item.line_start}\0{item.line_end}\0{item.content}".encode("utf-8")
@@ -2131,10 +2674,71 @@ def create_context(
             "history": list(state.get("request_history") or []),
             "coverage": coverage,
         }
+        evidence_records: dict[str, dict[str, Any]] = {}
+        for item in bundle.evidence:
+            identifier = _evidence_id(item)
+            evidence_records[identifier] = {
+                "evidence_id": identifier, "repo": item.repo, "path": item.path,
+                "line_start": item.line_start, "line_end": item.line_end,
+                "content_hash": hashlib.sha256(item.content.encode("utf-8")).hexdigest(),
+            }
+        previous_records = {
+            str(item.get("evidence_id")): item for item in state.get("evidence_records") or []
+            if isinstance(item, dict) and item.get("evidence_id")
+        }
+        new_evidence_ids = set(evidence_records) - set(previous_records)
+        superseded = sorted(
+            identifier for identifier, old in previous_records.items()
+            if identifier not in evidence_records and any(
+                current["repo"] == old.get("repo") and current["path"] == old.get("path")
+                for current in evidence_records.values()
+            )
+        )
+        lineage_records = {**previous_records, **evidence_records}
+        for identifier in superseded:
+            lineage_records.pop(identifier, None)
+        if len(lineage_records) > 500:
+            current_ids = set(evidence_records)
+            retained_ids = [*sorted(current_ids), *sorted(set(lineage_records) - current_ids)][:500]
+            lineage_records = {identifier: lineage_records[identifier] for identifier in retained_ids}
+        generation_identity = atlas_generation.identity if atlas_generation is not None else str(state.get("source_signature") or "legacy")
+        context_id = "ctx-" + hashlib.sha256(
+            json.dumps({"generation": generation_identity, "request": plan["signature"], "evidence": sorted(lineage_records)},
+                       sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        from .atlas import next_best_evidence, update_investigation
+
+        update_investigation(memory, coverage_map, bundle, context_id)
+        next_evidence = next_best_evidence(coverage_map, request, no_progress_rounds)
+        bundle.trace["next_best_evidence"] = next_evidence
+        bundle.trace["investigation_state"] = {
+            "verified_facts": len(memory.get("verified_facts") or []),
+            "blocking_unknowns": len(memory.get("blocking_unknowns") or []),
+            "verified_references": len(memory.get("verified_references") or []),
+            "coverage": dict(coverage_map),
+        }
+        coverage_changes = {
+            key: {"before": coverage_before.get(key), "after": value}
+            for key, value in coverage_map.items() if coverage_before.get(key) != value
+        }
+        memory_changes = {
+            key: value for key, value in memory.items() if memory_before.get(key) != value
+        }
+        investigation_progress.update({
+            "context_id": context_id, "base_context_id": requested_base, "checkpoint": full_checkpoint,
+            "checkpoint_reason": checkpoint_reason, "coverage_map": coverage_map, "coverage_changes": coverage_changes,
+            "memory_changes": memory_changes, "new_evidence_ids": sorted(new_evidence_ids),
+            "superseded_evidence_ids": superseded, "next_best_evidence": next_evidence,
+            "investigation_memory": memory,
+        })
         if progress_callback is not None:
             progress_callback({"phase": "packing_context", "elapsed_ms": bundle.metrics.get("total_ms", 0), "evidence_count": len(bundle.evidence)})
         pack_started = time.perf_counter()
-        content = pack_context(retrieval_settings, ticket, number, bundle, investigation_progress)
+        content = (
+            pack_context(retrieval_settings, ticket, number, bundle, investigation_progress)
+            if full_checkpoint
+            else pack_delta_context(retrieval_settings, ticket, number, bundle, investigation_progress, new_evidence_ids)
+        )
         context_pack_ms = round((time.perf_counter() - pack_started) * 1000, 3)
         bundle.metrics["context_pack_ms"] = context_pack_ms
         bundle.metrics["total_ms"] = round(float(bundle.metrics.get("total_ms") or 0) + context_pack_ms, 3)
@@ -2152,12 +2756,26 @@ def create_context(
         state["requests"] = number
         state["status"] = "waiting_for_ai"
         state["no_progress_rounds"] = no_progress_rounds
-        state["evidence_keys"] = sorted(known_keys | evidence_keys)
+        retained_evidence_keys = [*sorted(evidence_keys), *sorted(known_keys - evidence_keys)][:1_000]
+        state["evidence_keys"] = retained_evidence_keys
         state["coverage"] = coverage
+        state["investigation_memory"] = memory
+        state["coverage_map"] = coverage_map
+        state["last_context_id"] = context_id
+        state["context_lineage"] = [*(state.get("context_lineage") or []), {
+            "context_id": context_id, "base_context_id": requested_base, "number": number,
+            "kind": "checkpoint" if full_checkpoint else "delta",
+        }][-100:]
+        state["evidence_records"] = sorted(lineage_records.values(), key=lambda item: item["evidence_id"])
         state["candidate_manifest"] = {
-            f"C{index}": {"repo": item.repo, "path": item.path, "line": item.line}
+            f"C{index}": {"repo": item.repo, "path": item.path, "line": item.line,
+                           "candidate_id": _candidate_id(atlas_generation, item)}
             for index, item in enumerate(bundle.additional_candidates[:50], 1)
         }
+        state["atlas_entity_ids"] = list(dict.fromkeys(
+            str(entity_id) for entity_id in (bundle.trace.get("atlas_route") or {}).get("entity_ids", [])
+            if entity_id
+        ))
         state["evidence_manifest"] = sorted(
             ({"repo": item.repo, "path": item.path} for item in bundle.evidence if item.repo not in {"external", "knowledge"}),
             key=lambda item: (item["repo"], item["path"]),
@@ -2184,6 +2802,8 @@ def create_context(
             "candidate_count": int(bundle.metrics.get("candidates") or 0),
             "evidence_count": len(bundle.evidence),
             "generation": state.get("generation"),
+            "atlas_generation_id": state.get("atlas_generation_id"),
+            "generation_mode": state.get("generation_mode", "legacy_source_pin"),
             "snapshots": sorted((state.get("sources") or {}).keys()),
             "timing_ms": bundle.metrics,
             "trace": bundle.trace,
@@ -2194,6 +2814,11 @@ def create_context(
             "final_repo_scope": list(bundle.trace.get("final_repo_scope") or []),
             "stop_reason": str(bundle.trace.get("stop_reason") or "coverage_satisfied"),
             "warnings": list(bundle.warnings),
+            "context_id": context_id,
+            "base_context_id": requested_base,
+            "context_kind": "checkpoint" if full_checkpoint else "delta",
+            "checkpoint_reason": checkpoint_reason,
+            "next_best_evidence": next_evidence,
         }
         history = list(state.get("request_history") or [])
         history.append({
@@ -2207,7 +2832,10 @@ def create_context(
             "retrieval": retrieval,
             "created_at": datetime.now(UTC).isoformat(),
         })
-        state["request_history"] = history
+        state["request_history"] = history[-500:]
+        from .atlas import record_investigation
+
+        record_investigation(settings, ticket, state)
         save_session(settings, ticket, state)
     except Exception:
         request_path.unlink(missing_ok=True)
@@ -2243,7 +2871,7 @@ def create_feedback(
         "",
         "Review the developer's implementation against the ticket, prior evidence, and proposed solution. "
         "Identify correctness gaps, missed callers, compatibility risks, and missing tests. Do not invent "
-        "runtime results. If more source evidence is required, return a new CONTEXT_REQUEST.",
+        "runtime results. If more source evidence is required, return a new INVESTIGATION_REQUEST v4.",
         "",
         "## Repository state",
         "",

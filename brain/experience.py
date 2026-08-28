@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .locks import workspace_exclusive
+
 if TYPE_CHECKING:
     from .core import Settings
 
@@ -86,7 +88,23 @@ def _redact_patch(text: str) -> str:
     return "\n".join(rows)
 
 
-def load_experience_index(settings: Settings) -> dict[str, Any]:
+def load_experience_index(settings: Settings, generation: object | None = None) -> dict[str, Any]:
+    if generation is not None:
+        component = generation.component("experience")  # type: ignore[attr-defined]
+        if component.get("status") != "ready" or not component.get("artifact_ref"):
+            return {}
+        path = (settings.state_dir / str(component["artifact_ref"])).resolve()
+        if not path.is_relative_to(settings.state_dir.resolve()):
+            return {}
+        value = _load(path)
+        cutoffs = {
+            str(name): str(item.get("sha") or "working-tree")
+            for name, item in (value.get("repositories") or {}).items()
+            if isinstance(item, dict)
+        }
+        return value if cutoffs == generation.snapshots else {}  # type: ignore[attr-defined]
+    if getattr(settings, "atlas_generation_mode", "current") == "legacy_source_pin":
+        return {}
     return _load(settings.state_dir / "ticket-history.json")
 
 
@@ -115,6 +133,7 @@ def _parse_log(text: str, ticket_pattern: re.Pattern[str]) -> list[dict[str, Any
     return commits
 
 
+@workspace_exclusive
 def build_experience_index(settings: Settings, *, changed_only: bool = True) -> dict[str, Any]:
     """Index ticket-labelled Git changes locally without reading credentials or calling a model."""
     settings.state_dir.mkdir(parents=True, exist_ok=True)
@@ -226,8 +245,14 @@ def build_experience_index(settings: Settings, *, changed_only: bool = True) -> 
     return index
 
 
-def similar_cases(settings: Settings, text: str, *, limit: int | None = None) -> list[dict[str, Any]]:
-    index = load_experience_index(settings)
+def similar_cases(
+    settings: Settings,
+    text: str,
+    *,
+    limit: int | None = None,
+    generation: object | None = None,
+) -> list[dict[str, Any]]:
+    index = load_experience_index(settings, generation)
     query_terms = _tokens(text)
     pattern = re.compile(settings.ticket_pattern)
     ticket_ids = {_ticket_id(match) for match in pattern.finditer(text)}
@@ -290,8 +315,9 @@ def render_similar_cases(
     *,
     include_patches: bool = False,
     patch_chars: int | None = None,
+    generation: object | None = None,
 ) -> str:
-    cases = similar_cases(settings, text)
+    cases = similar_cases(settings, text, generation=generation)
     if not cases:
         return ""
     output = [
@@ -327,13 +353,35 @@ def render_similar_cases(
     return "\n".join(output).rstrip() + "\n"
 
 
+def _delta_reduction(directory: Path) -> float | None:
+    sizes = [(path, path.stat().st_size) for path in sorted(directory.glob("context-*.md"))]
+    full = [size for path, size in sizes if not path.read_text(encoding="utf-8", errors="replace").startswith("# PROJECT BRAIN CONTEXT DELTA")]
+    delta = [size for path, size in sizes if path.read_text(encoding="utf-8", errors="replace").startswith("# PROJECT BRAIN CONTEXT DELTA")]
+    if not full or not delta or sum(full) == 0:
+        return None
+    return max(0.0, 1 - (sum(delta) / len(delta)) / (sum(full) / len(full)))
+
+
+def _next_best_usefulness(state: dict[str, Any]) -> float | None:
+    history = [item for item in state.get("request_history") or [] if isinstance(item, dict)]
+    pairs = [(left, right) for left, right in zip(history, history[1:]) if (left.get("retrieval") or {}).get("next_best_evidence")]
+    if not pairs:
+        return None
+    return sum(int(right.get("new_evidence") or 0) > 0 for _, right in pairs) / len(pairs)
+
+
+def _optional_average(rows: list[dict[str, Any]], key: str) -> float | None:
+    values = [float(item[key]) for item in rows if isinstance(item.get(key), (int, float))]
+    return sum(values) / len(values) if values else None
+
+
 def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -> dict[str, Any]:
     """Compare retrieved paths with later ticket-labelled commits when both exist locally."""
     index = index or load_experience_index(settings)
     cases = {item["ticket"]: item for item in index.get("cases") or []}
     evaluations: list[dict[str, Any]] = []
     if settings.runs_dir.is_dir():
-        evidence_pattern = re.compile(r"(?m)^### \d+\. ([^—\n]+?) — `(.+?):\d+-\d+`$")
+        evidence_pattern = re.compile(r"(?m)^### \d+\. (?:E-[a-f0-9]+ — )?([^—\n]+?) — `(.+?):\d+-\d+`$")
         for directory in settings.runs_dir.iterdir():
             state_path = directory / "session.json"
             if not directory.is_dir() or not state_path.is_file():
@@ -378,6 +426,14 @@ def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -
                     "changed_file_precision": len(matched_files) / len(retrieved) if retrieved else None,
                     "duplicate_window_ratio": 1 - len(set(ordered_paths)) / len(ordered_paths) if ordered_paths else 0.0,
                     "missed_paths": sorted(actual - retrieved),
+                    "rounds_until_final_solution": int(state.get("requests") or 0) if state.get("status") == "ready_to_implement" else None,
+                    "prefetch_usefulness": 1.0 if any(
+                        bool(((item.get("retrieval") or {}).get("trace") or {}).get("atlas_route", {}).get("cache_hit"))
+                        or int(((item.get("retrieval") or {}).get("trace") or {}).get("atlas_route", {}).get("prefetch_reused") or 0) > 0
+                        for item in state.get("request_history") or [] if isinstance(item, dict)
+                    ) else 0.0,
+                    "delta_context_reduction": _delta_reduction(directory),
+                    "next_best_evidence_usefulness": _next_best_usefulness(state),
                 }
             )
     def aggregate(matched: str, actual: str) -> float | None:
@@ -392,6 +448,10 @@ def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -
         "ndcg_at_10": sum(float(item["ndcg_at_10"] or 0) for item in evaluations) / len(evaluations) if evaluations else None,
         "changed_file_precision": sum(float(item["changed_file_precision"] or 0) for item in evaluations) / len(evaluations) if evaluations else None,
         "duplicate_window_ratio": sum(float(item["duplicate_window_ratio"]) for item in evaluations) / len(evaluations) if evaluations else None,
+        "rounds_until_final_solution": _optional_average(evaluations, "rounds_until_final_solution"),
+        "prefetch_usefulness": _optional_average(evaluations, "prefetch_usefulness"),
+        "delta_context_reduction": _optional_average(evaluations, "delta_context_reduction"),
+        "next_best_evidence_usefulness": _optional_average(evaluations, "next_best_evidence_usefulness"),
     }
 
     def percent(value: float | None) -> str:

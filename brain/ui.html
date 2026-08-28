@@ -297,7 +297,7 @@
           </article>
           <article class="card one-third">
             <span class="eyebrow">Your role</span><div class="metric">Courier</div>
-            <p class="help">The default starts from the current pinned Brain snapshot. Give this package to the AI and return only when it emits a CONTEXT_REQUEST for repository evidence.</p>
+            <p class="help">The default starts from the current pinned Atlas generation. Give this package to the AI and return only when it emits an INVESTIGATION_REQUEST for repository evidence.</p>
             <ol class="help" style="padding-left:18px;line-height:2"><li>Give the package to AI</li><li>Answer AI questions directly</li><li>Bring back tool requests only</li></ol>
           </article>
           <article class="card wide">
@@ -317,7 +317,7 @@
               <div class="grow"><label for="request-ticket">Investigation</label><select id="request-ticket"><option value="">Select a ticket</option></select></div>
               <div><label for="request-target">Delivery</label><select id="request-target"><option value="claude">Clipboard chat</option><option value="m365">M365</option></select></div>
             </div>
-            <div class="field"><label for="request-text">AI response</label><textarea class="tall" id="request-text" placeholder="Paste everything the AI returned, including the CONTEXT_REQUEST block…"></textarea></div>
+            <div class="field"><label for="request-text">AI response</label><textarea class="tall" id="request-text" placeholder="Paste everything the AI returned, including the INVESTIGATION_REQUEST block…"></textarea></div>
             <div class="row">
               <label class="check grow"><input type="checkbox" id="request-diff"> Include tracked working-tree diffs</label>
               <button class="button" id="preview-request">Classify reply</button>
@@ -337,7 +337,7 @@
             <div class="deliverybar" data-deliverybar><button class="button ghost" data-prev>Previous part</button><span data-part>0 / 0</span><button class="button ghost" data-next>Next part</button></div>
           </article>
           <article class="card wide">
-            <h2>Retrieval transparency</h2><p class="help">Requested and effective edition, local model participation, candidate counts, pinned generation, and safe timings for the latest request.</p><div class="plan" id="retrieval-status"><div class="empty">Run a CONTEXT_REQUEST to inspect retrieval state.</div></div>
+            <h2>Retrieval transparency</h2><p class="help">Atlas routing, Investigation Memory, Coverage Map, local model participation, pinned generation, and safe timings for the latest request.</p><div class="plan" id="retrieval-status"><div class="empty">Run an INVESTIGATION_REQUEST to inspect retrieval state.</div></div>
           </article>
         </div>
       </section>
@@ -400,7 +400,7 @@
             <h2>Diagnostics</h2><p class="help" id="doctor-summary">Run a safe local diagnostics summary.</p><button class="button" id="run-doctor">Run doctor</button>
           </article>
           <article class="card wide">
-            <h2>Explain retrieval</h2><p class="help">Use the current valid CONTEXT_REQUEST to show the shared planner's operations, widening order, protected evidence, and stop condition. This is for debugging; it does not run retrieval.</p><button class="button" id="explain-request">Explain current request</button><pre class="output" id="explain-output">Classify a CONTEXT_REQUEST first.</pre>
+            <h2>Explain retrieval</h2><p class="help">Use the current valid investigation request to show the shared planner's operations, widening order, protected evidence, and stop condition. This is for debugging; it does not run retrieval.</p><button class="button" id="explain-request">Explain current request</button><pre class="output" id="explain-output">Classify an INVESTIGATION_REQUEST first.</pre>
           </article>
           <article class="card wide">
             <h2>Evaluation</h2><p class="help">Configured/local golden evaluation remains CLI-only so the UI does not add file-picker or private-data transport paths. Use <code>brain evaluate</code> for configured public or private-local evaluation; Project Brain never uploads evaluation data.</p>
@@ -902,7 +902,7 @@
       } catch (error) { report(error); } finally { busy(button, false); }
     });
     document.getElementById("explain-request").addEventListener("click", function () {
-      if (!state.preview || !state.preview.planner) return showToast("Classify a valid CONTEXT_REQUEST first");
+      if (!state.preview || !state.preview.planner) return showToast("Classify a valid investigation request first");
       var explanation = { planner: state.preview.planner, requested_edition: state.status && state.status.brain && state.status.brain.edition, effective_retrieval: state.status && state.status.brain && state.status.brain.effective };
       document.getElementById("explain-output").textContent = JSON.stringify(explanation, null, 2);
     });

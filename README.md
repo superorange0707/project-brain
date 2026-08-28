@@ -32,7 +32,7 @@ local repositories:
 Ticket + docs ↔ Chat AI ↔ you
                  │
                  ├── human/runtime question → answer directly in the chat
-                 ├── CONTEXT_REQUEST → Project Brain → source evidence
+                 ├── INVESTIGATION_REQUEST → Project Brain → source-evidence delta
                  └── enough evidence → FINAL_SOLUTION
 ```
 
@@ -113,7 +113,7 @@ Upgrade an existing installation through the same tap:
 
 ```bash
 brew update
-brew upgrade superorange0707/tap/project-brain
+brew upgrade project-brain
 ```
 
 The Homebrew package uses a prebuilt release: it does not compile Python or
@@ -136,7 +136,7 @@ Download the archive for your CPU from the
 extract it, and place all four executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v0.8.0-macos-arm64.tar.gz
+tar -xzf project-brain-v0.9.0-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp zoekt zoekt-index ~/.local/bin/
 ```
@@ -147,19 +147,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.8.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.0"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.8.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.0"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.8.0/project_brain_context-0.8.0-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v0.9.0/project_brain_context-0.9.0-py3-none-any.whl
 ```
 
 Then verify:
@@ -305,7 +305,7 @@ generated start context into the chat. Route any complete AI reply with:
 brain continue ABC-1234 --clipboard --target claude
 ```
 
-If it contains `CONTEXT_REQUEST`, Brain retrieves and returns evidence. If the AI
+If it contains `INVESTIGATION_REQUEST` (or a legacy `CONTEXT_REQUEST`), Brain retrieves and returns evidence. If the AI
 asked a human question, Brain tells you to answer it directly. If it contains
 `FINAL_SOLUTION`, Brain marks the ticket ready to implement. The strict legacy
 `brain ctx` command remains available for automation.
@@ -323,12 +323,16 @@ field, add the entries from `SUGGESTED_PROMPTS.md`, and add
 `PROJECT_KNOWLEDGE.md` plus approved internal architecture/IPF docs to Knowledge.
 The AI then permanently knows that it should talk to you directly
 for business, document, runtime, and environment facts, and emit a
-`CONTEXT_REQUEST` only for local repository evidence.
+`INVESTIGATION_REQUEST` only for local repository evidence.
 
-After upgrading to v0.8.0, rerun `brain agent-kit m365`, replace Instructions
+After upgrading to v0.9.0, rerun `brain agent-kit m365`, replace Instructions
 and `PROJECT_KNOWLEDGE.md`, and optionally refresh Suggested Prompts. The kit's
-`AGENT_KIT.json` identifies Brain 0.8.0, kit version 2, and protocol v3. Existing
-Agents need not be rebuilt; start a new conversation when validating v3.
+`AGENT_KIT.json` identifies Brain 0.9.0, kit version 3, and protocol v4. Existing
+Agents need not be rebuilt; start a new conversation when validating delta lineage.
+
+```bash
+brain agent-kit m365 --json
+```
 
 Start every M365 ticket with `--target m365`. Upload the newly printed
 round-specific file each time, for example:
@@ -390,34 +394,33 @@ Core has no model requirement; optional audited offline Semantic and Precision
 packs only discover or reorder candidates, while pinned-snapshot verification
 remains the source of evidence.
 
-## A context request
+## An investigation request
 
 ```yaml
-CONTEXT_REQUEST:
-  version: 3
+INVESTIGATION_REQUEST:
+  version: 4
   objective: >
     Determine how jurisdiction changes reach trading eligibility recalculation.
-  hints:
-    literals: [JURISDICTION_CHANGED]
-    symbols: [TradingEligibilityService.recalculate]
+  hypotheses: [The event consumer may bypass recalculation.]
+  required: [main execution flow, tests]
+  resolve: [Which entity consumes JURISDICTION_CHANGED and invokes recalculation?]
+  base_context_id: ctx-copy-from-the-latest-context
 ```
 
-An objective-only v3 request is also valid. Brain extracts bounded high-signal
-terms, performs cheap global discovery, routes expensive work to the top six
-repositories, fuses duplicate/symbol work, and widens to 16/all only when
-required coverage is still missing and budgets allow. v1/v2 explicit-operation
-requests remain supported and receive the same deduplication and budgets.
+An objective-only v4 request is also valid. Brain starts from ticket Investigation
+Memory and similar-ticket priors, routes through generation-pinned Repo, Module,
+and Entity Cards, expands the typed graph, and falls back to targeted lexical/path
+search. It widens from 4/6 to 8/16 and then all repositories only when required
+coverage is missing. v1/v2/v3 CONTEXT_REQUEST remains supported.
 
-The returned context includes
+The first returned context is a full checkpoint. Normal follow-ups are deltas
+identified by stable `context_id` / `base_context_id` lineage. Each response includes
 the objective, exact analyzed commit/ref, freshness warnings, structural and
 framework relationships, ranked source evidence, Git history, and an explicit
-unresolved section. It also reports unique evidence gained, prior retrieval
-objectives, and no-progress turns. An identical plan against the same pinned
-snapshots is rejected instead of wasting another round.
-
-`hints.files` is for paths already verified by prior evidence. If the location
-is unknown, the AI uses a small `hints.paths`, `hints.symbols`, or
-`hints.literals` entry instead of guessing.
+unresolved section. It also reports Coverage Map and Investigation Memory changes,
+stable evidence/candidate IDs, invalidated or superseded evidence, the deterministic
+Next-Best-Evidence choice, and no-progress turns. An identical plan against the
+same pinned generation is rejected instead of wasting another round.
 
 ## What it can explore
 
@@ -452,7 +455,7 @@ is unknown, the AI uses a small `hints.paths`, `hints.symbols`, or
                      │ Claude / ChatGPT /  │
                      │ M365 Copilot        │
                      └──────────┬──────────┘
-                                │ CONTEXT_REQUEST
+                                │ INVESTIGATION_REQUEST v4
                                 ▼
 ┌──────────────┐      ┌─────────────────────┐      ┌─────────────────┐
 │ Project map  │─────▶│    Project Brain    │◀─────│ Git repositories│
@@ -464,13 +467,20 @@ is unknown, the AI uses a small `hints.paths`, `hints.symbols`, or
                            verified evidence
 ```
 
-Project Brain uses a local SQLite trigram generation for fixed-string and path
-candidates, and `codebase-memory-mcp` for tree-sitter/Hybrid-LSP structural
-queries in bundled releases. Cross-repository framework wiring remains
-deterministic. If an index or structural backend is absent, stale, or fails,
-`rg` or the standard-library scanner remains available. Every heuristic is
-labelled; this is useful static evidence, not a claim to compiler-perfect
-runtime behavior.
+Project Brain v0.9 publishes one immutable Atlas generation in `catalog.sqlite3`.
+Each generation binds repository snapshots to module/file/entity hierarchy,
+provenance-backed typed relationships, change intelligence, semantic cards,
+lexical membership, optional vector shards, and legacy structural components.
+Ticket sessions pin that identity and remain the sole Investigation Memory and
+Coverage Map authority. Generation-scoped caches contain routing IDs only; exact
+pinned source hydration is always required before a candidate becomes evidence.
+
+The retrieval cascade uses similar-investigation priors, Repo/Module/Entity Cards,
+typed-graph expansion, targeted lexical/path/semantic fallback, a small optional
+rerank, and exact verification. If an optional backend is absent, stale, or fails,
+Core retrieval remains available with the degradation recorded in the generation
+and trace. Every heuristic is labelled; this is useful static routing intelligence,
+not a claim to compiler-perfect runtime behavior.
 
 ## Commands
 
@@ -488,7 +498,7 @@ brain index status      Show atomic generation and index freshness
 brain index rebuild     Rebuild lexical, semantic, or all local indexes
 brain search --explain  Search and show the deterministic query plan
 brain paths --explain   Find verified paths and show the backend plan
-brain explain           Compile a CONTEXT_REQUEST without searching
+brain explain           Compile an investigation/context request without searching
 brain symbol            Resolve symbol definitions with lexical fallback
 brain trace             Find static callers and likely outbound calls
 brain history           Search Git history
@@ -503,7 +513,7 @@ brain map               Generate Spring/Maven/project facts
 brain start             Start a ticket investigation
 brain continue          Route a complete AI reply and run only tool requests
 brain preview           Classify an AI reply and dry-run repository requests
-brain ctx               Fulfil a CONTEXT_REQUEST
+brain ctx               Fulfil an investigation/context request
 brain agent-kit m365    Generate permanent M365 Agent setup files
 brain evidence          Add an explicit document, log, note, or runtime artifact
 brain feedback          Package diffs and observed test output for AI review

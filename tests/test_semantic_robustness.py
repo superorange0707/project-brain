@@ -25,8 +25,10 @@ from brain.semantic import (
     _bounded_embedding_batches,
     _bounded_semantic_card,
     _cache_vectors,
+    _query_vector,
     build_semantic_index,
     chunk_source,
+    search_semantic,
 )
 
 
@@ -130,6 +132,25 @@ class SemanticRobustnessTest(unittest.TestCase):
             ["instruction: card with \"quotes\" and \\ escapes\n<eos>你好"],
             json.loads((request.data or b"").decode("utf-8"))["input"],
         )
+
+    def test_cached_query_vector_skips_runtime_and_model_lane_startup(self) -> None:
+        build_semantic_index(self.settings, embed=self._vectors, pack_id="query-cache-pack")
+        state = json.loads((self.settings.state_dir / "semantic-index.json").read_text(encoding="utf-8"))
+        dimension = int(state["dimension"])
+        _query_vector(
+            self.settings, "cached semantic query", pack_id="query-cache-pack", dimension=dimension,
+            embed=self._vectors,
+        )
+        manifest = {"pack_id": "query-cache-pack", "query_instruction": ""}
+        with (
+            mock.patch("brain.semantic.active_pack", return_value=manifest),
+            mock.patch("brain.semantic.runtime_for_pack") as runtime,
+            mock.patch("brain.semantic.model_lane") as lane,
+        ):
+            results = search_semantic(self.settings, "cached semantic query")
+        self.assertTrue(results)
+        runtime.assert_not_called()
+        lane.assert_not_called()
 
     def test_transport_disconnect_restarts_then_adaptively_splits_16_to_single_cards(self) -> None:
         calls: list[int] = []
@@ -261,7 +282,7 @@ class SemanticRobustnessTest(unittest.TestCase):
             "phase", "phase_label", "elapsed_ms", "semantic_repository_current", "semantic_repository_total",
             "semantic_cards_discovered", "semantic_cards_total", "cached_embeddings_reused", "new_embeddings_completed",
             "remaining_embeddings", "embedding_batch_size", "embedding_batches_completed", "semantic_shards_completed",
-            "semantic_shards_total", "generation_state",
+            "semantic_shards_total", "semantic_shards_reused", "semantic_shards_rebuilt", "generation_state",
         }
         self.assertTrue(all(set(event) <= safe_keys for event in events))
         self.assertNotIn("private_progress_fixture", json.dumps(events))
@@ -331,7 +352,8 @@ class SemanticRobustnessTest(unittest.TestCase):
         self.assertEqual(published, state_path.read_bytes())
         self.assertTrue(all(path.is_file() for path in published_paths))
         staged = set((self.settings.state_dir / "semantic-shards").glob("*.usearch")) - published_paths
-        self.assertTrue(staged)
+        self.assertTrue(all(path.is_file() for path in staged))
+        self.assertFalse(list((self.settings.state_dir / "semantic-shards").glob("*.building")))
 
     @unittest.skipUnless(importlib.util.find_spec("usearch"), "requires optional semantic extra")
     def test_cli_semantic_rebuild_recovers_from_real_http_disconnects(self) -> None:
