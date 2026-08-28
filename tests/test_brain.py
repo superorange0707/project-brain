@@ -68,7 +68,7 @@ from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
 from brain.models import EMBEDDING_BATCH_PARITY_TOLERANCE, RERANKER_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
 from brain.models import _open_model_download, autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, managed_runtime_loopback_status, model_download_ssl_context, runtime_for_pack, validate_manifest, verify_pack
-from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, Chunk, SEMANTIC_CARD_CODE_CHARS, _bounded_embedding_batches, _excluded, build_semantic_index, chunk_source, search_semantic
+from brain.semantic import ATLAS_CARD_VERSION, CARD_VERSION, CHUNK_SCHEMA_VERSION, Chunk, SEMANTIC_CARD_CODE_CHARS, SEMANTIC_EMBEDDING_INPUT_VERSION, _bounded_embedding_batches, _excluded, build_semantic_index, chunk_source, search_semantic
 from brain.ops import gc
 from brain.evaluation import evaluate_golden
 from brain.retrieval import compile_request, explain_plan
@@ -1440,22 +1440,30 @@ else:
                 return value
 
         shards = []
+        shard_root = self.settings.state_dir / "semantic-shards"
+        shard_root.mkdir(parents=True, exist_ok=True)
         for index, repo in enumerate(self.settings.repositories):
-            path = self.settings.state_dir / f"semantic-{index}.usearch"
+            path = shard_root / f"semantic-{index}.usearch"
             path.touch()
             shards.append({
                 "repo": repo.name,
                 "snapshot": repo.source_sha or "working-tree",
                 "path": str(path),
+                "artifact_ref": path.name,
+                "artifact_bytes": path.stat().st_size,
                 "entries": [{"path": f"src/{index}.py", "line": 1, "chunk_id": f"chunk-{index}"}],
             })
         (self.settings.state_dir / "semantic-index.json").write_text(json.dumps({
             "chunk_schema_version": CHUNK_SCHEMA_VERSION,
             "card_version": CARD_VERSION,
+            "embedding_input_version": SEMANTIC_EMBEDDING_INPUT_VERSION,
+            "atlas_card_version": ATLAS_CARD_VERSION,
             "backend": "usearch",
             "pack_id": "parallel-test",
             "dimension": 2,
             "stale": False,
+            "snapshots": {repo.name: repo.source_sha or "working-tree" for repo in self.settings.repositories},
+            "entries": [],
             "shards": shards,
         }), encoding="utf-8")
         trace = RetrievalTrace()
@@ -1527,7 +1535,10 @@ else:
 
         state = {
             "chunk_schema_version": CHUNK_SCHEMA_VERSION, "card_version": CARD_VERSION,
+            "embedding_input_version": SEMANTIC_EMBEDDING_INPUT_VERSION,
+            "atlas_card_version": ATLAS_CARD_VERSION,
             "backend": "exact-mock", "pack_id": "embedding", "dimension": 2, "stale": False,
+            "snapshots": {repo.name: repo.source_sha or "working-tree" for repo in self.settings.repositories},
             "entries": [{"repo": "trading-service", "snapshot": "working-tree", "path": "README.md", "line": 1, "chunk_id": "one", "vector": [1.0, 0.0]}],
             "shards": [],
         }
@@ -1806,8 +1817,17 @@ else:
         shard.parent.mkdir(parents=True)
         shard.write_bytes(b"not a vector index")
         (self.settings.state_dir / "semantic-index.json").write_text(json.dumps({
+            "chunk_schema_version": CHUNK_SCHEMA_VERSION, "card_version": CARD_VERSION,
+            "embedding_input_version": SEMANTIC_EMBEDDING_INPUT_VERSION,
+            "atlas_card_version": ATLAS_CARD_VERSION,
             "backend": "usearch", "pack_id": "mock", "dimension": 3, "stale": False,
-            "shards": [{"repo": "trading-service", "snapshot": "working-tree", "path": str(shard), "entries": [{"path": "src/main/java/demo/EligibilityEvaluator.java", "line": 2, "chunk_id": "chunk"}]}],
+            "snapshots": {repo.name: repo.source_sha or "working-tree" for repo in self.settings.repositories},
+            "entries": [],
+            "shards": [{
+                "repo": "trading-service", "snapshot": "working-tree", "path": str(shard),
+                "artifact_ref": shard.name, "artifact_bytes": shard.stat().st_size,
+                "entries": [{"path": "src/main/java/demo/EligibilityEvaluator.java", "line": 2, "chunk_id": "chunk"}],
+            }],
         }), encoding="utf-8")
 
         class BrokenIndex:

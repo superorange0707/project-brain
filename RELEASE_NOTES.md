@@ -1,36 +1,29 @@
-# Project Brain v0.9.0 — Workspace Intelligence Atlas
+# Project Brain v0.9.1 — Semantic / Atlas Alignment Hotfix
 
-Project Brain v0.9 evolves the v0.8.0-rc2 retrieval engine into one immutable,
-catalog-authoritative Workspace Intelligence Atlas while preserving exact
-pinned-source evidence, Core fallback, and v1/v2/v3 compatibility.
+Project Brain v0.9.1 is the stable correctness hotfix for Semantic and Precision
+workspaces upgrading to the v0.9 Workspace Intelligence Atlas.
 
-- Immutable Atlas generations now publish multi-snapshot lexical serving,
-  Repo/Module/Entity hierarchy and semantic cards, typed provenance
-  relationships, Change Intelligence, legacy indexes, and component status in
-  one transaction. Tickets pin the resulting identity, and GC follows live pins.
-- Blob-level refresh reuses unchanged entity/region/edge identities and embedding
-  cache entries; generation caches contain routing IDs only and validate every
-  hit against generation membership.
-- Retrieval begins with Investigation Memory and similar-ticket priors, then
-  performs hierarchical Repo → Module → Entity routing, progressive widening,
-  graph expansion, targeted lexical/path/semantic fallback, bounded reranking,
-  deterministic Next-Best-Evidence planning, and exact source hydration.
-- Generation-scoped cross-ticket caches and Ticket Prefetch warm only routing
-  state. Session-authoritative Coverage Maps, stable IDs, CONTEXT/INVESTIGATION
-  protocol v4 full/delta checkpoints, recovery, and M365 Agent Kit v3 reduce
-  repeated rounds without weakening evidence or session isolation.
-- Incremental Atlas refresh reuses unchanged content safely, multi-investigation
-  UI coordination and Auto Refresh When Idle preserve workspace mutation locks,
-  and a filesystem model lane serializes local inference across processes.
-- Local evaluation includes Atlas routing/graph/evidence recall, timing,
-  physical-operation, cache/prefetch, delta, late-candidate, and convergence
-  metrics. Adversarial correctness hardening preserves exact pinned source as
-  final evidence authority and all Core/Semantic/Precision fallbacks.
+- Compatible Semantic state is registered for the current Atlas generation
+  without embedding calls when snapshots, source signature, schemas, pack,
+  dimension, backend, and shard manifest all match.
+- Incompatible v0.8/v0.9 state is rebuilt through the existing managed Semantic
+  pipeline while preserving model packs, old generations, and compatible
+  source-card embedding cache entries.
+- Repo/Module/Entity Atlas cards now use the bounded Semantic input contract, so
+  an oversized hierarchical card is truncated safely instead of aborting the
+  Semantic build.
+- Semantic component publication validates immutable artifact identity, shard
+  references and sizes, component metadata, and content hash before reporting
+  `aligned=true`.
+- Precision refresh reports ready only after authoritative Atlas component
+  registration. A Semantic failure may publish explicit Core fallback, but is
+  never presented as Precision-ready.
+- Ticket generation pins and reachability GC continue to preserve old Semantic
+  components until no live session can reach them.
 
-Field performance will continue to be measured on large enterprise workspaces.
-The remaining identified opportunities concern performance and serving
-optimization, not known release-blocking correctness defects. This release does
-not publish model packs or begin v1.0 work.
+After upgrading, run `brain refresh`. No Semantic reset, model reinstall,
+embedding-cache deletion, Atlas deletion, or ticket-session migration is
+required. This release does not publish model packs or begin v1.0 work.
 
 ---
 

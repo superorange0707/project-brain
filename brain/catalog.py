@@ -496,7 +496,11 @@ def collect_generation_components(
 ) -> dict[str, dict[str, Any]]:
     """Verify current projections and turn them into one generation component manifest."""
     from .index import SCHEMA_VERSION as LEXICAL_SCHEMA_VERSION, lexical_component
-    from .semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, SEMANTIC_EMBEDDING_INPUT_VERSION
+    from .semantic import (
+        semantic_schema_version,
+        semantic_snapshots,
+        semantic_state_compatibility,
+    )
 
     snapshots = {
         name: str(raw.get("sha") or "working-tree")
@@ -567,21 +571,13 @@ def collect_generation_components(
 
     semantic_path = settings.state_dir / "semantic-index.json"
     semantic = _load_json(semantic_path)
-    semantic_sources = {
-        str(name): str(sha)
-        for name, sha in (semantic.get("snapshots") or {}).items()
-    }
-    if not semantic_sources:
-        for item in [*(semantic.get("shards") or []), *(semantic.get("entries") or [])]:
-            if isinstance(item, dict) and item.get("repo") and item.get("snapshot"):
-                semantic_sources[str(item["repo"])] = str(item["snapshot"])
-    semantic_ready = bool(semantic) and not semantic_failed and not semantic.get("stale") and semantic_sources == snapshots and (
-        semantic.get("chunk_schema_version") == CHUNK_SCHEMA_VERSION
-        and semantic.get("card_version") == CARD_VERSION
-        and semantic.get("embedding_input_version") == SEMANTIC_EMBEDDING_INPUT_VERSION
-    )
+    semantic_sources = semantic_snapshots(semantic)
+    semantic_ready, semantic_reason = semantic_state_compatibility(settings, semantic, snapshots)
+    if semantic_failed:
+        semantic_ready = False
+        semantic_reason = "Semantic construction failed for this Atlas generation."
     components["semantic"] = {
-        "schema_version": f"{CHUNK_SCHEMA_VERSION}:{CARD_VERSION}:{SEMANTIC_EMBEDDING_INPUT_VERSION}",
+        "schema_version": semantic_schema_version(),
         "status": "ready" if semantic_ready else "unavailable",
         "content_hash": _content_hash(semantic) if semantic_ready else None,
         "details": {
@@ -589,6 +585,8 @@ def collect_generation_components(
             "dimension": semantic.get("dimension"),
             "backend": semantic.get("backend"),
             "snapshots": semantic_sources,
+            "source_signature": source_signature(semantic_sources) if semantic_sources else None,
+            "reason": semantic_reason,
         },
         **({"_artifact_source": str(semantic_path)} if semantic_ready else {}),
     }

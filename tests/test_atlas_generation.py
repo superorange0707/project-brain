@@ -187,6 +187,13 @@ class AtlasGenerationTests(unittest.TestCase):
         self.assertEqual(generation_one.generation, session_state(self.settings, "TICKET-A")["generation"])
         self.assertEqual(generation_four.generation, current_generation_ref(self.settings).generation)
 
+        (self.settings.runs_dir / "TICKET-A" / "session.json").unlink()
+        unpinned = gc(self.settings, dry_run=True, keep_recent=1)
+        self.assertIn(
+            str(self.settings.state_dir / "generations" / f"generation-{generation_one.generation:06d}"),
+            [item["path"] for item in unpinned["remove"]],
+        )
+
     def test_pinned_commit_without_exported_snapshot_hydrates_from_immutable_lexical_membership(self) -> None:
         source = self.repository / "service.py"
         source.write_text("VALUE = 'G1_ONLY'\n", encoding="utf-8")

@@ -27,10 +27,35 @@ def capabilities(settings: Settings) -> dict[str, Any]:
         }
         for pack in packs
     ]
+    from .catalog import current_generation_ref
+    from .semantic import semantic_state_compatibility
+
+    atlas = current_generation_ref(settings)
+    component = atlas.component("semantic") if atlas is not None else {}
+    semantic_path = settings.state_dir / "semantic-index.json"
+    component_ready = atlas is not None and component.get("status") == "ready" and component.get("artifact_ref")
+    if component_ready:
+        candidate = (settings.state_dir / str(component["artifact_ref"])).resolve()
+        if candidate.is_relative_to(settings.state_dir.resolve()):
+            semantic_path = candidate
+        else:
+            semantic_path = settings.state_dir / ".invalid-semantic-artifact"
     try:
-        semantic_state = json.loads((settings.state_dir / "semantic-index.json").read_text(encoding="utf-8"))
+        semantic_state = json.loads(semantic_path.read_text(encoding="utf-8"))
+        if not isinstance(semantic_state, dict):
+            semantic_state = {}
     except (OSError, json.JSONDecodeError):
         semantic_state = {}
+    snapshots = atlas.snapshots if atlas is not None else {
+        repo.name: repo.source_sha or "working-tree" for repo in settings.repositories
+    }
+    semantic_aligned, _ = semantic_state_compatibility(
+        settings,
+        semantic_state,
+        snapshots,
+        component=component if component_ready else None,
+    )
+    semantic_aligned = semantic_aligned and (atlas is None or bool(component_ready))
     try:
         from .semantic import _usearch
 
@@ -55,6 +80,7 @@ def capabilities(settings: Settings) -> dict[str, Any]:
         "reranker": reranker,
         "semantic_chunks": semantic_chunks,
         "semantic_stale": bool(semantic_state.get("stale")),
+        "semantic_aligned": semantic_aligned,
         "semantic_backend": semantic_state.get("backend"),
         "zoekt": {"available": zoekt.available, "reason": zoekt.reason},
         "installed_packs": pack_reports,

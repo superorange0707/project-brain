@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
 CHUNK_SCHEMA_VERSION = "1"
 CARD_VERSION = "1"
+# Atlas cards have their own input contract so an Atlas-only format change does
+# not invalidate source-card embedding cache entries.
+ATLAS_CARD_VERSION = "1"
 DENY_NAMES = {".env", ".envrc", "id_rsa", "id_ed25519", "keystore", "credentials", "credentials.json", "service-account.json"}
 DENY_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks"}
 # Dependency locks are neither authored code nor useful semantic evidence. They
@@ -410,6 +413,133 @@ def _published_state(settings: Settings) -> dict[str, object] | None:
     return state if isinstance(state, dict) else None
 
 
+def semantic_schema_version() -> str:
+    return f"{CHUNK_SCHEMA_VERSION}:{CARD_VERSION}:{SEMANTIC_EMBEDDING_INPUT_VERSION}:{ATLAS_CARD_VERSION}"
+
+
+def semantic_snapshots(state: dict[str, object]) -> dict[str, str]:
+    raw_snapshots = state.get("snapshots")
+    snapshots = {
+        str(name): str(sha)
+        for name, sha in (raw_snapshots.items() if isinstance(raw_snapshots, dict) else [])
+    }
+    if snapshots:
+        return snapshots
+    for item in [*(state.get("shards") or []), *(state.get("entries") or [])]:
+        if isinstance(item, dict) and item.get("repo") and item.get("snapshot"):
+            snapshots[str(item["repo"])] = str(item["snapshot"])
+    return snapshots
+
+
+def semantic_state_compatibility(
+    settings: Settings,
+    state: dict[str, object] | None,
+    snapshots: dict[str, str],
+    *,
+    component: dict[str, object] | None = None,
+    require_active_pack: bool = True,
+) -> tuple[bool, str | None]:
+    """Validate one published Semantic artifact against its Atlas contract."""
+    if not state:
+        return False, "Semantic generation has not been built."
+    if state.get("stale"):
+        return False, str(state.get("stale_reason") or "Semantic generation is stale.")
+    if (
+        state.get("chunk_schema_version") != CHUNK_SCHEMA_VERSION
+        or state.get("card_version") != CARD_VERSION
+        or state.get("embedding_input_version") != SEMANTIC_EMBEDDING_INPUT_VERSION
+        or state.get("atlas_card_version") != ATLAS_CARD_VERSION
+    ):
+        return False, "Semantic generation schema is incompatible."
+    if semantic_snapshots(state) != snapshots:
+        return False, "Semantic generation does not match current snapshots."
+
+    backend = str(state.get("backend") or "")
+    pack_id = str(state.get("pack_id") or "")
+    try:
+        dimension = int(state.get("dimension") or 0)
+    except (TypeError, ValueError):
+        dimension = 0
+    if backend not in {"usearch", "exact-mock"} or not pack_id or dimension <= 0:
+        return False, "Semantic generation metadata is invalid."
+    if backend == "usearch" and require_active_pack:
+        manifest = active_pack(settings, "embedding")
+        if manifest is None or str(manifest.get("pack_id") or "") != pack_id:
+            return False, "Semantic embedding pack does not match the active verified pack."
+        try:
+            active_dimension = int(manifest.get("embedding_dimension") or 0)
+        except (TypeError, ValueError):
+            active_dimension = 0
+        if active_dimension != dimension:
+            return False, "Semantic vector dimension does not match the active embedding pack."
+
+    entries = state.get("entries")
+    shards = state.get("shards")
+    if not isinstance(entries, list) or not isinstance(shards, list):
+        return False, "Semantic shard manifest is invalid."
+    required_entry_fields = {"repo", "snapshot", "path", "chunk_id"}
+    if backend == "exact-mock":
+        for entry in entries:
+            if not isinstance(entry, dict) or not required_entry_fields.issubset(entry):
+                return False, "Semantic shard manifest is invalid."
+            if snapshots.get(str(entry.get("repo"))) != str(entry.get("snapshot") or ""):
+                return False, "Semantic shard manifest is invalid."
+            vector = entry.get("vector")
+            if not isinstance(vector, list) or len(vector) != dimension:
+                return False, "Semantic vector dimension is invalid."
+    else:
+        seen: set[tuple[str, str]] = set()
+        shard_root = _shard_root(settings).resolve()
+        for shard in shards:
+            if not isinstance(shard, dict) or not isinstance(shard.get("entries"), list):
+                return False, "Semantic shard manifest is invalid."
+            repo = str(shard.get("repo") or "")
+            snapshot = str(shard.get("snapshot") or "")
+            key = (repo, snapshot)
+            if not repo or snapshots.get(repo) != snapshot or key in seen:
+                return False, "Semantic shard manifest is invalid."
+            seen.add(key)
+            path = Path(str(shard.get("path") or "")).resolve()
+            if not path.is_relative_to(shard_root):
+                return False, "Semantic shard manifest is invalid."
+            try:
+                artifact_bytes = path.stat().st_size
+                raw_artifact_bytes = shard.get("artifact_bytes")
+                projected_bytes = int(raw_artifact_bytes) if raw_artifact_bytes is not None else -1
+            except (OSError, TypeError, ValueError):
+                return False, "Semantic shard artifact is missing."
+            if not path.is_file():
+                return False, "Semantic shard artifact is missing."
+            if shard.get("artifact_ref") != path.name or projected_bytes != artifact_bytes:
+                return False, "Semantic shard manifest is invalid."
+            for entry in shard["entries"]:
+                if not isinstance(entry, dict) or not {"path", "chunk_id"}.issubset(entry):
+                    return False, "Semantic shard manifest is invalid."
+
+    if component is not None:
+        details = component.get("details") if isinstance(component.get("details"), dict) else {}
+        try:
+            projected_dimension = int(details.get("dimension") or 0)
+        except (TypeError, ValueError):
+            projected_dimension = 0
+        if (
+            component.get("status") != "ready"
+            or component.get("schema_version") != semantic_schema_version()
+            or str(details.get("pack_id") or "") != pack_id
+            or projected_dimension != dimension
+            or str(details.get("backend") or "") != backend
+            or details.get("snapshots") != snapshots
+        ):
+            return False, "Semantic Atlas component metadata is incompatible."
+        from .catalog import _content_hash, source_signature
+
+        if details.get("source_signature") != source_signature(snapshots):
+            return False, "Semantic Atlas component source signature is incompatible."
+        if component.get("content_hash") != _content_hash(state):
+            return False, "Semantic Atlas component content hash is invalid."
+    return True, None
+
+
 def _state_is_reusable(
     state: dict[str, object] | None,
     groups: list[tuple[Repository, str, list[Chunk]]],
@@ -420,11 +550,16 @@ def _state_is_reusable(
 ) -> bool:
     if not _state_is_compatible(state, backend=backend, pack_id=pack_id, dimension=dimension):
         return False
+    if semantic_snapshots(state or {}) != {repo.name: snapshot for repo, snapshot, _ in groups}:
+        return False
     expected = {(repo.name, snapshot): _entries(chunks) for repo, snapshot, chunks in groups if chunks}
     if backend == "exact-mock":
         actual: dict[tuple[str, str], list[dict[str, object]]] = {}
         for item in state.get("entries") or []:
             if not isinstance(item, dict):
+                return False
+            vector = item.get("vector")
+            if not isinstance(vector, list) or len(vector) != dimension:
                 return False
             repo, snapshot = str(item.get("repo") or ""), str(item.get("snapshot") or "")
             entry = {key: item.get(key) for key in ("path", "line", "end_line", "chunk_id", "kind", "symbol", "target_id")}
@@ -432,7 +567,15 @@ def _state_is_reusable(
         return actual == expected
     actual = {}
     for shard in state.get("shards") or []:
-        if not isinstance(shard, dict) or not Path(str(shard.get("path") or "")).is_file():
+        if not isinstance(shard, dict):
+            return False
+        path = Path(str(shard.get("path") or ""))
+        try:
+            artifact_bytes = int(shard.get("artifact_bytes"))
+            actual_bytes = path.stat().st_size
+        except (OSError, TypeError, ValueError):
+            return False
+        if not path.is_file() or shard.get("artifact_ref") != path.name or artifact_bytes != actual_bytes:
             return False
         actual[(str(shard.get("repo") or ""), str(shard.get("snapshot") or ""))] = shard.get("entries")
     return actual == expected
@@ -451,9 +594,14 @@ def _state_is_compatible(
         or state.get("chunk_schema_version") != CHUNK_SCHEMA_VERSION
         or state.get("card_version") != CARD_VERSION
         or state.get("embedding_input_version") != SEMANTIC_EMBEDDING_INPUT_VERSION
+        or state.get("atlas_card_version") != ATLAS_CARD_VERSION
     ):
         return False
-    if state.get("backend") != backend or state.get("pack_id") != pack_id or int(state.get("dimension") or 0) != dimension:
+    try:
+        state_dimension = int(state.get("dimension") or 0)
+    except (TypeError, ValueError):
+        return False
+    if state.get("backend") != backend or state.get("pack_id") != pack_id or state_dimension != dimension:
         return False
     return True
 
@@ -576,10 +724,21 @@ def build_semantic_index(
                 metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
                 line_start = max(1, int(metadata.get("line_start") or 1))
                 line_end = max(line_start, int(metadata.get("line_end") or line_start))
+                target_id = str(card.get("target_id") or level)
+                semantic_card = "\n".join([
+                    f"Repository: {repo.name}",
+                    f"Path: {str(card.get('path') or '')}",
+                    "Language: Text",
+                    f"Kind: atlas_{level}_card",
+                    f"Symbol: {target_id}",
+                    "Identifiers: atlas",
+                    "Code:",
+                    content,
+                ])
                 chunks.append(Chunk(
                     chunk_id, str(card.get("content_hash") or chunk_id), str(card.get("path") or ""), line_start, line_end,
-                    f"atlas_{level}_card", str(card.get("target_id") or level), content,
-                    str(card.get("target_id") or "") or None,
+                    f"atlas_{level}_card", target_id, semantic_card,
+                    target_id or None,
                 ))
             groups.append((repo, repo.source_sha or "working-tree", chunks))
             card_total += len(chunks)
@@ -592,7 +751,10 @@ def build_semantic_index(
         emit("semantic_manifest", semantic_cards_total=card_total)
         published = _published_state(settings)
         if not dimension and published and published.get("pack_id") == pack_id:
-            dimension = int(published.get("dimension") or 0)
+            try:
+                dimension = int(published.get("dimension") or 0)
+            except (TypeError, ValueError):
+                dimension = 0
         if dimension and _state_is_reusable(
             published, groups, backend=backend_name, pack_id=pack_id, dimension=dimension,
         ):
@@ -708,7 +870,14 @@ def build_semantic_index(
                 temporary = shard.with_suffix(".building")
                 index.save(str(temporary))
                 temporary.replace(shard)
-                state_shards.append({"repo": repo.name, "snapshot": snapshot, "path": str(shard), "entries": entries})
+                state_shards.append({
+                    "repo": repo.name,
+                    "snapshot": snapshot,
+                    "path": str(shard),
+                    "artifact_ref": shard.name,
+                    "artifact_bytes": shard.stat().st_size,
+                    "entries": entries,
+                })
             completed_shards += 1
             rebuilt_shards += 1
             emit(
@@ -729,6 +898,7 @@ def build_semantic_index(
             "pack_id": pack_id,
             "dimension": dimension,
             "embedding_input_version": SEMANTIC_EMBEDDING_INPUT_VERSION,
+            "atlas_card_version": ATLAS_CARD_VERSION,
             "stale": False,
             "snapshots": {repo.name: snapshot for repo, snapshot, _ in groups},
             "shards": state_shards,
@@ -782,11 +952,21 @@ def _query_vector(settings: Settings, query: str, *, pack_id: str, dimension: in
     return [float(number) for number in vector]
 
 
-def _serving_state(settings: Settings, generation: Any | None) -> dict[str, object] | None:
+def _serving_state(
+    settings: Settings,
+    generation: Any | None,
+    *,
+    require_active_pack: bool = True,
+) -> dict[str, object] | None:
     if generation is None:
         if getattr(settings, "atlas_generation_mode", "current") == "legacy_source_pin":
             return None
-        return _published_state(settings)
+        value = _published_state(settings)
+        snapshots = {repo.name: repo.source_sha or "working-tree" for repo in settings.repositories}
+        valid, _ = semantic_state_compatibility(
+            settings, value, snapshots, require_active_pack=require_active_pack,
+        )
+        return value if valid else None
     component = generation.component("semantic")
     if component.get("status") != "ready" or not component.get("artifact_ref"):
         return None
@@ -797,12 +977,14 @@ def _serving_state(settings: Settings, generation: Any | None) -> dict[str, obje
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             return None
-        snapshots = {str(name): str(sha) for name, sha in (value.get("snapshots") or {}).items()}
-        if not snapshots:
-            for item in [*(value.get("shards") or []), *(value.get("entries") or [])]:
-                if isinstance(item, dict) and item.get("repo") and item.get("snapshot"):
-                    snapshots[str(item["repo"])] = str(item["snapshot"])
-        return value if snapshots == generation.snapshots else None
+        valid, _ = semantic_state_compatibility(
+            settings,
+            value,
+            generation.snapshots,
+            component=component,
+            require_active_pack=require_active_pack,
+        )
+        return value if valid else None
     except (OSError, json.JSONDecodeError):
         return None
 
@@ -817,7 +999,7 @@ def search_semantic(
     trace: Any | None = None,
     generation: Any | None = None,
 ) -> list[dict[str, object]]:
-    state = _serving_state(settings, generation)
+    state = _serving_state(settings, generation, require_active_pack=embed is None)
     if not state:
         return []
     if state.get("stale") or state.get("chunk_schema_version") != CHUNK_SCHEMA_VERSION or state.get("card_version") != CARD_VERSION:

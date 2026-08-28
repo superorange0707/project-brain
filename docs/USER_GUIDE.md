@@ -46,7 +46,7 @@ same directory on `PATH`.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.0"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.1"
 ```
 
 Upgrade later with:
@@ -58,7 +58,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.0"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.1"
 ```
 
 ### From a source checkout
@@ -688,7 +688,7 @@ The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
 sent into Brain, while `ABC-1234-context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
-After upgrading to v0.9.0, rerun `brain agent-kit m365`, replace Agent Builder
+After upgrading to v0.9.1, rerun `brain agent-kit m365`, replace Agent Builder
 Instructions and `PROJECT_KNOWLEDGE.md`, and optionally refresh Suggested
 Prompts. `AGENT_KIT.json` records the Brain, kit, and protocol versions.
 Existing Agents need not be rebuilt; use a new conversation to validate v4 delta lineage.

@@ -152,60 +152,49 @@ def format_refresh_progress(event: dict[str, Any]) -> str:
 
 def semantic_status(settings: Settings) -> dict[str, Any]:
     """Return safe, snapshot-aware semantic readiness without loading a model."""
-    from .semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, SEMANTIC_EMBEDDING_INPUT_VERSION
+    from .semantic import semantic_snapshots, semantic_state_compatibility
 
     atlas = current_generation_ref(settings)
     component = atlas.component("semantic") if atlas is not None else {}
-    if atlas is not None and component.get("status") != "ready":
-        state = {}
-    else:
-        path = (
-            settings.state_dir / str(component["artifact_ref"])
-            if component.get("artifact_ref")
-            else settings.state_dir / "semantic-index.json"
-        )
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+    path = settings.state_dir / "semantic-index.json"
+    component_ready = atlas is not None and component.get("status") == "ready" and component.get("artifact_ref")
+    if component_ready:
+        candidate = (settings.state_dir / str(component["artifact_ref"])).resolve()
+        path = candidate if candidate.is_relative_to(settings.state_dir.resolve()) else settings.state_dir / ".invalid-semantic-artifact"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
             state = {}
-    expected = {repo.name: repo.source_sha or "working-tree" for repo in settings.repositories}
-    actual: dict[str, str] = {}
-    for shard in state.get("shards") or []:
-        if isinstance(shard, dict):
-            actual[str(shard.get("repo") or "")] = str(shard.get("snapshot") or "")
-    for entry in state.get("entries") or []:
-        if isinstance(entry, dict):
-            actual[str(entry.get("repo") or "")] = str(entry.get("snapshot") or "")
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    expected = atlas.snapshots if atlas is not None else {
+        repo.name: repo.source_sha or "working-tree" for repo in settings.repositories
+    }
+    valid, reason = semantic_state_compatibility(
+        settings,
+        state,
+        expected,
+        component=component if component_ready else None,
+    )
+    aligned = valid and (atlas is None or bool(component_ready))
+    if atlas is not None and not component_ready:
+        details = component.get("details") if isinstance(component.get("details"), dict) else {}
+        reason = str(details.get("reason") or "Semantic is unavailable for the current Atlas generation.")
+    elif atlas is not None and not aligned and not reason:
+        reason = "Semantic is unavailable for the current Atlas generation."
     chunks = len(state.get("entries") or []) + sum(
         len(item.get("entries") or []) for item in state.get("shards") or [] if isinstance(item, dict)
     )
-    valid_schema = bool(state) and (
-        state.get("chunk_schema_version") == CHUNK_SCHEMA_VERSION
-        and state.get("card_version") == CARD_VERSION
-        and state.get("embedding_input_version") == SEMANTIC_EMBEDDING_INPUT_VERSION
-    )
-    missing = sorted(name for name, snapshot in expected.items() if actual.get(name) != snapshot)
-    stale = bool(state.get("stale"))
-    aligned = valid_schema and not stale and not missing
-    if not state:
-        reason = "Semantic generation has not been built."
-    elif stale:
-        reason = str(state.get("stale_reason") or "Semantic generation is stale.")
-    elif not valid_schema:
-        reason = "Semantic generation schema is incompatible."
-    elif missing:
-        reason = "Semantic generation does not match current snapshots."
-    else:
-        reason = None
     return {
         "available": bool(state),
         "chunks": chunks,
-        "stale": stale,
+        "stale": bool(state.get("stale")),
         "aligned": aligned,
         "generation": str(state.get("generation") or "unknown")[:12] if state else None,
         "backend": state.get("backend"),
         "pack_id": state.get("pack_id"),
-        "reason": reason if atlas is None or component.get("status") == "ready" else "Semantic is unavailable for the current Atlas generation.",
+        "snapshots": semantic_snapshots(state) if state else {},
+        "reason": reason,
     }
 
 
@@ -283,13 +272,12 @@ def refresh_brain(
                 built = build_semantic_index(settings, progress=semantic_progress) if progress is not None else build_semantic_index(settings)
             finally:
                 settings.atlas_cards = None
-            semantic = {**semantic_status(settings), "required": True, "status": "ready", "build": built}
+            semantic = {"required": True, "status": "ready", "build": built}
         except (OSError, RuntimeError, ValueError) as error:
             # Do not leak source, endpoint, proxy, or certificate details to an
             # operations UI.  The semantic layer already retains its prior
             # generation atomically when this path fails.
             semantic = {
-                **semantic_status(settings),
                 "required": True,
                 "status": "failed",
                 "error": f"Semantic indexing failed ({type(error).__name__}).",
@@ -321,6 +309,14 @@ def refresh_brain(
         # Mandatory component failure leaves the previous Atlas pointer intact,
         # but must not be reported to UI/CLI callers as a successful refresh.
         raise
+    published_semantic = semantic_status(settings)
+    semantic = {**semantic, **published_semantic, "atlas_core_published": True}
+    if semantic["status"] == "ready" and not semantic["aligned"]:
+        semantic["status"] = "failed"
+        semantic["error"] = "Semantic publication is not aligned with the current Atlas generation."
+    semantic["precision_ready"] = bool(
+        edition == "precision" and semantic["status"] == "ready" and semantic["aligned"]
+    )
     if semantic["status"] == "failed":
         emit("complete", phase_label="Core refresh complete; Semantic needs attention", semantic_status="failed")
     else:

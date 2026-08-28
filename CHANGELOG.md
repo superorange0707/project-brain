@@ -2,6 +2,19 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [0.9.1] - 2026-08-28
+
+### Fixed
+
+- Register only fully validated Semantic artifacts in the current Atlas
+  generation, including source snapshots, input/card schema, verified embedding
+  pack, vector dimension, shard manifest, and component content identity.
+- Reuse a compatible Semantic generation without re-embedding, or rebuild an
+  incompatible v0.8/v0.9 projection through the managed pipeline while reusing
+  source-card embedding cache entries and retaining old pinned generations.
+- Bound hierarchical Atlas cards with the existing safe Semantic input contract,
+  and report Precision ready only after atomic Atlas component publication.
+
 ## [0.9.0] - 2026-08-28
 
 ### Added
@@ -427,6 +440,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[0.9.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.1
 [0.9.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.0
 [0.8.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.8.0
 [0.6.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.6.0
