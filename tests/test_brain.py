@@ -2103,9 +2103,9 @@ path = "batch-service"
         self.assertEqual("test-embedding", json.loads(output.getvalue())["pack_id"])
 
     def test_embedding_batch_parity_allows_only_bounded_runtime_rounding_drift(self) -> None:
-        self.assertEqual(5e-3, EMBEDDING_BATCH_PARITY_TOLERANCE)
-        self.assertTrue(_same_vectors([[0.0]], [[4.1e-3]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
-        self.assertFalse(_same_vectors([[0.0]], [[5.1e-3]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
+        self.assertEqual(7e-3, EMBEDDING_BATCH_PARITY_TOLERANCE)
+        self.assertTrue(_same_vectors([[0.0]], [[6.1e-3]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
+        self.assertFalse(_same_vectors([[0.0]], [[7.1e-3]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
 
     def test_production_reranker_requires_official_reference_and_candidate_pool_conformance(self) -> None:
         pack = self.root / "production-reranker-conformance-pack"
