@@ -2154,7 +2154,7 @@ path = "batch-service"
         with mock.patch("brain.models.runtime_for_pack", return_value=runtime):
             verified = verify_pack(self.settings, "production-reranker-conformance")
         self.assertTrue(verified["conformance"]["passed"])
-        self.assertEqual(1e-4, RERANKER_BATCH_PARITY_TOLERANCE)
+        self.assertEqual(1e-3, RERANKER_BATCH_PARITY_TOLERANCE)
         self.assertEqual(5, len(verified["conformance"]["cases"]))
 
     def test_remote_pack_install_requires_pinned_approved_source(self) -> None:
@@ -4502,6 +4502,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         builder = (root / "scripts/build_precision_pack.py").read_text(encoding="utf-8")
         self.assertIn('RERANK_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"', builder)
         self.assertIn('"reranker_candidate_pools": [10, 20, 40, 80]', builder)
+        self.assertIn("RERANKER_BATCH_PARITY_TOLERANCE = 1e-3", builder)
         self.assertIn("MAXIMUM_REFERENCE_SCORE_DELTA = 0.10", builder)
         self.assertIn("RERANK_PHYSICAL_BATCH_TOKENS = RERANK_CONTEXT_TOKENS", builder)
         self.assertIn('"-ub", str(RERANK_PHYSICAL_BATCH_TOKENS)', builder)

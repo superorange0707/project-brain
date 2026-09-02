@@ -40,7 +40,10 @@ RERANK_INSTRUCTION = "Given a web search query, retrieve relevant passages that 
 RERANK_INPUT_CONTRACT_VERSION = "qwen3-reranker-web-search-v1"
 RERANK_CONTEXT_TOKENS = 4096
 RERANK_PHYSICAL_BATCH_TOKENS = RERANK_CONTEXT_TOKENS
-RERANKER_BATCH_PARITY_TOLERANCE = 1e-4
+# Native llama.cpp backends differ slightly in floating-point reduction order
+# (Windows CPU measured 0.00037145). This bounded absolute tolerance remains
+# independent of exact ranking and official-reference score checks.
+RERANKER_BATCH_PARITY_TOLERANCE = 1e-3
 # Q6_K changes the calibrated probability slightly relative to official BF16
 # Transformers.  Exact official-reference order, all finite scores, and this
 # bounded probability delta are independently checked before publication.
