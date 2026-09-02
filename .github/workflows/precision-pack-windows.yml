@@ -178,8 +178,8 @@ jobs:
           $global:LASTEXITCODE = 0
           if ($releaseExists -or $tagExists) { throw "release or tag appeared after validation; refusing publication" }
           gh release create $env:RELEASE_TAG --draft --target $env:SOURCE_SHA --title "Project Brain Windows Precision Pack $env:RELEASE_TAG" --notes "Native Windows amd64 Precision pack. Publish only after the workflow's checksum and conformance gates pass."
-          $tagObject = gh api "repos/$env:GH_REPO/git/ref/tags/$env:RELEASE_TAG" | ConvertFrom-Json
-          if ($tagObject.object.type -ne 'commit' -or $tagObject.object.sha -ne $env:SOURCE_SHA) { throw "created pack tag does not reference the reviewed builder commit" }
+          $draft = gh release view $env:RELEASE_TAG --json tagName,targetCommitish,isDraft | ConvertFrom-Json
+          if ($draft.tagName -ne $env:RELEASE_TAG -or $draft.targetCommitish -ne $env:SOURCE_SHA -or -not $draft.isDraft) { throw "created pack draft does not reference the reviewed builder commit" }
           $assets = Get-ChildItem precision-pack-windows-dist -File | ForEach-Object { $_.FullName }
           if (-not $assets) { throw "no verified Precision release assets were downloaded" }
           gh release upload $env:RELEASE_TAG $assets
@@ -195,3 +195,5 @@ jobs:
           $actual = @(Get-ChildItem release-verification -File | Where-Object { $_.Name -ne 'SHA256SUMS-windows-amd64.txt' } | ForEach-Object { $_.Name })
           if (Compare-Object ($listed | Sort-Object) ($actual | Sort-Object)) { throw "draft release asset set differs from SHA256SUMS" }
           gh release edit $env:RELEASE_TAG --draft=false --latest=false
+          $tagObject = gh api "repos/$env:GH_REPO/git/ref/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($tagObject.object.type -ne 'commit' -or $tagObject.object.sha -ne $env:SOURCE_SHA) { throw "created pack tag does not reference the reviewed builder commit" }

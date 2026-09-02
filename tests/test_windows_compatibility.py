@@ -633,10 +633,20 @@ class WindowsCompatibilityTest(unittest.TestCase):
             self.assertIn("immutable pack releases cannot be appended", workflow)
             self.assertIn("git/ref/tags/$env:RELEASE_TAG", workflow)
             self.assertIn("release or tag appeared after validation", workflow)
+            self.assertIn("gh release view $env:RELEASE_TAG --json tagName,targetCommitish,isDraft", workflow)
+            self.assertIn("created pack draft does not reference the reviewed builder commit", workflow)
             self.assertIn("created pack tag does not reference the reviewed builder commit", workflow)
             self.assertIn("gh release create $env:RELEASE_TAG --draft", workflow)
             self.assertIn("gh release download $env:RELEASE_TAG --dir release-verification", workflow)
             self.assertIn("gh release edit $env:RELEASE_TAG --draft=false --latest=false", workflow)
+            self.assertLess(
+                workflow.index("gh release create $env:RELEASE_TAG --draft"),
+                workflow.index("created pack draft does not reference the reviewed builder commit"),
+            )
+            self.assertLess(
+                workflow.index("gh release edit $env:RELEASE_TAG --draft=false --latest=false"),
+                workflow.index("created pack tag does not reference the reviewed builder commit"),
+            )
             self.assertIn("--builder-revision $env:BUILDER_REVISION", workflow)
         self.assertIn("default: false", semantic)
         self.assertIn("default: false", precision)
