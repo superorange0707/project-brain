@@ -2,6 +2,18 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.1] - 2026-09-02
+
+### Fixed
+
+- Preserved exact compatibility with the immutable pre-v1 Darwin Semantic and
+  Precision pack capability arguments while continuing to reject conflicting
+  model runtime overrides.
+- Bounded native embedding batch/single floating-point drift independently of
+  model hashes, dimensions, official-reference cosine, and ranking gates.
+- Initialized the native Windows release fixture with Git long-path support so
+  the packaged executable is exercised through Unicode, spaced, long paths.
+
 ## [1.0.0] - 2026-09-02
 
 ### Added
@@ -493,6 +505,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.1]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.1
 [1.0.0]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.0
 [0.9.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.2
 [0.9.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.1

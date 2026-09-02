@@ -1,4 +1,4 @@
-# Project Brain v1.0.0 — Investigation Runtime
+# Project Brain v1.0.1 — Investigation Runtime
 
 Project Brain v1.0 turns the v0.9 Workspace Intelligence Atlas into a bounded,
 generation-pinned investigation runtime while preserving exact source as the
@@ -34,6 +34,12 @@ editing, target-code execution, or autonomous implementation behavior is added.
 
 This stable release has passed the final supervisory review, adversarial review,
 cross-platform verification, package integrity, and release-readiness gates.
+
+The v1.0.1 release also preserves exact compatibility with the previously
+published Darwin model-pack capability arguments, bounds native batch/single
+floating-point drift without weakening independent reference or ranking gates,
+and verifies the Windows standalone through a Unicode, spaced, long-path Git
+workspace. No Atlas migration or model/cache reset is required.
 
 Native Windows 11 x64 is now a first-class v1 target. The implementation adds
 the permanent Python 3.11–3.14 Windows matrix, native process-tree and
