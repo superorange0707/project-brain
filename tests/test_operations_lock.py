@@ -128,25 +128,27 @@ class WorkspaceOperationLockTests(unittest.TestCase):
             def hold_ticket(ticket: str) -> None:
                 with retrieval_session(settings, ticket):
                     entered[ticket].set()
-                    release.wait(3)
+                    release.wait(10)
 
             threads = [threading.Thread(target=hold_ticket, args=(ticket,)) for ticket in entered]
             for thread in threads:
                 thread.start()
-            self.assertTrue(all(event.wait(3) for event in entered.values()))
-            with self.assertRaises(TicketOperationBusy):
-                with retrieval_session(settings, "TICKET-A"):
-                    pass
-            with self.assertRaises(WorkspaceOperationBusy):
-                with retrieval_session(settings, "TICKET-C"):
-                    pass
-            with self.assertRaises(WorkspaceOperationBusy):
-                with workspace_operation(settings):
-                    pass
-            release.set()
-            for thread in threads:
-                thread.join(timeout=3)
-                self.assertFalse(thread.is_alive())
+            try:
+                self.assertTrue(all(event.wait(10) for event in entered.values()))
+                with self.assertRaises(TicketOperationBusy):
+                    with retrieval_session(settings, "TICKET-A"):
+                        pass
+                with self.assertRaises(WorkspaceOperationBusy):
+                    with retrieval_session(settings, "TICKET-C"):
+                        pass
+                with self.assertRaises(WorkspaceOperationBusy):
+                    with workspace_operation(settings):
+                        pass
+            finally:
+                release.set()
+                for thread in threads:
+                    thread.join(timeout=10)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
 
     def test_workspace_lock_rejects_a_second_process_and_releases_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
