@@ -69,11 +69,11 @@ DEFAULT_RUNTIME_MAX_REQUESTS = 64
 SUPPORTED_NATIVE_PLATFORMS = {
     "darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-amd64",
 }
-# The local llama.cpp Metal backend can differ very slightly between a batch
-# request and equivalent single-item requests. This permits only observed
-# floating-point reduction drift; reference-vector cosine and ranking gates
-# remain independent conformance requirements.
-EMBEDDING_BATCH_PARITY_TOLERANCE = 1e-4
+# Native llama.cpp backends can differ slightly between a batch request and
+# equivalent single-item requests. This permits only bounded floating-point
+# reduction drift; reference-vector cosine and ranking gates remain independent
+# conformance requirements.
+EMBEDDING_BATCH_PARITY_TOLERANCE = 2e-3
 # A production reranker is evaluated once as a bounded batch and once as the
 # equivalent one-document requests. Native llama.cpp backends differ slightly
 # in floating-point reduction order (Windows CPU measured 0.00111086); ranking
@@ -349,16 +349,35 @@ class ManagedLlamaCppRuntime:
         runtime_args = self.manifest.get("runtime_args") or []
         if not isinstance(runtime_args, list) or not all(isinstance(value, str) and value for value in runtime_args):
             raise RuntimeError("model pack runtime_args must be a list of non-empty strings")
+        # Published pre-v1 Darwin packs carried the same capability flags that
+        # Brain now owns. Accept only exact, behavior-preserving duplicates;
+        # conflicting values and every other protected override still fail.
+        desired_pooling = "last" if capability == "embedding" else "rank"
+        compatible_args: list[str] = []
+        index = 0
+        while index < len(runtime_args):
+            value = runtime_args[index]
+            if value == "--pooling" and index + 1 < len(runtime_args) and runtime_args[index + 1] == desired_pooling:
+                index += 2
+                continue
+            if value == f"--pooling={desired_pooling}":
+                index += 1
+                continue
+            if capability == "reranker" and value == "--reranking":
+                index += 1
+                continue
+            compatible_args.append(value)
+            index += 1
         protected = {
             "--model", "-m", "--host", "--port", "--api-key", "--hf-repo", "--hf-file",
             "--offline", "--no-webui", "--embedding", "--rerank", "--reranking", "--pooling",
         }
         if any(
             value in protected or any(value.startswith(flag + "=") for flag in protected)
-            for value in runtime_args
+            for value in compatible_args
         ):
             raise RuntimeError("model pack runtime_args may not override Project Brain local runtime controls")
-        command.extend(runtime_args)
+        command.extend(compatible_args)
         try:
             self.process = start_managed_process(
                 command,

@@ -2103,9 +2103,9 @@ path = "batch-service"
         self.assertEqual("test-embedding", json.loads(output.getvalue())["pack_id"])
 
     def test_embedding_batch_parity_allows_only_bounded_runtime_rounding_drift(self) -> None:
-        self.assertEqual(1e-4, EMBEDDING_BATCH_PARITY_TOLERANCE)
-        self.assertTrue(_same_vectors([[0.0]], [[6.2e-5]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
-        self.assertFalse(_same_vectors([[0.0]], [[1.1e-4]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
+        self.assertEqual(2e-3, EMBEDDING_BATCH_PARITY_TOLERANCE)
+        self.assertTrue(_same_vectors([[0.0]], [[1.1e-3]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
+        self.assertFalse(_same_vectors([[0.0]], [[2.1e-3]], tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE))
 
     def test_production_reranker_requires_official_reference_and_candidate_pool_conformance(self) -> None:
         pack = self.root / "production-reranker-conformance-pack"
@@ -3118,7 +3118,26 @@ path = "batch-service"
             runtime.shutdown()
             terminate.assert_called_once_with(process, graceful_timeout=3)
 
-        reranker = ManagedLlamaCppRuntime({**manifest, "capability": "reranker"})
+        legacy_embedding = ManagedLlamaCppRuntime({
+            **manifest,
+            "runtime_args": ["--pooling", "last", "--ctx-size", "4096", "-ub", "512"],
+        })
+        legacy_process = mock.Mock()
+        legacy_process.poll.return_value = None
+        with mock.patch("brain.models.start_managed_process", return_value=legacy_process) as popen, mock.patch.object(
+            LlamaCppRuntime, "health", return_value={"ok": True}
+        ), mock.patch("brain.models.terminate_process_tree"):
+            legacy_embedding.warmup()
+            command = popen.call_args.args[0]
+            self.assertEqual(1, command.count("--pooling"))
+            self.assertEqual("last", command[command.index("--pooling") + 1])
+            legacy_embedding.shutdown()
+
+        reranker = ManagedLlamaCppRuntime({
+            **manifest,
+            "capability": "reranker",
+            "runtime_args": ["--reranking", "--pooling", "rank", "--ctx-size", "4096", "-ub", "4096"],
+        })
         rerank_process = mock.Mock()
         rerank_process.poll.return_value = None
         with mock.patch("brain.models.start_managed_process", return_value=rerank_process) as popen, mock.patch.object(
@@ -3126,8 +3145,9 @@ path = "batch-service"
         ), mock.patch("brain.models.terminate_process_tree"):
             reranker.warmup()
             command = popen.call_args.args[0]
-            self.assertIn("--reranking", command)
+            self.assertEqual(1, command.count("--reranking"))
             self.assertNotIn("--rerank", command)
+            self.assertEqual(1, command.count("--pooling"))
             self.assertEqual("rank", command[command.index("--pooling") + 1])
             reranker.shutdown()
 

@@ -346,11 +346,12 @@ jobs:
           New-Item -ItemType Directory -Path (Join-Path $workspace "repository") -Force | Out-Null
           Set-Content -Path (Join-Path $workspace "repository/WindowsService.py") -Value "class WindowsService: pass # windows-native-retrieval-marker" -Encoding utf8
           $nativeRepo = Join-Path $workspace "repository"
-          git -C $nativeRepo init
-          git -C $nativeRepo config user.name project-brain-ci
-          git -C $nativeRepo config user.email project-brain-ci@example.invalid
-          git -C $nativeRepo add WindowsService.py
-          git -C $nativeRepo commit -m fixture
+          git -c core.longpaths=true -C $nativeRepo init
+          git -c core.longpaths=true -C $nativeRepo config core.longpaths true
+          git -c core.longpaths=true -C $nativeRepo config user.name project-brain-ci
+          git -c core.longpaths=true -C $nativeRepo config user.email project-brain-ci@example.invalid
+          git -c core.longpaths=true -C $nativeRepo add WindowsService.py
+          git -c core.longpaths=true -C $nativeRepo commit -m fixture
           Push-Location $workspace
           try {
             & $brain init .\repository --name windows-native-smoke --no-fetch
