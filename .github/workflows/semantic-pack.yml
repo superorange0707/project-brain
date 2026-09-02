@@ -63,6 +63,7 @@ jobs:
             --upstream-revision "$QWEN_GGUF_REVISION" \
             --tokenizer-revision "$QWEN_TOKENIZER_REVISION" \
             --runtime-revision "$LLAMA_CPP_REVISION" \
+            --builder-revision "$GITHUB_SHA" \
             --minimum-brain-version 0.6.2
           cd semantic-pack-dist
           shasum -a 256 --check SHA256SUMS.txt

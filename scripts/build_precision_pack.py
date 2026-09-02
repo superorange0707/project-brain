@@ -22,8 +22,12 @@ import socket
 import subprocess
 import tarfile
 import time
+import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from brain.platforms import process_group_kwargs, terminate_process_tree
 
 
 PACK_ID = "qwen3-reranker-4b-q6k-darwin-arm64"
@@ -245,7 +249,7 @@ def conformance(runtime: Path, model: Path, reference: Path, output: Path) -> No
         "--ctx-size", str(RERANK_CONTEXT_TOKENS), "-ub", str(RERANK_PHYSICAL_BATCH_TOKENS),
     ]
     with log.open("wb") as stderr:
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stderr, stderr=stderr, start_new_session=True)
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stderr, stderr=stderr, **process_group_kwargs())
     succeeded = False
     try:
         deadline = time.monotonic() + 180
@@ -276,12 +280,7 @@ def conformance(runtime: Path, model: Path, reference: Path, output: Path) -> No
         (output / SUITE_FILE).write_text(json.dumps(suite, separators=(",", ":")), encoding="utf-8")
         succeeded = True
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
+        terminate_process_tree(process, graceful_timeout=10)
         if succeeded:
             log.unlink(missing_ok=True)
 
@@ -304,7 +303,16 @@ def artifact(url: str, path: Path) -> dict[str, object]:
     return {"url": url, "sha256": sha256(path), "size": path.stat().st_size}
 
 
+def stage_model(source: Path, target: Path) -> None:
+    """Avoid a second multi-gigabyte copy when build inputs share a volume."""
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+
+
 def main() -> int:
+    global PACK_ID, RUNTIME_FILE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--model-sha256", required=True)
@@ -320,9 +328,19 @@ def main() -> int:
     parser.add_argument("--upstream-revision", required=True)
     parser.add_argument("--tokenizer-revision", required=True)
     parser.add_argument("--runtime-revision", required=True)
+    parser.add_argument("--builder-revision", required=True)
     parser.add_argument("--minimum-brain-version", required=True)
     parser.add_argument("--part-bytes", type=int, default=1_900_000_000)
+    parser.add_argument(
+        "--platform", default="darwin-arm64",
+        choices=("darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-amd64"),
+    )
     args = parser.parse_args()
+
+    PACK_ID = f"qwen3-reranker-4b-q6k-{args.platform}"
+    RUNTIME_FILE = "llama-server.exe" if args.platform.startswith("windows-") else "llama-server"
+    runtime_os, runtime_architecture = args.platform.split("-", 1)
+    metal = args.platform == "darwin-arm64"
 
     for path in (args.model, args.tokenizer, args.runtime, args.runtime_license, args.license, args.source_provenance, args.reference):
         if not path.is_file():
@@ -336,7 +354,7 @@ def main() -> int:
 
     pack = args.output / PACK_ID
     pack.mkdir(parents=True)
-    shutil.copy2(args.model, pack / MODEL_FILE)
+    stage_model(args.model, pack / MODEL_FILE)
     shutil.copy2(args.tokenizer, pack / TOKENIZER_FILE)
     shutil.copy2(args.runtime, pack / RUNTIME_FILE)
     os.chmod(pack / RUNTIME_FILE, 0o755)
@@ -362,9 +380,10 @@ def main() -> int:
         f"- tokenizer_revision: {args.tokenizer_revision}",
         f"- tokenizer_sha256: {artifacts[TOKENIZER_FILE]}",
         "- license: Apache-2.0; included in LICENSE",
-        "- runtime: llama.cpp compiled from the pinned revision below with Metal enabled",
+        f"- runtime: llama.cpp compiled from the pinned revision below for {args.platform}",
         f"- runtime_revision: {args.runtime_revision}",
         f"- runtime_sha256: {artifacts[RUNTIME_FILE]}",
+        f"- builder_revision: {args.builder_revision}",
         f"- converter_revision: llama.cpp@{args.runtime_revision}",
         "- conformance: public/synthetic only; official Qwen Transformers reference and local Q6_K runtime",
         "",
@@ -390,9 +409,10 @@ def main() -> int:
         "tokenizer_sha256": artifacts[TOKENIZER_FILE],
         "runtime_name": "llama.cpp",
         "runtime_revision": args.runtime_revision,
+        "builder_revision": args.builder_revision,
         "runtime_binary": RUNTIME_FILE,
         "model_file": MODEL_FILE,
-        "runtime_args": ["--reranking", "--pooling", "rank", "--ctx-size", str(RERANK_CONTEXT_TOKENS), "-ub", str(RERANK_PHYSICAL_BATCH_TOKENS)],
+        "runtime_args": ["--ctx-size", str(RERANK_CONTEXT_TOKENS), "-ub", str(RERANK_PHYSICAL_BATCH_TOKENS)],
         "pooling": "rank",
         "normalization": "none",
         "query_instruction": RERANK_INSTRUCTION,
@@ -406,7 +426,7 @@ def main() -> int:
         "golden_suite": SUITE_FILE,
         "golden_suite_hash": artifacts[SUITE_FILE],
         "artifacts": artifacts,
-        "runtime_compatibility": {"os": "darwin", "architecture": "arm64", "metal": True, "reranking": True},
+        "runtime_compatibility": {"os": runtime_os, "architecture": runtime_architecture, "metal": metal, "reranking": True},
     }
     (pack / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     metadata_names = [
@@ -428,7 +448,7 @@ def main() -> int:
         "schema": "project-brain-model-pack-v1",
         "pack_id": PACK_ID,
         "capability": "reranker",
-        "platform": "darwin-arm64",
+        "platform": args.platform,
         "release_tag": args.release_tag,
         "metadata": artifact(f"{base}/{metadata.name}", metadata),
         "model": {"file": MODEL_FILE, "sha256": artifacts[MODEL_FILE], "parts": [artifact(f"{base}/{part.name}", part) for part in parts]},

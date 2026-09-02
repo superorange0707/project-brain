@@ -27,6 +27,7 @@ from .core import (
     request_repair_prompt,
     search,
     path_hits,
+    session_dir,
     session_state,
     snapshot_indexes,
     start_session,
@@ -37,6 +38,34 @@ from .relations import generate_relationship_map
 from .sync import SyncResult, parse_branch_overrides, sync_repositories
 from .graph import GraphIndexResult, index_graph
 from .experience import build_experience_index, evaluate_sessions, render_similar_cases, similar_cases
+
+
+MAX_CLI_INPUT_BYTES = 4 * 1024 * 1024
+
+
+def _checked_input(value: str, label: str) -> str:
+    if len(value.encode("utf-8")) > MAX_CLI_INPUT_BYTES:
+        raise BrainError(f"{label} exceeds the {MAX_CLI_INPUT_BYTES}-byte input limit")
+    return value
+
+
+def _read_input_file(value: str, label: str) -> str:
+    path = Path(value).expanduser()
+    with path.open("rb") as source:
+        raw = source.read(MAX_CLI_INPUT_BYTES + 1)
+    if len(raw) > MAX_CLI_INPUT_BYTES:
+        raise BrainError(f"{label} exceeds the {MAX_CLI_INPUT_BYTES}-byte input limit")
+    return raw.decode("utf-8")
+
+
+def _read_stdin() -> str:
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    value = stream.read(MAX_CLI_INPUT_BYTES + 1)
+    if isinstance(value, bytes):
+        if len(value) > MAX_CLI_INPUT_BYTES:
+            raise BrainError(f"stdin exceeds the {MAX_CLI_INPUT_BYTES}-byte input limit")
+        return value.decode("utf-8")
+    return _checked_input(value, "stdin")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -63,7 +92,7 @@ def _parser() -> argparse.ArgumentParser:
     sync.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="override one repository branch")
     refresh = commands.add_parser("refresh", help="sync repositories and regenerate project intelligence")
     refresh.add_argument("--no-fetch", action="store_true", help="refresh from locally available commits")
-    refresh.add_argument("--no-discover", action="store_true", help="do not add newly cloned repositories")
+    refresh.add_argument("--no-discover", action="store_true", help="skip the newly cloned repository check")
     refresh.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="override one repository branch")
     commands.add_parser("map", help="regenerate deterministic project facts")
 
@@ -138,7 +167,7 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--target", choices=("claude", "m365"), default="claude")
     start.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     start.add_argument("--no-sync", action="store_true", help="use the last source snapshots")
-    start.add_argument("--no-discover", action="store_true", help="do not add newly cloned repositories during sync")
+    start.add_argument("--no-discover", action="store_true", help="skip the newly cloned repository check during sync")
     start.add_argument("--branch", action="append", default=[], metavar="REPO=BRANCH", help="analyze a feature branch in one repository")
     start.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
@@ -236,6 +265,17 @@ def _print_graph(results: list[GraphIndexResult]) -> None:
         print(f"graph {result.repo}: {result.status}" + (f" ({result.detail})" if result.detail else ""))
 
 
+def _workspace_root(current: Path, repos: list[Path]) -> Path:
+    """Choose a Brain-owned workspace outside every containing target repo."""
+    containing = [path for path in repos if current == path or current.is_relative_to(path)]
+    if not containing:
+        return current
+    outermost = min(containing, key=lambda path: len(path.parts))
+    if outermost.parent == outermost:
+        raise BrainError("Cannot create a Project Brain workspace outside a filesystem-root repository")
+    return outermost.parent
+
+
 def _refresh_all(
     settings,
     *,
@@ -249,22 +289,19 @@ def _refresh_all(
     return outcome.additions, outcome.sync, outcome.graph
 
 
-def _print_discovered(repositories: list) -> None:
-    if repositories:
-        print("Discovered and configured: " + ", ".join(repo.name for repo in repositories))
-
-
 def _init(args: argparse.Namespace) -> int:
+    repos = _discover_repos(args.repos)
     if args.config:
         config = Path(args.config).expanduser().resolve()
-    elif len(args.repos) == 1:
-        config = Path(args.repos[0]).expanduser().resolve() / "brain.toml"
     else:
-        config = Path.cwd() / "brain.toml"
+        current = Path.cwd().resolve()
+        root = _workspace_root(current, repos)
+        config = root / "brain.toml"
+    if any(config.is_relative_to(path) for path in repos):
+        raise BrainError("Project Brain config and state must be outside target repositories")
     if config.exists() and not args.force:
         raise BrainError(f"Config already exists: {config} (use --force to replace it)")
     root = config.parent
-    repos = _discover_repos(args.repos)
     basenames = [path.name for path in repos]
     names: set[str] = set()
     rows = [
@@ -375,11 +412,11 @@ def _init(args: argparse.Namespace) -> int:
 
 def _ticket_text(args: argparse.Namespace) -> str:
     if args.text:
-        return args.text
+        return _checked_input(args.text, "ticket text")
     if args.ticket_file:
-        return Path(args.ticket_file).expanduser().read_text(encoding="utf-8")
+        return _read_input_file(args.ticket_file, "ticket file")
     if not sys.stdin.isatty():
-        value = sys.stdin.read()
+        value = _read_stdin()
         if value.strip():
             return value
     return f"# {args.ticket}\n\nPaste the ticket description here before sending this context to the AI."
@@ -404,11 +441,11 @@ def _demo(args: argparse.Namespace) -> int:
 
 def _request_text(args: argparse.Namespace) -> str:
     if args.file:
-        return Path(args.file).expanduser().read_text(encoding="utf-8")
+        return _read_input_file(args.file, "request file")
     if args.clipboard:
-        return clipboard_read()
+        return _checked_input(clipboard_read(), "clipboard request")
     if not sys.stdin.isatty():
-        value = sys.stdin.read()
+        value = _read_stdin()
         if value.strip():
             return value
     raise BrainError("Provide a request using --file, --clipboard, or stdin")
@@ -416,8 +453,8 @@ def _request_text(args: argparse.Namespace) -> str:
 
 def _read_optional(value: str | None, path: str | None) -> str:
     if path:
-        return Path(path).expanduser().read_text(encoding="utf-8")
-    return value or ""
+        return _read_input_file(path, "feedback input file")
+    return _checked_input(value or "", "feedback input")
 
 
 def _print_hits(hits: list, empty: str = "No matches.") -> None:
@@ -505,7 +542,6 @@ def execute(args: argparse.Namespace) -> int:
             discover=not args.no_discover,
             progress=report_progress,
         )
-        _print_discovered(outcome.additions)
         _print_sync(outcome.sync)
         _print_graph(outcome.graph)
         print(f"Generated {settings.generated_dir / 'PROJECT_FACTS.md'}")
@@ -688,6 +724,7 @@ def execute(args: argparse.Namespace) -> int:
         print(f"Evaluated {report['evaluated_sessions']} sessions against {report['indexed_cases']} indexed ticket cases.")
         return 0
     if args.command == "start":
+        ticket_text = _ticket_text(args)
         additions = []
         synced: list[SyncResult] = []
         graphs: list[GraphIndexResult] = []
@@ -701,15 +738,15 @@ def execute(args: argparse.Namespace) -> int:
                 discover=not args.no_discover,
             )
             if not args.json:
-                _print_discovered(additions)
                 _print_sync(synced)
                 _print_graph(graphs)
         elif not (settings.generated_dir / "PROJECT_FACTS.md").exists():
             generate_map(settings)
             generate_relationship_map(settings)
-        content, path = start_session(settings, args.ticket, _ticket_text(args))
+        content, path = start_session(settings, args.ticket, ticket_text)
         copy = args.copy if args.copy is not None else args.target == "claude"
         parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)
+        checkpoint = session_state(settings, args.ticket).get("progressive_checkpoint") or {}
         if args.json:
             print(json.dumps({
                 "ticket": args.ticket,
@@ -726,20 +763,47 @@ def execute(args: argparse.Namespace) -> int:
             print(f"Delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
         return 0
     if args.command == "ctx":
-        content, path, number = create_context(settings, args.ticket, _request_text(args), args.include_diff)
+        def checkpoint_progress(event: dict[str, object]) -> None:
+            if event.get("phase") != "first_useful_checkpoint":
+                return
+            checkpoint = (session_state(settings, args.ticket).get("progressive_checkpoint") or {})
+            payload = {
+                "event": "first_useful_checkpoint",
+                "checkpoint_id": checkpoint.get("checkpoint_id"),
+                "path": checkpoint.get("handoff_artifact") or str(
+                    session_dir(settings, args.ticket) / str(event.get("checkpoint_artifact") or "")
+                ),
+            }
+            print(
+                json.dumps(payload, separators=(",", ":")) if args.json
+                else f"First useful checkpoint: {payload['path']}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        content, path, number = create_context(
+            settings, args.ticket, _request_text(args), args.include_diff, progress=checkpoint_progress,
+        )
         copy = args.copy if args.copy is not None else args.target == "claude"
         parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)
+        checkpoint = session_state(settings, args.ticket).get("progressive_checkpoint") or {}
         if args.json:
             print(json.dumps({
                 "ticket": args.ticket,
                 "request": number,
                 "path": str(path),
                 "delivery": {"current": current, "total": len(parts), "parts": [str(part) for part in parts], "copied": copy},
+                "progressive_delivery": {
+                    "checkpoint": checkpoint.get("handoff_artifact"),
+                    "continuation": checkpoint.get("continuation_handoff_artifact"),
+                } if checkpoint.get("continuation_status") == "published" else None,
             }, indent=2))
         else:
             print(path)
             if args.target == "m365":
                 print(f"M365 handoff: {parts[0]}")
+                if checkpoint.get("continuation_handoff_artifact"):
+                    print(f"M365 checkpoint continuation: {checkpoint['continuation_handoff_artifact']}")
             print(f"Request: {number:03d}; delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
         return 0
     if args.command == "continue":
@@ -757,15 +821,40 @@ def execute(args: argparse.Namespace) -> int:
             result = {"ticket": args.ticket, "kind": kind, "path": str(path)}
             print(json.dumps(result, indent=2) if args.json else f"Ready to implement: {path}")
             return 0
-        content, path, number = create_context(settings, args.ticket, text, args.include_diff)
+        def checkpoint_progress(event: dict[str, object]) -> None:
+            if event.get("phase") != "first_useful_checkpoint":
+                return
+            checkpoint = (session_state(settings, args.ticket).get("progressive_checkpoint") or {})
+            payload = {
+                "event": "first_useful_checkpoint",
+                "checkpoint_id": checkpoint.get("checkpoint_id"),
+                "path": checkpoint.get("handoff_artifact") or str(
+                    session_dir(settings, args.ticket) / str(event.get("checkpoint_artifact") or "")
+                ),
+            }
+            print(
+                json.dumps(payload, separators=(",", ":")) if args.json
+                else f"First useful checkpoint: {payload['path']}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        content, path, number = create_context(
+            settings, args.ticket, text, args.include_diff, progress=checkpoint_progress,
+        )
         copy = args.copy if args.copy is not None else args.target == "claude"
         parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)
+        checkpoint = session_state(settings, args.ticket).get("progressive_checkpoint") or {}
         result = {
             "ticket": args.ticket,
             "kind": kind,
             "request": number,
             "path": str(path),
             "delivery": {"current": current, "total": len(parts), "parts": [str(part) for part in parts], "copied": copy},
+            "progressive_delivery": {
+                "checkpoint": checkpoint.get("handoff_artifact"),
+                "continuation": checkpoint.get("continuation_handoff_artifact"),
+            } if checkpoint.get("continuation_status") == "published" else None,
         }
         if args.json:
             print(json.dumps(result, indent=2))
@@ -773,6 +862,8 @@ def execute(args: argparse.Namespace) -> int:
             print(path)
             if args.target == "m365":
                 print(f"M365 handoff: {parts[0]}")
+                if checkpoint.get("continuation_handoff_artifact"):
+                    print(f"M365 checkpoint continuation: {checkpoint['continuation_handoff_artifact']}")
             print(f"Request: {number:03d}; delivery: {current}/{len(parts)}" + (" copied" if copy else ""))
         return 0
     if args.command == "preview":
@@ -791,7 +882,7 @@ def execute(args: argparse.Namespace) -> int:
         elif plan["kind"] == "final_solution":
             print("Ready to implement; no repository retrieval required.")
         else:
-            label = "INVESTIGATION_REQUEST" if plan["protocol_version"] == 4 else "CONTEXT_REQUEST"
+            label = "INVESTIGATION_REQUEST" if plan["protocol_version"] in {4, 5} else "CONTEXT_REQUEST"
             print(f"Valid {label} v{plan['protocol_version']}: {plan['operation_count']} operations")
             print(f"Objective: {plan['objective']}")
             for action in plan["actions"]:

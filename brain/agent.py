@@ -2,14 +2,90 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from datetime import UTC, datetime
 from importlib.resources import files as package_files
 from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .core import BrainError, Settings, request_preview, save_session, session_dir, session_state
+from .core import (
+    BrainError,
+    Settings,
+    mark_active_artifacts,
+    protocol_request_signature,
+    request_preview,
+    save_session,
+    session_dir,
+    session_state,
+)
 from .locks import ticket_exclusive
+
+
+_FINAL_SOLUTION_SECTIONS = (
+    ("ticket interpretation",),
+    ("verified current behavior",),
+    ("execution flow", "integration flow"),
+    ("root cause", "required behavior change"),
+    ("exact repository", "exact repositories"),
+    ("suggested production changes", "suggested changes"),
+    ("test surface", "tests and assertions", "exact tests"),
+    ("validation commands", "validation"),
+    ("edge cases", "compatibility risks"),
+    ("implementation order",),
+    ("remaining assumptions", "remaining uncertainties"),
+)
+M365_KNOWLEDGE_SOURCE_BYTES = 512 * 1024
+M365_KNOWLEDGE_TOTAL_BYTES = 2 * 1024 * 1024
+M365_REPOSITORY_METADATA_BYTES = 2 * 1024
+
+
+def final_solution_contract(text: str) -> tuple[bool, list[str]]:
+    """Validate the top-level Protocol v5 final marker and its minimum contract."""
+    stripped = text.lstrip("\ufeff \t\r\n")
+    marker = re.match(r"(?i)^(?:#{1,6}[ \t]+)?FINAL_SOLUTION[ \t]*(?:\r?\n|$)", stripped)
+    if marker is None:
+        return False, ["top-level FINAL_SOLUTION marker"]
+    body = stripped[marker.end():]
+    sections: list[tuple[str, str]] = []
+    current_title: str | None = None
+    current_body: list[str] = []
+    fence: str | None = None
+    for line in body.splitlines():
+        fence_match = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence_match:
+            marker_value = fence_match.group(1)
+            if fence is None:
+                fence = marker_value
+            elif marker_value[0] == fence[0] and len(marker_value) >= len(fence):
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        heading = re.match(r"^\s*#{2,3}\s+(.+?)\s*#*\s*$", line)
+        if heading:
+            if current_title is not None:
+                sections.append((current_title, "\n".join(current_body).strip()))
+            current_title = re.sub(r"[^a-z0-9]+", " ", heading.group(1).casefold()).strip()
+            current_body = []
+        elif current_title is not None:
+            current_body.append(line)
+    if current_title is not None:
+        sections.append((current_title, "\n".join(current_body).strip()))
+
+    placeholders = re.compile(
+        r"(?i)^\s*(?:none|n/?a|not (?:provided|available|known)|unknown|todo|tbd|pending|see above)[.!\s-]*$"
+    )
+    complete_titles = {
+        title for title, content in sections
+        if content and not placeholders.fullmatch(re.sub(r"[`*_>#-]", "", content).strip())
+    }
+    missing = [
+        " / ".join(aliases)
+        for aliases in _FINAL_SOLUTION_SECTIONS
+        if not any(any(alias in title for alias in aliases) for title in complete_titles)
+    ]
+    return not missing, missing
 
 
 def response_preview(text: str, settings: Settings | None = None, ticket: str | None = None) -> dict[str, Any]:
@@ -18,8 +94,8 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
     if not stripped:
         raise BrainError("The AI response is empty")
     request_position = max(text.rfind("CONTEXT_REQUEST:"), text.rfind("INVESTIGATION_REQUEST:"))
-    final_matches = list(re.finditer(r"(?im)^\s*(?:#+\s*)?FINAL_SOLUTION\b", text))
-    if final_matches and final_matches[-1].start() > request_position:
+    final, _ = final_solution_contract(text)
+    if final:
         return {
             "valid": True,
             "kind": "final_solution",
@@ -37,6 +113,8 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
         result["label"] = "Repository retrieval required"
         if ticket:
             state = session_state(settings, ticket) if settings else {}
+            signature = protocol_request_signature(result, ticket, state)
+            result["signature"] = signature
             previous = next(
                 (
                     item
@@ -65,43 +143,76 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
 def archive_final_solution(settings: Settings, ticket: str, text: str) -> Path:
     preview = response_preview(text, settings, ticket)
     if preview["kind"] != "final_solution":
-        raise BrainError("The AI response does not contain FINAL_SOLUTION")
+        _, missing = final_solution_contract(text)
+        raise BrainError("The AI response does not contain a complete FINAL_SOLUTION contract: " + ", ".join(missing))
     directory = session_dir(settings, ticket)
     if not directory.is_dir():
         raise BrainError(f"Session {ticket} does not exist. Run `brain start {ticket}` first.")
-    path = directory / "final-solution.md"
-    path.write_text(text.rstrip() + "\n", encoding="utf-8")
+    # Validate compatibility before creating or replacing any ticket artifact.
     state = session_state(settings, ticket)
+    path = directory / "final-solution.md"
+    from .core import _atomic_session_text_write
+
+    _atomic_session_text_write(settings, ticket, path, text.rstrip() + "\n")
     state["status"] = "ready_to_implement"
     state["finalized_at"] = datetime.now(UTC).isoformat()
+    mark_active_artifacts(state, path)
     from .atlas import record_investigation
 
-    record_investigation(settings, ticket, state)
     save_session(settings, ticket, state)
+    if settings.persist_investigation_records:
+        try:
+            record_investigation(settings, ticket, state)
+        except (OSError, sqlite3.Error):
+            # The ticket session is authoritative; the cross-ticket prior is derived.
+            pass
     return path
 
 
 def create_m365_agent_kit(settings: Settings) -> dict[str, Any]:
+    from .core import (
+        _atomic_generated_text_write,
+        _bounded_text_file,
+        _bounded_utf8_text,
+        _validated_generated_artifact,
+    )
+
     directory = settings.generated_dir / "m365-agent"
-    directory.mkdir(parents=True, exist_ok=True)
+    _validated_generated_artifact(settings, directory / ".managed", create_parents=True)
     instructions = package_files("brain").joinpath("m365_agent_instructions.md").read_text(encoding="utf-8")
-    instructions = instructions.replace("{{PROJECT_NAME}}", settings.name)
+    project_name, _ = _bounded_utf8_text(settings.name, 512, " [truncated]")
+    instructions = instructions.replace("{{PROJECT_NAME}}", project_name)
     instructions_path = directory / "INSTRUCTIONS.md"
-    instructions_path.write_text(instructions.rstrip() + "\n", encoding="utf-8")
+    _atomic_generated_text_write(settings, instructions_path, instructions.rstrip() + "\n")
 
     knowledge = ["# Project knowledge", "", f"Project: `{settings.name}`", "", "## Repository catalog", ""]
     for repo in settings.repositories:
         detail = f" — {repo.description}" if repo.description else ""
         tags = f"; tags: {', '.join(repo.tags)}" if repo.tags else ""
-        knowledge.append(f"- `{repo.name}`{detail}{tags}")
+        item, omitted = _bounded_utf8_text(
+            f"- `{repo.name}`{detail}{tags}",
+            M365_REPOSITORY_METADATA_BYTES,
+            " … [metadata truncated]",
+        )
+        knowledge.append(item)
+        if omitted:
+            knowledge.append("  - Project Brain bounded this repository metadata before Agent Kit generation.")
     for title, path in (
         ("Project map", settings.knowledge_dir / "PROJECT_MAP.md"),
         ("Glossary", settings.knowledge_dir / "glossary.md"),
     ):
         if path.is_file():
-            knowledge.extend(["", f"## {title}", "", path.read_text(encoding="utf-8", errors="replace").strip()])
+            text, omitted = _bounded_text_file(path, M365_KNOWLEDGE_SOURCE_BYTES)
+            knowledge.extend(["", f"## {title}", "", text.strip()])
+            if omitted:
+                knowledge.append("[Project Brain omitted unsafe or excess bytes from this knowledge source.]")
+    knowledge_text, _ = _bounded_utf8_text(
+        "\n".join(knowledge).rstrip() + "\n",
+        M365_KNOWLEDGE_TOTAL_BYTES,
+        "\n\n[Project Brain omitted remaining Agent Kit knowledge at the byte limit.]\n",
+    )
     knowledge_path = directory / "PROJECT_KNOWLEDGE.md"
-    knowledge_path.write_text("\n".join(knowledge).rstrip() + "\n", encoding="utf-8")
+    _atomic_generated_text_write(settings, knowledge_path, knowledge_text)
 
     suggested = """# Suggested prompts
 
@@ -119,10 +230,10 @@ Use the attached internal IPF documentation together with the ticket and reposit
 
 ## Produce the implementation plan
 
-Decide whether enough evidence now exists to implement safely. If yes, return FINAL_SOLUTION with exact repositories, files, methods, configuration, suggested changes, tests, validation commands, edge cases, and implementation order. Otherwise ask only the specific blocking question or return one focused INVESTIGATION_REQUEST v4 using the latest base_context_id.
+Decide whether enough evidence now exists to implement safely. If yes, return FINAL_SOLUTION with exact repositories, files, methods, configuration, suggested changes, tests, validation commands, edge cases, and implementation order. Otherwise ask only the specific blocking question or return one focused INVESTIGATION_REQUEST v5 using the latest base_context_id.
 """
     suggested_path = directory / "SUGGESTED_PROMPTS.md"
-    suggested_path.write_text(suggested, encoding="utf-8")
+    _atomic_generated_text_write(settings, suggested_path, suggested)
 
     setup = f"""# Microsoft 365 Copilot Agent setup
 
@@ -136,31 +247,57 @@ Decide whether enough evidence now exists to implement safely. If yes, return FI
 
 Starter prompt:
 
-> Investigate this ticket as a read-only coding agent. I will attach the Project Brain start package. Ask me directly for business, document, or runtime facts; emit an INVESTIGATION_REQUEST v4 only when local repository evidence is required; return FINAL_SOLUTION when the implementation is ready.
+> Investigate this ticket as a read-only coding agent. I will attach the Project Brain start package. Ask me directly for business, document, or runtime facts; emit an INVESTIGATION_REQUEST v5 only when local repository evidence is required; return FINAL_SOLUTION when the implementation is ready.
 
-This kit uses Project Brain INVESTIGATION_REQUEST protocol v4 and delta context lineage. After upgrading Brain, rerun `brain agent-kit m365`, replace Agent Builder Instructions and PROJECT_KNOWLEDGE.md, and optionally refresh Suggested Prompts. A new M365 conversation is recommended for protocol validation.
+This kit uses Project Brain INVESTIGATION_REQUEST protocol v5, bounded multi-wave investigation, and delta context lineage. Protocols v1–v4 remain accepted for existing conversations. After upgrading Brain, rerun `brain agent-kit m365`, replace Agent Builder Instructions and PROJECT_KNOWLEDGE.md, and optionally refresh Suggested Prompts. A new M365 conversation is recommended for protocol validation.
 
-For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365` and upload the printed `generated/handoffs/TICKET-start.md`. For every later repository round, upload only the newly printed `generated/handoffs/TICKET-context-NNN.md`. Never upload the internal `.runs/TICKET/request-NNN.yml`; it is the AI-to-Brain command, while `context-NNN.md` is Brain's evidence response. The changing filename prevents M365 from reusing an older attachment; `TICKET-current.md` is only a local alias.
+For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365` and upload the printed `generated/handoffs/TICKET-start.md`. During a longer v5 wave, Brain may publish `TICKET-checkpoint-NNN.md` before the remaining flow work finishes; upload it immediately if you need the first exact evidence, then apply `TICKET-checkpoint-delta-NNN.md` to that checkpoint when it appears. The normal completed-round handoff remains `TICKET-context-NNN.md`. Never upload the internal `.runs/TICKET/request-NNN.yml`; it is the AI-to-Brain command. The changing filename prevents M365 from reusing an older attachment; `TICKET-current.md` is only a local alias.
 """
     setup_path = directory / "SETUP.md"
-    setup_path.write_text(setup, encoding="utf-8")
+    _atomic_generated_text_write(settings, setup_path, setup)
+    protocol = """# Project Brain Investigation Protocol v5
+
+## Request envelope
+
+Use exactly one `INVESTIGATION_REQUEST` mapping. Required fields are `version: 5`, `mode`, and `objective`. Supported modes are `root_cause`, `implementation_plan`, `impact_analysis`, `test_surface`, `flow_trace`, and `history`. Optional bounded fields are `runtime_facts`, `hypotheses`, `required`, `resolve`, `anchors`, `base_context_id`, `checkpoint`, and `wave`.
+
+## State and lineage
+
+Treat Atlas cards, anchors, flow candidates, Program Slice Lite, history, and semantic ranks as navigation intelligence. Only exact source from the ticket's pinned generation or explicitly authoritative attached documentation is VERIFIED evidence. Preserve stable evidence, anchor, flow, blocker, and context IDs. Apply a delta only to its declared base; request a full checkpoint when the base is missing or stale.
+
+## Investigation state machine
+
+Proceed through `INTAKE → ORIENT → INVESTIGATE → CHALLENGE → SYNTHESIZE → STOP`. Use at most three normal waves and never exceed four. Challenge the leading hypothesis with disconfirming evidence before synthesis. Stop on sufficient coverage, no progress, an external blocker, or the wave/budget limit.
+
+## Final response
+
+Return `FINAL_SOLUTION` only when exact repositories, files, symbols/configuration, verified flow, implementation surface, tests, validation, compatibility risks, and remaining assumptions are explicit. Never present a candidate graph edge, slice statement, or historical analogue as final evidence.
+"""
+    protocol_path = directory / "INVESTIGATION_PROTOCOL.md"
+    _atomic_generated_text_write(settings, protocol_path, protocol)
     manifest = {
         "project_brain_version": __version__,
-        "agent_kit_version": 3,
-        "context_request_protocol": 4,
+        "manifest_version": "1.0.0",
+        "agent_kit_version": 4,
+        "context_request_protocol": 5,
+        "investigation_protocol": 5,
+        "legacy_protocols": [1, 2, 3, 4],
+        "state_machine": ["INTAKE", "ORIENT", "INVESTIGATE", "CHALLENGE", "SYNTHESIZE", "STOP"],
     }
     manifest_path = directory / "AGENT_KIT.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _atomic_generated_text_write(settings, manifest_path, json.dumps(manifest, indent=2) + "\n")
     return {
         "directory": str(directory),
         "instructions_path": str(instructions_path),
         "knowledge_path": str(knowledge_path),
         "suggested_prompts_path": str(suggested_path),
         "setup_path": str(setup_path),
+        "protocol_path": str(protocol_path),
         "manifest_path": str(manifest_path),
         "manifest": manifest,
         "instructions": instructions,
-        "knowledge": knowledge_path.read_text(encoding="utf-8"),
+        "knowledge": knowledge_text,
         "suggested_prompts": suggested,
         "setup": setup,
+        "protocol": protocol,
     }

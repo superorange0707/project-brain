@@ -104,6 +104,8 @@ class RetrievalTrace:
     candidates_after_prune: int = 0
     rerank_input_count: int = 0
     deferred_candidates: int = 0
+    semantic_status: str = "not_requested"
+    semantic_repo_scope: list[str] = field(default_factory=list)
     stop_reason: str = "coverage_satisfied"
     fallback_reasons: list[str] = field(default_factory=list)
     _lock: Lock = field(default_factory=Lock, repr=False)
@@ -112,12 +114,34 @@ class RetrievalTrace:
         with self._lock:
             self.physical_backend_operations += 1
             self.operation_count = self.physical_backend_operations
-            self.subprocess_count += subprocesses
-            self.bytes_scanned += bytes_scanned
-            self.files_visited += files
-            self.raw_hits += raw_hits
-            self.backend_ms[name] = round(self.backend_ms.get(name, 0.0) + elapsed_ms, 3)
-            self.cache_hits += int(cache_hit)
+            self._add_backend_metrics(
+                name, elapsed_ms, subprocesses=subprocesses, bytes_scanned=bytes_scanned,
+                files=files, raw_hits=raw_hits, cache_hit=cache_hit,
+            )
+
+    def try_reserve_backend(self) -> bool:
+        """Atomically reserve one physical operation before parallel work starts."""
+        with self._lock:
+            if self.physical_backend_operations >= self.max_physical_backend_operations:
+                return False
+            self.physical_backend_operations += 1
+            self.operation_count = self.physical_backend_operations
+            return True
+
+    def complete_reserved_backend(self, name: str, elapsed_ms: float, *, subprocesses: int = 0, bytes_scanned: int = 0, files: int = 0, raw_hits: int = 0, cache_hit: bool = False) -> None:
+        with self._lock:
+            self._add_backend_metrics(
+                name, elapsed_ms, subprocesses=subprocesses, bytes_scanned=bytes_scanned,
+                files=files, raw_hits=raw_hits, cache_hit=cache_hit,
+            )
+
+    def _add_backend_metrics(self, name: str, elapsed_ms: float, *, subprocesses: int, bytes_scanned: int, files: int, raw_hits: int, cache_hit: bool) -> None:
+        self.subprocess_count += subprocesses
+        self.bytes_scanned += bytes_scanned
+        self.files_visited += files
+        self.raw_hits += raw_hits
+        self.backend_ms[name] = round(self.backend_ms.get(name, 0.0) + elapsed_ms, 3)
+        self.cache_hits += int(cache_hit)
 
     def add_cache_hit(self) -> None:
         with self._lock:
@@ -162,6 +186,8 @@ class RetrievalTrace:
             "candidates_after_prune": self.candidates_after_prune,
             "rerank_input_count": self.rerank_input_count,
             "deferred_candidates": self.deferred_candidates,
+            "semantic_status": self.semantic_status,
+            "semantic_repo_scope": self.semantic_repo_scope,
             "stop_reason": self.stop_reason,
             "fallback_reasons": self.fallback_reasons,
         }

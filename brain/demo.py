@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
 from .core import BrainError
+from .platforms import native_command
 
 
 REPOSITORIES: dict[str, dict[str, str]] = {
@@ -94,15 +94,17 @@ def _write(path: Path, content: str) -> None:
 
 
 def _init_git(path: Path) -> None:
-    if not shutil.which("git"):
+    try:
+        git = native_command("git")
+    except FileNotFoundError:
         return
-    initialized = subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, capture_output=True, check=False)
+    initialized = subprocess.run([git, "init", "-q", "-b", "main"], cwd=path, capture_output=True, check=False)
     if initialized.returncode != 0:
-        subprocess.run(["git", "init", "-q"], cwd=path, capture_output=True, check=False)
+        subprocess.run([git, "init", "-q"], cwd=path, capture_output=True, check=False)
     for key, value in (("user.name", "Project Brain Demo"), ("user.email", "demo@example.invalid")):
-        subprocess.run(["git", "config", key, value], cwd=path, capture_output=True, check=False)
-    subprocess.run(["git", "add", "."], cwd=path, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "-q", "-m", "Create Project Brain demo"], cwd=path, capture_output=True, check=False)
+        subprocess.run([git, "config", key, value], cwd=path, capture_output=True, check=False)
+    subprocess.run([git, "add", "."], cwd=path, capture_output=True, check=False)
+    subprocess.run([git, "commit", "-q", "-m", "Create Project Brain demo"], cwd=path, capture_output=True, check=False)
 
 
 def create_demo(target: Path) -> Path:

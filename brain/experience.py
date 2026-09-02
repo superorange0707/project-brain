@@ -9,12 +9,36 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .locks import workspace_exclusive
+from .platforms import (
+    atomic_managed_bytes_write,
+    atomic_managed_text_write,
+    read_direct_file_bytes,
+    run_bounded_process,
+)
 
 if TYPE_CHECKING:
     from .core import Settings
 
 
 INDEX_VERSION = 1
+EXPERIENCE_MAX_ARTIFACT_BYTES = 24 * 1024 * 1024
+EXPERIENCE_MAX_GLOBAL_COMMITS = 256
+EXPERIENCE_MAX_CASES = 512
+EXPERIENCE_MAX_CASE_COMMITS = 32
+EXPERIENCE_MAX_CASE_PATHS = 40
+EXPERIENCE_MAX_TERMS_PER_CASE = 128
+EXPERIENCE_MAX_TICKETS_PER_COMMIT = 8
+EXPERIENCE_MAX_CHANGES_PER_COMMIT = 40
+EXPERIENCE_MAX_SUBJECT_CHARS = 500
+EXPERIENCE_MAX_PATH_CHARS = 512
+EXPERIENCE_MAX_SESSION_STATE_BYTES = 4 * 1024 * 1024
+EXPERIENCE_MAX_GIT_STDOUT_BYTES = 8 * 1024 * 1024
+EXPERIENCE_MAX_GIT_STDERR_BYTES = 64 * 1024
+EXPERIENCE_GIT_TIMEOUT_SECONDS = 30.0
+EXPERIENCE_MAX_EVALUATION_CONTEXTS_PER_CASE = 8
+EXPERIENCE_MAX_EVALUATION_CONTEXTS = 512
+EXPERIENCE_MAX_CONTEXT_BYTES = 1024 * 1024
+EXPERIENCE_MAX_EVALUATION_BYTES = 64 * 1024 * 1024
 DEFAULT_TICKET_PATTERN = r"(?<![A-Z0-9])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Z0-9])"
 TEST_PATH = re.compile(r"(^|/)(test|tests|src/test)/|(?:Test|Tests|IT|Spec)\.", re.I)
 CONFIG_SUFFIXES = {".conf", ".gradle", ".json", ".properties", ".toml", ".xml", ".yaml", ".yml"}
@@ -37,8 +61,20 @@ STOP_WORDS = {
 }
 
 
-def _run(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def _run(
+    args: list[str],
+    cwd: Path,
+    *,
+    max_stdout_bytes: int = EXPERIENCE_MAX_GIT_STDOUT_BYTES,
+    timeout: float = EXPERIENCE_GIT_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    return run_bounded_process(
+        args,
+        cwd,
+        max_stdout_bytes=max_stdout_bytes,
+        max_stderr_bytes=EXPERIENCE_MAX_GIT_STDERR_BYTES,
+        timeout=timeout,
+    )
 
 
 def _tokens(text: str) -> set[str]:
@@ -46,7 +82,9 @@ def _tokens(text: str) -> set[str]:
     return {
         token.lower()
         for token in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", expanded)
-        if token.lower() not in STOP_WORDS and not re.fullmatch(r"[A-Z][A-Z0-9]+-[0-9]+", token)
+        if len(token) <= 64
+        and token.lower() not in STOP_WORDS
+        and not re.fullmatch(r"[A-Z][A-Z0-9]+-[0-9]+", token)
     }
 
 
@@ -54,14 +92,44 @@ def _ticket_id(match: re.Match[str]) -> str:
     return next((value for value in match.groups() if value), match.group(0))
 
 
-def _load(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
+def _load(path: Path, *, validate_experience: bool = True) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, json.JSONDecodeError):
+        max_bytes = (
+            EXPERIENCE_MAX_ARTIFACT_BYTES
+            if validate_experience else EXPERIENCE_MAX_SESSION_STATE_BYTES
+        )
+        raw, exceeded = read_direct_file_bytes(path, max_bytes=max_bytes)
+        if exceeded:
+            return {}
+        value = json.loads(raw.decode("utf-8"))
+        if not isinstance(value, dict):
+            return {}
+        if not validate_experience:
+            return value
+        if value.get("version") != INDEX_VERSION:
+            return {}
+        cases = value.get("cases")
+        if not isinstance(cases, list) or len(cases) > EXPERIENCE_MAX_CASES:
+            return {}
+        for case in cases:
+            if (
+                not isinstance(case, dict)
+                or len(case.get("terms") or []) > EXPERIENCE_MAX_TERMS_PER_CASE
+                or len(case.get("commits") or []) > EXPERIENCE_MAX_CASE_COMMITS
+                or len(case.get("paths") or []) > EXPERIENCE_MAX_CASE_PATHS
+            ):
+                return {}
+        return value
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
+
+
+def _text_prefix(path: Path, max_bytes: int) -> str:
+    try:
+        raw, _ = read_direct_file_bytes(path, max_bytes=max_bytes)
+        return raw[:max_bytes].decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return ""
 
 
 def _redact_patch(text: str) -> str:
@@ -97,6 +165,10 @@ def load_experience_index(settings: Settings, generation: object | None = None) 
         if not path.is_relative_to(settings.state_dir.resolve()):
             return {}
         value = _load(path)
+        from .catalog import _content_hash
+
+        if _content_hash(value) != component.get("content_hash"):
+            return {}
         cutoffs = {
             str(name): str(item.get("sha") or "working-tree")
             for name, item in (value.get("repositories") or {}).items()
@@ -118,16 +190,18 @@ def _parse_log(text: str, ticket_pattern: re.Pattern[str]) -> list[dict[str, Any
         if len(header) != 3:
             continue
         sha, date, subject = header
-        subject = _redact_patch(subject)
-        tickets = sorted({_ticket_id(match) for match in ticket_pattern.finditer(subject)})
+        subject = _redact_patch(subject)[:EXPERIENCE_MAX_SUBJECT_CHARS]
+        tickets = sorted({_ticket_id(match) for match in ticket_pattern.finditer(subject)})[
+            :EXPERIENCE_MAX_TICKETS_PER_COMMIT
+        ]
         if not tickets:
             continue
         changes: list[dict[str, str]] = []
         for line in lines[1:]:
             parts = line.split("\t")
             if len(parts) >= 2 and re.fullmatch(r"[A-Z][0-9]*", parts[0]):
-                changes.append({"status": parts[0], "path": parts[-1]})
-            if len(changes) >= 250:
+                changes.append({"status": parts[0], "path": parts[-1][:EXPERIENCE_MAX_PATH_CHARS]})
+            if len(changes) >= EXPERIENCE_MAX_CHANGES_PER_COMMIT:
                 break
         commits.append({"sha": sha, "date": date, "subject": subject, "tickets": tickets, "changes": changes})
     return commits
@@ -166,7 +240,8 @@ def build_experience_index(settings: Settings, *, changed_only: bool = True) -> 
                     history_range = f"{previous_sha}..{sha}"
                     cached_commits = list(cached.get("commits") or [])
             command = [
-                "git", "log", history_range, f"-n{settings.experience_commit_limit}", "--date=short",
+                "git", "log", history_range,
+                f"-n{min(settings.experience_commit_limit, EXPERIENCE_MAX_GLOBAL_COMMITS)}", "--date=short",
                 "--pretty=format:%x1e%H%x1f%ad%x1f%s", "--name-status", "--find-renames",
                 "--diff-merges=first-parent",
             ]
@@ -180,6 +255,21 @@ def build_experience_index(settings: Settings, *, changed_only: bool = True) -> 
                 unique: dict[str, dict[str, Any]] = {str(item["sha"]): item for item in commits}
                 commits = list(unique.values())[: settings.experience_commit_limit]
         repositories[repo.name] = {"sha": sha, "commits": commits}
+
+    globally_recent = sorted(
+        (
+            (str(commit.get("date") or ""), str(commit.get("sha") or ""), repo_name)
+            for repo_name, repository in repositories.items()
+            for commit in repository.get("commits") or []
+        ),
+        reverse=True,
+    )[:EXPERIENCE_MAX_GLOBAL_COMMITS]
+    retained_commits = {(repo, sha) for _, sha, repo in globally_recent}
+    for repo_name, repository in repositories.items():
+        repository["commits"] = [
+            commit for commit in repository.get("commits") or []
+            if (repo_name, str(commit.get("sha") or "")) in retained_commits
+        ]
 
     grouped: dict[str, dict[str, Any]] = {}
     for repo_name, repository in repositories.items():
@@ -196,28 +286,45 @@ def build_experience_index(settings: Settings, *, changed_only: bool = True) -> 
                     }
                 )
 
+    selected_cases = sorted(
+        grouped.values(),
+        key=lambda case: (
+            max((str(item.get("date") or "") for item in case["commits"]), default=""),
+            str(case["ticket"]),
+        ),
+        reverse=True,
+    )[:EXPERIENCE_MAX_CASES]
     ticket_texts: dict[str, str] = {}
     if settings.runs_dir.is_dir():
-        for directory in settings.runs_dir.iterdir():
-            state = _load(directory / "session.json") if directory.is_dir() else {}
-            ticket = str(state.get("ticket") or "")
-            ticket_path = directory / "ticket.md"
-            if ticket and ticket_path.is_file():
-                ticket_texts[ticket] = ticket_path.read_text(encoding="utf-8", errors="replace")[:20_000]
+        from .core import session_dir
+
+        for case in selected_cases:
+            ticket = str(case["ticket"])
+            directory = session_dir(settings, ticket)
+            state = _load(directory / "session.json", validate_experience=False)
+            if str(state.get("ticket") or "") == ticket:
+                ticket_texts[ticket] = _text_prefix(directory / "ticket.md", 20_000)
 
     cases: list[dict[str, Any]] = []
-    for case in grouped.values():
-        commits = sorted(case["commits"], key=lambda item: (item["date"], item["repo"], item["sha"]), reverse=True)
-        paths = sorted({f"{item['repo']}:{change['path']}" for item in commits for change in item["changes"]})
+    for case in selected_cases:
+        commits = sorted(
+            case["commits"], key=lambda item: (item["date"], item["repo"], item["sha"]), reverse=True,
+        )[:EXPERIENCE_MAX_CASE_COMMITS]
+        paths = sorted({
+            f"{item['repo']}:{change['path']}" for item in commits for change in item["changes"]
+        })[:EXPERIENCE_MAX_CASE_PATHS]
         subjects = sorted({item["subject"] for item in commits})
         ticket_text = ticket_texts.get(case["ticket"], "")
-        knowledge_path = settings.knowledge_dir / "tickets" / f"{case['ticket']}.md"
+        knowledge_root = (settings.knowledge_dir / "tickets").resolve()
+        knowledge_path = (knowledge_root / f"{case['ticket']}.md").resolve()
         knowledge_text = (
-            knowledge_path.read_text(encoding="utf-8", errors="replace")[:20_000]
-            if knowledge_path.is_file()
+            _text_prefix(knowledge_path, 20_000)
+            if knowledge_path.parent == knowledge_root
             else ""
         )
-        terms = sorted(_tokens(" ".join(subjects + paths + [ticket_text, knowledge_text])))
+        terms = sorted(_tokens(" ".join(subjects + paths + [ticket_text, knowledge_text])))[
+            :EXPERIENCE_MAX_TERMS_PER_CASE
+        ]
         cases.append(
             {
                 "ticket": case["ticket"],
@@ -234,6 +341,7 @@ def build_experience_index(settings: Settings, *, changed_only: bool = True) -> 
             }
         )
     cases.sort(key=lambda item: (item["latest_date"], item["ticket"]), reverse=True)
+    cases = cases[:EXPERIENCE_MAX_CASES]
     index = {
         "version": INDEX_VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -241,7 +349,14 @@ def build_experience_index(settings: Settings, *, changed_only: bool = True) -> 
         "repositories": repositories,
         "cases": cases,
     }
-    path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+    encoded = (json.dumps(index, indent=2) + "\n").encode("utf-8")
+    while len(encoded) > EXPERIENCE_MAX_ARTIFACT_BYTES and cases:
+        cases = cases[: max(0, len(cases) // 2)]
+        index["cases"] = cases
+        encoded = (json.dumps(index, indent=2) + "\n").encode("utf-8")
+    if len(encoded) > EXPERIENCE_MAX_ARTIFACT_BYTES:
+        raise ValueError("bounded experience artifact cannot represent repository history metadata")
+    atomic_managed_bytes_write(settings.state_dir, path, encoded)
     return index
 
 
@@ -295,7 +410,13 @@ def _patches(settings: Settings, case: dict[str, Any], max_chars: int) -> str:
             "git", "show", sha, "--format=", "--no-ext-diff", "--find-renames", "--unified=2",
             "--diff-merges=first-parent", "--", *paths,
         ]
-        result = _run(command, repo.path)
+        result = _run(
+            command, repo.path,
+            max_stdout_bytes=min(
+                EXPERIENCE_MAX_GIT_STDOUT_BYTES,
+                max(64 * 1024, remaining * 4),
+            ),
+        )
         if result.returncode != 0:
             result = _run([*command[:7], *command[8:]], repo.path)
         if result.returncode != 0 or not result.stdout.strip():
@@ -353,10 +474,10 @@ def render_similar_cases(
     return "\n".join(output).rstrip() + "\n"
 
 
-def _delta_reduction(directory: Path) -> float | None:
-    sizes = [(path, path.stat().st_size) for path in sorted(directory.glob("context-*.md"))]
-    full = [size for path, size in sizes if not path.read_text(encoding="utf-8", errors="replace").startswith("# PROJECT BRAIN CONTEXT DELTA")]
-    delta = [size for path, size in sizes if path.read_text(encoding="utf-8", errors="replace").startswith("# PROJECT BRAIN CONTEXT DELTA")]
+def _delta_reduction(contexts: list[tuple[Path, str]]) -> float | None:
+    sizes = [(path, len(content.encode("utf-8")), content) for path, content in contexts]
+    full = [size for _, size, content in sizes if not content.startswith("# PROJECT BRAIN CONTEXT DELTA")]
+    delta = [size for _, size, content in sizes if content.startswith("# PROJECT BRAIN CONTEXT DELTA")]
     if not full or not delta or sum(full) == 0:
         return None
     return max(0.0, 1 - (sum(delta) / len(delta)) / (sum(full) / len(full)))
@@ -375,26 +496,74 @@ def _optional_average(rows: list[dict[str, Any]], key: str) -> float | None:
     return sum(values) / len(values) if values else None
 
 
-def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -> dict[str, Any]:
+def evaluate_sessions(
+    settings: Settings,
+    index: dict[str, Any] | None = None,
+    *,
+    tickets: set[str] | None = None,
+) -> dict[str, Any]:
     """Compare retrieved paths with later ticket-labelled commits when both exist locally."""
     index = index or load_experience_index(settings)
     cases = {item["ticket"]: item for item in index.get("cases") or []}
     evaluations: list[dict[str, Any]] = []
+    evaluated_contexts = 0
+    skipped_contexts = 0
+    skipped_sessions = 0
+    evaluated_context_bytes = 0
     if settings.runs_dir.is_dir():
+        from .core import session_dir
+
         evidence_pattern = re.compile(r"(?m)^### \d+\. (?:E-[a-f0-9]+ — )?([^—\n]+?) — `(.+?):\d+-\d+`$")
-        for directory in settings.runs_dir.iterdir():
+        selected_cases = [
+            (ticket, case) for ticket, case in sorted(cases.items())
+            if tickets is None or ticket in tickets
+        ][:EXPERIENCE_MAX_CASES]
+        for ticket, case in selected_cases:
+            directory = session_dir(settings, ticket)
             state_path = directory / "session.json"
             if not directory.is_dir() or not state_path.is_file():
                 continue
-            state = _load(state_path)
-            ticket = str(state.get("ticket") or directory.name)
-            case = cases.get(ticket)
-            if not case:
+            state = _load(state_path, validate_experience=False)
+            if str(state.get("ticket") or "") != ticket:
                 continue
-            retrieved: set[str] = set()
-            for context in directory.glob("context-*.md"):
-                for repo, path in evidence_pattern.findall(context.read_text(encoding="utf-8", errors="replace")):
-                    retrieved.add(f"{repo.strip()}:{path}")
+            available_requests = max(0, int(state.get("requests") or 0))
+            request_count = min(available_requests, EXPERIENCE_MAX_EVALUATION_CONTEXTS_PER_CASE)
+            skipped_contexts += max(0, available_requests - request_count)
+            if (
+                evaluated_contexts >= EXPERIENCE_MAX_EVALUATION_CONTEXTS
+                or evaluated_context_bytes >= EXPERIENCE_MAX_EVALUATION_BYTES
+            ):
+                skipped_contexts += request_count
+                skipped_sessions += 1
+                continue
+            contexts: list[tuple[Path, str]] = []
+            for number in range(1, request_count + 1):
+                if evaluated_contexts >= EXPERIENCE_MAX_EVALUATION_CONTEXTS:
+                    skipped_contexts += request_count - number + 1
+                    break
+                context = directory / f"context-{number:03d}.md"
+                try:
+                    if context.is_symlink() or not context.is_file():
+                        skipped_contexts += 1
+                        continue
+                    size = context.stat().st_size
+                    if (
+                        size > EXPERIENCE_MAX_CONTEXT_BYTES
+                        or evaluated_context_bytes + size > EXPERIENCE_MAX_EVALUATION_BYTES
+                    ):
+                        skipped_contexts += 1
+                        continue
+                except OSError:
+                    skipped_contexts += 1
+                    continue
+                contexts.append((context, _text_prefix(context, EXPERIENCE_MAX_CONTEXT_BYTES)))
+                evaluated_contexts += 1
+                evaluated_context_bytes += size
+            ordered_paths: list[str] = []
+            for _, context_text in contexts:
+                for repo, path in evidence_pattern.findall(context_text):
+                    ordered_paths.append(f"{repo.strip()}:{path}")
+            retrieved = set(ordered_paths)
             actual = set(case.get("paths") or [])
             actual_repos = set(case.get("repos") or [])
             retrieved_repos = {value.split(":", 1)[0] for value in retrieved}
@@ -402,9 +571,6 @@ def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -
             matched_files = actual & retrieved
             matched_repos = actual_repos & retrieved_repos
             matched_tests = actual_tests & retrieved
-            ordered_paths: list[str] = []
-            for context in sorted(directory.glob("context-*.md")):
-                ordered_paths.extend(f"{repo.strip()}:{path}" for repo, path in evidence_pattern.findall(context.read_text(encoding="utf-8", errors="replace")))
             first_relevant = next((rank for rank, value in enumerate(ordered_paths[:10], 1) if value in actual), None)
             dcg = sum(1 / math.log2(rank + 1) for rank, value in enumerate(ordered_paths[:10], 1) if value in actual)
             ideal = sum(1 / math.log2(rank + 1) for rank in range(1, min(10, len(actual)) + 1))
@@ -432,7 +598,7 @@ def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -
                         or int(((item.get("retrieval") or {}).get("trace") or {}).get("atlas_route", {}).get("prefetch_reused") or 0) > 0
                         for item in state.get("request_history") or [] if isinstance(item, dict)
                     ) else 0.0,
-                    "delta_context_reduction": _delta_reduction(directory),
+                    "delta_context_reduction": _delta_reduction(contexts),
                     "next_best_evidence_usefulness": _next_best_usefulness(state),
                 }
             )
@@ -461,17 +627,28 @@ def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -
         "generated_at": datetime.now(UTC).isoformat(),
         "indexed_cases": len(cases),
         "evaluated_sessions": len(evaluations),
+        "skipped_sessions_at_budget": skipped_sessions,
+        "evaluated_contexts": evaluated_contexts,
+        "skipped_contexts": skipped_contexts,
+        "evaluated_context_bytes": evaluated_context_bytes,
         "summary": summary,
         "evaluations": evaluations,
     }
     settings.state_dir.mkdir(parents=True, exist_ok=True)
-    (settings.state_dir / "experience-eval.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    settings.generated_dir.mkdir(parents=True, exist_ok=True)
+    atomic_managed_text_write(
+        settings.state_dir,
+        settings.state_dir / "experience-eval.json",
+        json.dumps(report, indent=2) + "\n",
+    )
+    from .core import _atomic_generated_text_write
+
     lines = [
         "# Project Brain Experience Evaluation",
         "",
         f"Indexed ticket cases: {len(cases)}",
         f"Sessions with a later matching commit: {len(evaluations)}",
+        f"Contexts evaluated: {evaluated_contexts}",
+        f"Contexts skipped by safety or budget limits: {skipped_contexts}",
         f"Aggregate repository recall: {percent(summary['repo_recall'])}",
         f"Aggregate changed-file recall: {percent(summary['file_recall'])}",
         f"Aggregate changed-test recall: {percent(summary['test_recall'])}",
@@ -497,5 +674,7 @@ def evaluate_sessions(settings: Settings, index: dict[str, Any] | None = None) -
                 "",
             ]
         )
-    (settings.generated_dir / "EXPERIENCE_REPORT.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    _atomic_generated_text_write(
+        settings, settings.generated_dir / "EXPERIENCE_REPORT.md", "\n".join(lines).rstrip() + "\n",
+    )
     return report

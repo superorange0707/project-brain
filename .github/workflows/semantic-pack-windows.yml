@@ -1,0 +1,165 @@
+name: Build Windows Semantic model pack
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: New semantic-pack-windows-v* draft release tag used in descriptor URLs
+        required: true
+        type: string
+      publish:
+        description: Create, verify, and publish a new immutable Windows pack release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Native Windows amd64 Semantic pack
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Validate target release identity
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^semantic-pack-windows-v[0-9]+\.[0-9]+\.[0-9]+$') { throw "release_tag must be semantic-pack-windows-vX.Y.Z" }
+          if ((git rev-parse HEAD) -ne $env:SOURCE_SHA) { throw "checked-out builder revision does not match GITHUB_SHA" }
+          if ('${{ inputs.publish }}' -eq 'true') {
+            if ($env:SOURCE_REF -ne "refs/heads/$env:DEFAULT_BRANCH") { throw "official pack publication must run from the default branch" }
+            gh release view $env:RELEASE_TAG 2>$null | Out-Null
+            $releaseExists = $LASTEXITCODE -eq 0
+            $global:LASTEXITCODE = 0
+            if ($releaseExists) { throw "release tag already exists; immutable pack releases cannot be appended" }
+            gh api "repos/$env:GH_REPO/git/ref/tags/$env:RELEASE_TAG" --silent 2>$null
+            $tagExists = $LASTEXITCODE -eq 0
+            $global:LASTEXITCODE = 0
+            if ($tagExists) { throw "release tag already exists; pack provenance must start at the reviewed builder commit" }
+            gh api "repos/$env:GH_REPO" --silent
+            if ($LASTEXITCODE -ne 0) { throw "could not verify repository access before pack publication" }
+          }
+      - name: Download and verify official upstream inputs
+        env:
+          QWEN_GGUF_REVISION: 4eb3b8293ac9b642f61ece63459fae31e82d6669
+          QWEN_GGUF_SHA256: 0c04b2b5e9b039dd01fd1e6d757968855fd5e2523bb3e9a4a03fa6454973a1af
+          QWEN_TOKENIZER_REVISION: 5cf2132abc99cad020ac570b19d031efec650f2b
+          QWEN_TOKENIZER_SHA256: 83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d
+          APACHE_LICENSE_SHA256: cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+        run: |
+          New-Item -ItemType Directory -Path upstream | Out-Null
+          curl.exe --fail --location --retry 3 --output upstream/Qwen3-Embedding-4B-Q6_K.gguf "https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/$env:QWEN_GGUF_REVISION/Qwen3-Embedding-4B-Q6_K.gguf"
+          if ((Get-FileHash upstream/Qwen3-Embedding-4B-Q6_K.gguf -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:QWEN_GGUF_SHA256) { throw "official Qwen GGUF checksum mismatch" }
+          curl.exe --fail --location --retry 3 --output upstream/tokenizer.json "https://huggingface.co/Qwen/Qwen3-Embedding-4B/resolve/$env:QWEN_TOKENIZER_REVISION/tokenizer.json"
+          if ((Get-FileHash upstream/tokenizer.json -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:QWEN_TOKENIZER_SHA256) { throw "official tokenizer checksum mismatch" }
+          curl.exe --fail --location --retry 3 --output upstream/APACHE-2.0.txt https://www.apache.org/licenses/LICENSE-2.0.txt
+          if ((Get-FileHash upstream/APACHE-2.0.txt -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:APACHE_LICENSE_SHA256) { throw "Apache license checksum mismatch" }
+      - name: Build pinned portable CPU llama.cpp runtime
+        env:
+          LLAMA_CPP_REVISION: 0badc06ab53a8eb96e01242b92ec1365c4465a2a
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp.git upstream/llama.cpp
+          git -C upstream/llama.cpp checkout --detach $env:LLAMA_CPP_REVISION
+          if ((git -C upstream/llama.cpp rev-parse HEAD) -ne $env:LLAMA_CPP_REVISION) { throw "llama.cpp revision mismatch" }
+          cmake -S upstream/llama.cpp -B upstream/llama.cpp/build -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DGGML_NATIVE=OFF -DGGML_METAL=OFF -DGGML_OPENMP=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF
+          cmake --build upstream/llama.cpp/build --config Release --target llama-server --parallel 3
+          $runtime = Get-ChildItem upstream/llama.cpp/build -Filter llama-server.exe -Recurse | Select-Object -First 1
+          if (-not $runtime) { throw "llama-server.exe was not built" }
+          Copy-Item $runtime.FullName upstream/llama-server.exe
+          $dumpbin = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue).Source
+          if (-not $dumpbin) {
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $visualStudio = & $vswhere -latest -property installationPath
+            $dumpbin = (Get-ChildItem "$visualStudio\VC\Tools\MSVC" -Filter dumpbin.exe -Recurse | Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1).FullName
+          }
+          if (-not $dumpbin) { throw "dumpbin is required to verify portable runtime dependencies" }
+          $dependencies = (& $dumpbin /DEPENDENTS upstream/llama-server.exe) | Select-String -Pattern '[A-Za-z0-9_.-]+\.dll' | ForEach-Object { $_.Matches.Value.ToLowerInvariant() }
+          $nonPortable = $dependencies | Where-Object { $_ -match '^(vcruntime|msvcp|concrt|api-ms-win-crt|ucrtbase|vcomp|libomp|ggml|llama)' }
+          if ($nonPortable) { throw "llama-server.exe has non-portable runtime dependencies: $($nonPortable -join ', ')" }
+      - name: Build and verify bounded public conformance pack
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          QWEN_GGUF_REVISION: 4eb3b8293ac9b642f61ece63459fae31e82d6669
+          QWEN_GGUF_SHA256: 0c04b2b5e9b039dd01fd1e6d757968855fd5e2523bb3e9a4a03fa6454973a1af
+          QWEN_TOKENIZER_REVISION: 5cf2132abc99cad020ac570b19d031efec650f2b
+          LLAMA_CPP_REVISION: 0badc06ab53a8eb96e01242b92ec1365c4465a2a
+          BUILDER_REVISION: ${{ github.sha }}
+        run: |
+          python scripts/build_semantic_pack.py --platform windows-amd64 --model upstream/Qwen3-Embedding-4B-Q6_K.gguf --model-sha256 $env:QWEN_GGUF_SHA256 --tokenizer upstream/tokenizer.json --runtime upstream/llama-server.exe --runtime-license upstream/llama.cpp/LICENSE --license upstream/APACHE-2.0.txt --output semantic-pack-windows-dist --release-tag $env:RELEASE_TAG --upstream-revision $env:QWEN_GGUF_REVISION --tokenizer-revision $env:QWEN_TOKENIZER_REVISION --runtime-revision $env:LLAMA_CPP_REVISION --builder-revision $env:BUILDER_REVISION --minimum-brain-version 1.0.0
+          Get-Content semantic-pack-windows-dist/SHA256SUMS.txt | ForEach-Object {
+            $parts = $_ -split '\s+', 2
+            if ((Get-FileHash (Join-Path semantic-pack-windows-dist $parts[1]) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $parts[0]) { throw "pack checksum mismatch: $($parts[1])" }
+          }
+          Move-Item semantic-pack-windows-dist/SHA256SUMS.txt semantic-pack-windows-dist/SHA256SUMS-windows-amd64.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: semantic-pack-windows-amd64
+          path: |
+            semantic-pack-windows-dist/*-metadata.tar.gz
+            semantic-pack-windows-dist/*.part-*
+            semantic-pack-windows-dist/*-descriptor.json
+            semantic-pack-windows-dist/SHA256SUMS-windows-amd64.txt
+          if-no-files-found: error
+  publish:
+    name: Publish authorized Windows Semantic pack
+    if: ${{ inputs.publish }}
+    needs: build
+    runs-on: windows-latest
+    environment: model-pack-publish
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: semantic-pack-windows-amd64
+          path: semantic-pack-windows-dist
+      - name: Publish only after explicit authorization
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          Get-Content semantic-pack-windows-dist/SHA256SUMS-windows-amd64.txt | ForEach-Object {
+            $parts = $_ -split '\s+', 2
+            if ((Get-FileHash (Join-Path semantic-pack-windows-dist $parts[1]) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $parts[0]) { throw "downloaded build artifact mismatch: $($parts[1])" }
+          }
+          gh release view $env:RELEASE_TAG 2>$null | Out-Null
+          $releaseExists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          gh api "repos/$env:GH_REPO/git/ref/tags/$env:RELEASE_TAG" --silent 2>$null
+          $tagExists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          if ($releaseExists -or $tagExists) { throw "release or tag appeared after validation; refusing publication" }
+          gh release create $env:RELEASE_TAG --draft --target $env:SOURCE_SHA --title "Project Brain Windows Semantic Pack $env:RELEASE_TAG" --notes "Native Windows amd64 Semantic pack. Publish only after the workflow's checksum and conformance gates pass."
+          $tagObject = gh api "repos/$env:GH_REPO/git/ref/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($tagObject.object.type -ne 'commit' -or $tagObject.object.sha -ne $env:SOURCE_SHA) { throw "created pack tag does not reference the reviewed builder commit" }
+          $assets = Get-ChildItem semantic-pack-windows-dist -File | ForEach-Object { $_.FullName }
+          if (-not $assets) { throw "no verified Semantic release assets were downloaded" }
+          gh release upload $env:RELEASE_TAG $assets
+          New-Item -ItemType Directory -Path release-verification | Out-Null
+          gh release download $env:RELEASE_TAG --dir release-verification
+          $checksum = Join-Path release-verification SHA256SUMS-windows-amd64.txt
+          $listed = @()
+          Get-Content $checksum | ForEach-Object {
+            $parts = $_ -split '\s+', 2
+            $listed += $parts[1]
+            if ((Get-FileHash (Join-Path release-verification $parts[1]) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $parts[0]) { throw "draft release artifact mismatch: $($parts[1])" }
+          }
+          $actual = @(Get-ChildItem release-verification -File | Where-Object { $_.Name -ne 'SHA256SUMS-windows-amd64.txt' } | ForEach-Object { $_.Name })
+          if (Compare-Object ($listed | Sort-Object) ($actual | Sort-Object)) { throw "draft release asset set differs from SHA256SUMS" }
+          gh release edit $env:RELEASE_TAG --draft=false --latest=false

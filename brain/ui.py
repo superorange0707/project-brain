@@ -16,16 +16,23 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .platforms import read_managed_text
+
 from .agent import archive_final_solution, create_m365_agent_kit, response_preview
 from .core import (
     BrainError,
+    MAX_START_TICKET_BYTES,
     Settings,
     create_context,
     create_feedback,
     deliver,
+    delivery_artifact,
     load_index_state,
     load_source_state,
     request_repair_prompt,
+    _read_session_json,
+    _read_session_artifact,
+    _validated_runs_root,
     session_dir,
     session_state,
     start_session,
@@ -36,6 +43,11 @@ from .ops import progress_event
 
 
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
+MAX_SESSION_SCAN_ITEMS = 1_000
+MAX_SESSION_RESULTS = 200
+MAX_SESSION_ARTIFACT_SCAN_ITEMS = 500
+MAX_SESSION_ARTIFACT_RESULTS = 200
+MAX_UI_ARTIFACT_BYTES = 4 * 1024 * 1024
 
 
 def _display_path(settings: Settings, path: Path) -> str:
@@ -49,39 +61,60 @@ def _session_artifacts(settings: Settings, ticket: str) -> list[dict[str, Any]]:
     directory = session_dir(settings, ticket)
     if not directory.is_dir():
         return []
-    artifacts: list[dict[str, Any]] = []
-    paths = sorted(
-        (item for item in directory.iterdir() if not item.is_symlink()),
-        key=lambda item: (item.stat().st_mtime_ns, item.name),
+    active_raw = session_state(settings, ticket).get("active_artifacts")
+    active = (
+        {str(item) for item in active_raw if isinstance(item, str)}
+        if isinstance(active_raw, list)
+        else None
     )
-    for path in paths:
-        if (
-            not path.is_file()
-            or path.name in {"session.json", "current-handoff.md"}
-            or path.suffix not in {".md", ".yml", ".json"}
-        ):
+    artifacts: list[dict[str, Any]] = []
+    for index, path in enumerate(directory.iterdir()):
+        if index >= MAX_SESSION_ARTIFACT_SCAN_ITEMS:
+            break
+        try:
+            if (
+                path.is_symlink() or not path.is_file()
+                or path.name in {"session.json", "current-handoff.md"}
+                or path.suffix not in {".md", ".yml", ".json"}
+                or (active is not None and path.name not in active)
+            ):
+                continue
+            metadata = path.stat()
+            if metadata.st_size > MAX_UI_ARTIFACT_BYTES:
+                continue
+        except OSError:
             continue
         kind = path.name.split("-", 1)[0]
         artifacts.append({
             "name": path.name,
             "kind": kind,
-            "bytes": path.stat().st_size,
-            "updated_at": datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(),
+            "bytes": metadata.st_size,
+            "updated_at": datetime.fromtimestamp(metadata.st_mtime, UTC).isoformat(),
         })
-    return artifacts
+    return sorted(
+        artifacts, key=lambda item: (item["updated_at"], item["name"]), reverse=True,
+    )[:MAX_SESSION_ARTIFACT_RESULTS]
 
 
 def _sessions(settings: Settings) -> list[dict[str, Any]]:
-    if not settings.runs_dir.is_dir():
+    try:
+        runs_root = _validated_runs_root(settings)
+    except BrainError:
         return []
     sessions: list[dict[str, Any]] = []
-    for directory in settings.runs_dir.iterdir():
+    for index, directory in enumerate(runs_root.iterdir()):
+        if index >= MAX_SESSION_SCAN_ITEMS:
+            break
         state_path = directory / "session.json"
-        if not directory.is_dir() or directory.is_symlink() or not state_path.is_file():
+        if (
+            directory.is_symlink() or not directory.is_dir()
+            or state_path.is_symlink() or not state_path.is_file()
+        ):
             continue
         try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            state = _read_session_json(state_path)
+            updated_at = datetime.fromtimestamp(state_path.stat().st_mtime, UTC).isoformat()
+        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
             continue
         sessions.append({
             "ticket": str(state.get("ticket") or directory.name),
@@ -92,10 +125,11 @@ def _sessions(settings: Settings) -> list[dict[str, Any]]:
             "atlas_generation": state.get("generation"),
             "context_id": state.get("last_context_id"),
             "prefetch_status": (state.get("prefetch") or {}).get("status"),
+            "wave": (state.get("investigation_runtime") or {}).get("wave"),
             "started_at": state.get("started_at"),
-            "updated_at": datetime.fromtimestamp(state_path.stat().st_mtime, UTC).isoformat(),
+            "updated_at": updated_at,
         })
-    return sorted(sessions, key=lambda item: item["updated_at"], reverse=True)
+    return sorted(sessions, key=lambda item: (item["updated_at"], item["ticket"]), reverse=True)[:MAX_SESSION_RESULTS]
 
 
 def project_status(
@@ -111,13 +145,17 @@ def project_status(
     indexes = load_index_state(settings)
     graph_path = settings.state_dir / "graphs.json"
     try:
-        graphs = json.loads(graph_path.read_text(encoding="utf-8")) if graph_path.is_file() else {}
-    except (OSError, json.JSONDecodeError):
+        graphs = json.loads(read_managed_text(
+            settings.state_dir, graph_path, max_bytes=16 * 1024 * 1024,
+        ))
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
         graphs = {}
     experience = load_experience_index(settings)
     try:
-        evaluation = json.loads((settings.state_dir / "experience-eval.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        evaluation = json.loads(read_managed_text(
+            settings.state_dir, settings.state_dir / "experience-eval.json", max_bytes=16 * 1024 * 1024,
+        ))
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
         evaluation = {}
     repositories: list[dict[str, Any]] = []
     current = 0
@@ -203,12 +241,8 @@ def _delivery(settings: Settings, ticket: str, part: int | None = None) -> dict[
         return {"current": 0, "total": 0, "content": "", "path": None}
     current = part or int(delivery.get("current") or 1)
     current = max(1, min(len(paths), current))
-    directory = session_dir(settings, ticket).resolve()
-    path = paths[current - 1].resolve()
-    handoffs = (settings.generated_dir / "handoffs").resolve()
-    if not (path.is_relative_to(directory) or path.is_relative_to(handoffs)) or not path.is_file():
-        raise BrainError("Invalid delivery path in session state")
-    return {"current": current, "total": len(paths), "content": path.read_text(encoding="utf-8"), "path": str(path)}
+    path, content = delivery_artifact(settings, ticket, paths[current - 1])
+    return {"current": current, "total": len(paths), "content": content, "path": str(path)}
 
 
 def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
@@ -221,7 +255,10 @@ def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
     latest = history[-1] if history else {}
     return {
         "ticket": ticket,
-        "ticket_text": ticket_path.read_text(encoding="utf-8") if ticket_path.is_file() else "",
+        "ticket_text": (
+            _read_session_artifact(settings, ticket, ticket_path, MAX_START_TICKET_BYTES)
+            if ticket_path.exists() else ""
+        ),
         "requests": int(state.get("requests") or 0),
         "feedbacks": int(state.get("feedbacks") or 0),
         "status": str(state.get("status") or "investigating"),
@@ -235,6 +272,8 @@ def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
         "investigation_memory": state.get("investigation_memory") or {},
         "coverage_map": state.get("coverage_map") or {},
         "prefetch": state.get("prefetch") or {},
+        "progressive_checkpoint": state.get("progressive_checkpoint") or {},
+        "cockpit": state.get("investigation_runtime") or {},
         "artifacts": _session_artifacts(settings, ticket),
         "delivery": _delivery(settings, ticket),
     }
@@ -247,26 +286,50 @@ def _artifact(settings: Settings, ticket: str, name: str) -> dict[str, Any]:
     if name not in allowed:
         raise BrainError("Artifact does not exist")
     path = session_dir(settings, ticket) / name
-    return {"name": name, "content": path.read_text(encoding="utf-8")}
+    return {"name": name, "content": _read_session_artifact(settings, ticket, path, MAX_UI_ARTIFACT_BYTES)}
 
 
 @ticket_exclusive
 def _delete_session(settings: Settings, ticket: str) -> list[str]:
+    _validated_runs_root(settings)
     directory = session_dir(settings, ticket)
     if not directory.is_dir() or directory.is_symlink():
         raise BrainError(f"Session {ticket} does not exist")
     safe_name = directory.name
-    shutil.rmtree(directory)
-    removed = [str(directory)]
+    generated_root = settings.generated_dir
+    try:
+        generated_root_is_direct = (
+            not generated_root.is_symlink()
+            and generated_root.is_dir()
+            and generated_root.resolve() == generated_root.absolute()
+        )
+    except OSError:
+        generated_root_is_direct = False
+    if not generated_root_is_direct:
+        raise BrainError("Generated handoff directory escapes managed Brain state")
     handoff_directory = settings.generated_dir / "handoffs"
     pattern = re.compile(
-        rf"^{re.escape(safe_name)}-(?:current|start|final|update|context-\d+|evidence-\d+|feedback-\d+)\.md$"
+        rf"^{re.escape(safe_name)}-(?:current|start|final|update|context-\d+|evidence-\d+|feedback-\d+|"
+        rf"checkpoint-\d+|checkpoint-delta-\d+)\.md$"
     )
+    handoffs: list[Path] = []
+    if handoff_directory.exists() and (
+        handoff_directory.is_symlink()
+        or not handoff_directory.is_dir()
+        or handoff_directory.resolve().parent != settings.generated_dir.resolve()
+    ):
+        raise BrainError("Generated handoff directory escapes managed Brain state")
     if handoff_directory.is_dir():
         for path in handoff_directory.iterdir():
             if path.is_file() and not path.is_symlink() and pattern.fullmatch(path.name):
-                path.unlink()
-                removed.append(str(path))
+                if path.resolve().parent != handoff_directory.resolve():
+                    raise BrainError("Generated handoff escapes managed Brain state")
+                handoffs.append(path)
+    shutil.rmtree(directory)
+    removed = [str(directory)]
+    for path in handoffs:
+        path.unlink()
+        removed.append(str(path))
     return removed
 
 
@@ -362,6 +425,13 @@ class _OperationCoordinator:
                         phase_label=str(event.get("phase_label") or "") or None,
                         **details,
                     )
+                previous = self._jobs[job_id].get("progress") or {}
+                for key in (
+                    "context_id", "checkpoint_artifact", "continuation_artifact",
+                    "continuation_handoff_artifact",
+                ):
+                    if key not in safe and previous.get(key):
+                        safe[key] = previous[key]
                 self._jobs[job_id].update({"status": "running", "phase": safe["phase_label"], "progress": safe})
 
     def start(self, name: str, operation: Any, *, kind: str = "mutation", ticket: str | None = None) -> dict[str, Any]:
@@ -655,12 +725,19 @@ class _Handler(BaseHTTPRequestHandler):
             progress=progress,
         )
         deliver(settings, ticket, content, _target(body), copy=False)
+        checkpoint = session_state(settings, ticket).get("progressive_checkpoint") or {}
         return {
             "ticket": ticket,
             **preview,
             "request": number,
             "path": artifact.name,
             "delivery": _delivery(settings, ticket),
+            "progressive_delivery": {
+                "checkpoint_artifact": checkpoint.get("artifact"),
+                "checkpoint_handoff_artifact": checkpoint.get("handoff_artifact"),
+                "continuation_artifact": checkpoint.get("continuation_artifact"),
+                "continuation_handoff_artifact": checkpoint.get("continuation_handoff_artifact"),
+            } if checkpoint.get("continuation_status") == "published" else None,
             "session": _session_detail(settings, ticket),
         }
 
@@ -832,8 +909,8 @@ def serve_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True)
         raise BrainError(f"Could not start Project Brain UI on loopback port {port}: {exc}") from exc
     actual_port = int(server.server_address[1])
     url = f"http://127.0.0.1:{actual_port}/?token={token}"
-    print(f"Project Brain UI: {url}")
-    print("Local-only session. Press Ctrl+C to stop.")
+    print(f"Project Brain UI: {url}", flush=True)
+    print("Local-only session. Press Ctrl+C to stop.", flush=True)
     if open_browser:
         webbrowser.open(url)
     try:

@@ -16,13 +16,16 @@ from brain.catalog import (
 )
 from brain.core import load_settings, snapshot_indexes
 from brain.editions import capabilities
-from brain.ops import refresh_brain, semantic_status
+from brain.ops import dashboard_status, refresh_brain, semantic_status
+from brain.models import pack_compatibility_identity
 from brain.semantic import (
     ATLAS_CARD_VERSION,
     CARD_VERSION,
     CHUNK_SCHEMA_VERSION,
     SEMANTIC_EMBEDDING_INPUT_VERSION,
+    SEMANTIC_SHARD_MANIFEST_VERSION,
     SEMANTIC_MAX_CARD_INPUT_BYTES,
+    _shard_sha256,
     build_semantic_index,
     semantic_schema_version,
     semantic_state_compatibility,
@@ -97,6 +100,15 @@ class SemanticAtlasAlignmentTests(unittest.TestCase):
         self.assertFalse(semantic_status(self.settings)["stale"])
         self.assertTrue(capabilities(self.settings)["semantic_aligned"])
 
+        immutable_artifact = self.settings.state_dir / str(generation.component("semantic")["artifact_ref"])
+        corrupt = json.loads(immutable_artifact.read_text(encoding="utf-8"))
+        corrupt["pack_id"] = "corrupt-but-valid-json"
+        immutable_artifact.write_text(json.dumps(corrupt), encoding="utf-8")
+        recovered = self.publish(state, atlas)
+        self.assertNotEqual(generation.generation, recovered.generation)
+        self.assertEqual(generation.generation, recovered.component("lexical")["details"]["recovery_of"])
+        self.assertTrue(semantic_status(self.settings)["aligned"])
+
     def test_incompatible_v08_state_rebuilds_with_cache_reuse_and_preserves_old_component(self) -> None:
         state, atlas = self.atlas_state()
         progress: list[dict[str, object]] = []
@@ -123,6 +135,8 @@ class SemanticAtlasAlignmentTests(unittest.TestCase):
         }
         publish_generation(self.settings, state, components=old_components, atlas_payload=atlas)
         generation_one = current_generation_ref(self.settings)
+        self.assertEqual("degraded", generation_one.component("semantic")["status"])
+        self.assertIn("managed rebuild", generation_one.component("semantic")["details"]["reason"])
         old_artifact = self.settings.state_dir / str(generation_one.component("semantic")["artifact_ref"])
         self.assertTrue(old_artifact.is_file())
         self.assertFalse(semantic_status(self.settings)["aligned"])
@@ -201,6 +215,105 @@ class SemanticAtlasAlignmentTests(unittest.TestCase):
         self.assertEqual("unavailable", current_generation_ref(self.settings).component("semantic")["status"])
         self.assertEqual("Core refresh complete; Semantic needs attention", events[-1]["phase_label"])
 
+    def test_initial_semantic_build_is_never_aligned_before_atlas_registration(self) -> None:
+        original_build = build_semantic_index
+        observed: dict[str, object] = {}
+
+        def injected_build(settings, *, progress=None):
+            return original_build(settings, embed=self.embed, pack_id="initial-pack", progress=progress)
+
+        def paused_publish(*args, **kwargs):
+            observed.update(semantic_status(self.settings))
+            return publish_generation(*args, **kwargs)
+
+        with (
+            mock.patch("brain.editions.current_edition", return_value="precision"),
+            mock.patch("brain.semantic.build_semantic_index", side_effect=injected_build),
+            mock.patch("brain.catalog.publish_generation", side_effect=paused_publish),
+        ):
+            outcome = refresh_brain(self.settings, fetch=False, discover=False)
+
+        self.assertTrue(observed["available"])
+        self.assertFalse(observed["aligned"])
+        self.assertIn("not registered", str(observed["reason"]))
+        self.assertTrue(outcome.semantic["aligned"])
+
+    def test_bare_search_database_never_reports_core_ready_or_fresh(self) -> None:
+        self.settings.state_dir.mkdir(parents=True, exist_ok=True)
+        sqlite3.connect(self.settings.state_dir / "search.sqlite3").close()
+
+        status = dashboard_status(self.settings)
+
+        self.assertEqual("Action required", status["health"])
+        self.assertFalse(status["core"]["ready"])
+        self.assertFalse(status["capabilities"]["lexical_index"])
+        self.assertTrue(status["freshness"]["repositories"])
+        self.assertFalse(status["freshness"]["repositories"][0]["current"])
+
+    def test_status_polling_never_hashes_semantic_shards(self) -> None:
+        state, atlas = self.atlas_state()
+        build_semantic_index(
+            self.settings, embed=self.embed, pack_id="status-pack", atlas_cards=atlas["cards"],
+        )
+        self.publish(state, atlas)
+
+        with mock.patch(
+            "brain.semantic._shard_sha256",
+            side_effect=AssertionError("status must not hash Semantic shard payloads"),
+        ):
+            self.assertTrue(semantic_status(self.settings)["aligned"])
+            self.assertTrue(capabilities(self.settings)["semantic_aligned"])
+            self.assertIn(dashboard_status(self.settings)["health"], {"Healthy", "Degraded"})
+
+    def test_status_cheaply_rejects_missing_or_wrong_size_semantic_shards(self) -> None:
+        state, atlas = self.atlas_state()
+        build_semantic_index(
+            self.settings, embed=self.embed, pack_id="status-shard-pack", atlas_cards=atlas["cards"],
+        )
+        semantic_path = self.settings.state_dir / "semantic-index.json"
+        semantic = json.loads(semantic_path.read_text(encoding="utf-8"))
+        source_entries = list(semantic["entries"])
+        shard_root = self.settings.state_dir / "semantic-shards"
+        shard_root.mkdir(parents=True, exist_ok=True)
+        shard_path = shard_root / "status-shard.usearch"
+        original = b"bounded-semantic-shard"
+        shard_path.write_bytes(original)
+        pack = {
+            "pack_id": "status-shard-pack", "capability": "embedding",
+            "embedding_dimension": int(semantic["dimension"]), "test_only": True,
+            "pack_compatibility_identity": "sha256:" + ("9" * 64),
+        }
+        semantic.update({
+            "backend": "usearch",
+            "pack_compatibility_identity": pack_compatibility_identity(pack),
+            "entries": [],
+            "shards": [{
+                "repo": "service", "snapshot": state["service"]["sha"],
+                "path": str(shard_path), "artifact_ref": shard_path.name,
+                "artifact_bytes": len(original), "artifact_sha256": _shard_sha256(shard_path),
+                "entries": [
+                    {key: entry[key] for key in ("path", "chunk_id")}
+                    for entry in source_entries if entry["repo"] == "service"
+                ],
+            }],
+        })
+        semantic_path.write_text(json.dumps(semantic), encoding="utf-8")
+
+        with mock.patch("brain.semantic.verified_pack", return_value=pack):
+            self.publish(state, atlas)
+            with mock.patch(
+                "brain.semantic._shard_sha256",
+                side_effect=AssertionError("status must not hash Semantic shard payloads"),
+            ):
+                self.assertTrue(semantic_status(self.settings)["aligned"])
+                shard_path.unlink()
+                self.assertFalse(semantic_status(self.settings)["aligned"])
+                self.assertFalse(capabilities(self.settings)["semantic_aligned"])
+                shard_path.write_bytes(original + b"-wrong-size")
+                self.assertFalse(semantic_status(self.settings)["aligned"])
+                shard_path.write_bytes(original)
+                self.assertTrue(semantic_status(self.settings)["aligned"])
+
     def test_alignment_rejects_component_and_shard_mismatches(self) -> None:
         state, atlas = self.atlas_state()
         build_semantic_index(
@@ -242,15 +355,18 @@ class SemanticAtlasAlignmentTests(unittest.TestCase):
             "card_version": CARD_VERSION,
             "embedding_input_version": SEMANTIC_EMBEDDING_INPUT_VERSION,
             "atlas_card_version": ATLAS_CARD_VERSION,
+            "shard_manifest_version": SEMANTIC_SHARD_MANIFEST_VERSION,
             "backend": "usearch", "pack_id": "production-pack", "dimension": 3, "stale": False,
             "snapshots": snapshots, "entries": [],
             "shards": [{
                 "repo": "service", "snapshot": "source-S", "path": str(shard),
-                "artifact_ref": shard.name, "artifact_bytes": shard.stat().st_size, "entries": [],
+                "artifact_ref": shard.name, "artifact_bytes": shard.stat().st_size,
+                "artifact_sha256": _shard_sha256(shard), "entries": [],
             }],
         }
         manifest = {"pack_id": "production-pack", "embedding_dimension": 3}
-        with mock.patch("brain.semantic.active_pack", return_value=manifest):
+        usearch_state["pack_compatibility_identity"] = pack_compatibility_identity(manifest)
+        with mock.patch("brain.semantic.verified_pack", return_value=manifest):
             self.assertTrue(semantic_state_compatibility(self.settings, usearch_state, snapshots)[0])
             missing = json.loads(json.dumps(usearch_state))
             missing["shards"][0]["path"] = str(shard.with_name("missing.usearch"))
@@ -264,6 +380,9 @@ class SemanticAtlasAlignmentTests(unittest.TestCase):
             wrong_dimension = json.loads(json.dumps(usearch_state))
             wrong_dimension["dimension"] = 4
             self.assertFalse(semantic_state_compatibility(self.settings, wrong_dimension, snapshots)[0])
+            shard.write_bytes(b"changed")
+            self.assertEqual(usearch_state["shards"][0]["artifact_bytes"], shard.stat().st_size)
+            self.assertFalse(semantic_state_compatibility(self.settings, usearch_state, snapshots)[0])
 
         live_projection = self.settings.state_dir / "semantic-index.json"
         stale = json.loads(live_projection.read_text(encoding="utf-8"))
@@ -310,7 +429,7 @@ class SemanticAtlasAlignmentTests(unittest.TestCase):
 
     def test_schema_version_is_explicitly_part_of_component_contract(self) -> None:
         self.assertEqual(
-            f"{CHUNK_SCHEMA_VERSION}:{CARD_VERSION}:{SEMANTIC_EMBEDDING_INPUT_VERSION}:{ATLAS_CARD_VERSION}",
+            f"{CHUNK_SCHEMA_VERSION}:{CARD_VERSION}:{SEMANTIC_EMBEDDING_INPUT_VERSION}:{ATLAS_CARD_VERSION}:{SEMANTIC_SHARD_MANIFEST_VERSION}",
             semantic_schema_version(),
         )
 

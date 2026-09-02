@@ -77,6 +77,18 @@ qwen3-reranker-4b-q6k-darwin-arm64/
 
 Production manifests must contain checksums for the runtime, weights, tokenizer, and golden suite. `weight_sha256` and `tokenizer_sha256` must equal the matching entries in `artifacts`, so a pack cannot silently swap a model after review. `document_card_version` and `chunk_schema_version` are required for every pack; for rerankers, they version bounded candidate-card serialization rather than an embedding dimension. Use `embedding_dimension: 0` for a reranker.
 
+Native runtime packs are platform-specific. A Windows amd64 pack uses
+`llama-server.exe`, declares `platform: windows-amd64` in its release descriptor,
+and declares `runtime_compatibility.os: windows` plus
+`runtime_compatibility.architecture: amd64` in its manifest. Core rejects a
+foreign native runtime before starting or registering it. The Windows builders
+reuse the exact pinned model identity but rebuild and rerun public conformance
+with a source-pinned portable Windows CPU runtime. Each Windows pack is first
+published from a new draft Windows-specific pack tag; immutable Darwin releases
+are never reopened or appended. A Windows alias is not added
+to the Core catalog until the published descriptor SHA-256, reconstructed pack,
+clean install, and actual Windows conformance have all been verified.
+
 ```json
 {
   "pack_id": "qwen3-reranker-4b-q6k-darwin-arm64",
@@ -211,7 +223,8 @@ The downloader accepts only credential-free HTTPS, approved hosts, a declared co
 
 Model installation preserves full TLS certificate and hostname verification. The
 Core downloader uses native operating-system trust through `truststore`: the
-macOS Keychain on macOS and platform OpenSSL trust on Linux. Therefore an
+macOS Keychain on macOS, the Windows certificate store, and platform OpenSSL
+trust on Linux. Therefore an
 enterprise inspection root already trusted by the operating system is consumed
 without adding that certificate to Project Brain or committing it to a pack.
 

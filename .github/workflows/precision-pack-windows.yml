@@ -1,0 +1,197 @@
+name: Build Windows Precision model pack
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: New precision-pack-windows-v* draft release tag used in descriptor URLs
+        required: true
+        type: string
+      publish:
+        description: Create, verify, and publish a new immutable Windows pack release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Native Windows amd64 Precision pack
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Validate target release identity
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^precision-pack-windows-v[0-9]+\.[0-9]+\.[0-9]+$') { throw "release_tag must be precision-pack-windows-vX.Y.Z" }
+          if ((git rev-parse HEAD) -ne $env:SOURCE_SHA) { throw "checked-out builder revision does not match GITHUB_SHA" }
+          if ('${{ inputs.publish }}' -eq 'true') {
+            if ($env:SOURCE_REF -ne "refs/heads/$env:DEFAULT_BRANCH") { throw "official pack publication must run from the default branch" }
+            gh release view $env:RELEASE_TAG 2>$null | Out-Null
+            $releaseExists = $LASTEXITCODE -eq 0
+            $global:LASTEXITCODE = 0
+            if ($releaseExists) { throw "release tag already exists; immutable pack releases cannot be appended" }
+            gh api "repos/$env:GH_REPO/git/ref/tags/$env:RELEASE_TAG" --silent 2>$null
+            $tagExists = $LASTEXITCODE -eq 0
+            $global:LASTEXITCODE = 0
+            if ($tagExists) { throw "release tag already exists; pack provenance must start at the reviewed builder commit" }
+            gh api "repos/$env:GH_REPO" --silent
+            if ($LASTEXITCODE -ne 0) { throw "could not verify repository access before pack publication" }
+          }
+      - name: Restore the exact released Q6_K model and public references
+        env:
+          DARWIN_DESCRIPTOR_SHA256: 9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7
+          DARWIN_DESCRIPTOR_URL: https://github.com/superorange0707/project-brain/releases/download/precision-pack-v1.0.2/qwen3-reranker-4b-q6k-darwin-arm64-descriptor.json
+        run: |
+          New-Item -ItemType Directory -Path upstream,upstream/darwin-metadata | Out-Null
+          curl.exe --fail --location --output upstream/descriptor.json $env:DARWIN_DESCRIPTOR_URL
+          if ((Get-FileHash upstream/descriptor.json -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:DARWIN_DESCRIPTOR_SHA256) { throw "pinned Precision descriptor checksum mismatch" }
+          @'
+          import hashlib, json, pathlib, shutil, urllib.request
+          root = pathlib.Path("upstream")
+          descriptor = json.loads((root / "descriptor.json").read_text(encoding="utf-8"))
+          def get(item, target):
+              if int(item["size"]) < 1:
+                  raise SystemExit("invalid pinned artifact size")
+              with urllib.request.urlopen(item["url"], timeout=300) as response, target.open("wb") as output:
+                  digest = hashlib.sha256()
+                  while chunk := response.read(1024 * 1024):
+                      output.write(chunk); digest.update(chunk)
+              if target.stat().st_size != int(item["size"]) or digest.hexdigest() != item["sha256"]:
+                  raise SystemExit(f"pinned artifact mismatch: {target}")
+          get(descriptor["metadata"], root / "metadata.tar.gz")
+          model = root / descriptor["model"]["file"]
+          model_digest = hashlib.sha256()
+          with model.open("wb") as output:
+              for number, part in enumerate(descriptor["model"]["parts"]):
+                  target = root / f"model.part-{number:02d}"
+                  get(part, target)
+                  with target.open("rb") as source:
+                      while chunk := source.read(1024 * 1024):
+                          output.write(chunk); model_digest.update(chunk)
+                  target.unlink()
+          if model_digest.hexdigest() != descriptor["model"]["sha256"]:
+              raise SystemExit("assembled model checksum mismatch")
+          '@ | python -
+          tar.exe -xzf upstream/metadata.tar.gz -C upstream/darwin-metadata
+          Remove-Item upstream/metadata.tar.gz
+          @'
+          import json, pathlib
+          root = pathlib.Path("upstream/darwin-metadata")
+          suite = json.loads((root / "conformance.json").read_text(encoding="utf-8"))
+          reference = {
+              "instruction": "Given a web search query, retrieve relevant passages that answer the query",
+              "reranker": [{"id": row["id"], "scores": row["reference_scores"]} for row in suite["reranker"]],
+              "candidate_pools": [{"id": row["id"], "scores": row["reference_scores"]} for row in suite["reranker_candidate_pools"]],
+          }
+          pathlib.Path("upstream/official-reference.json").write_text(json.dumps(reference, separators=(",", ":")), encoding="utf-8")
+          '@ | python -
+      - name: Build pinned portable CPU llama.cpp runtime
+        env:
+          LLAMA_CPP_REVISION: d775b8967a46d8beb110d444aa3b8938179e0dd8
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp.git upstream/llama.cpp
+          git -C upstream/llama.cpp checkout --detach $env:LLAMA_CPP_REVISION
+          if ((git -C upstream/llama.cpp rev-parse HEAD) -ne $env:LLAMA_CPP_REVISION) { throw "llama.cpp revision mismatch" }
+          cmake -S upstream/llama.cpp -B upstream/llama.cpp/build -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DGGML_NATIVE=OFF -DGGML_METAL=OFF -DGGML_OPENMP=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF
+          cmake --build upstream/llama.cpp/build --config Release --target llama-server --parallel 3
+          $runtime = Get-ChildItem upstream/llama.cpp/build -Filter llama-server.exe -Recurse | Select-Object -First 1
+          if (-not $runtime) { throw "llama-server.exe was not built" }
+          Copy-Item $runtime.FullName upstream/llama-server.exe
+          $dumpbin = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue).Source
+          if (-not $dumpbin) {
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $visualStudio = & $vswhere -latest -property installationPath
+            $dumpbin = (Get-ChildItem "$visualStudio\VC\Tools\MSVC" -Filter dumpbin.exe -Recurse | Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1).FullName
+          }
+          if (-not $dumpbin) { throw "dumpbin is required to verify portable runtime dependencies" }
+          $dependencies = (& $dumpbin /DEPENDENTS upstream/llama-server.exe) | Select-String -Pattern '[A-Za-z0-9_.-]+\.dll' | ForEach-Object { $_.Matches.Value.ToLowerInvariant() }
+          $nonPortable = $dependencies | Where-Object { $_ -match '^(vcruntime|msvcp|concrt|api-ms-win-crt|ucrtbase|vcomp|libomp|ggml|llama)' }
+          if ($nonPortable) { throw "llama-server.exe has non-portable runtime dependencies: $($nonPortable -join ', ')" }
+      - name: Build and verify bounded public conformance pack
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          QWEN_REVISION: ff536d3f82cc9ef977ea312094eb103d8446116a
+          LLAMA_CPP_REVISION: d775b8967a46d8beb110d444aa3b8938179e0dd8
+          BUILDER_REVISION: ${{ github.sha }}
+        run: |
+          $modelHash = (Get-FileHash upstream/model.gguf -Algorithm SHA256).Hash.ToLowerInvariant()
+          python scripts/build_precision_pack.py --platform windows-amd64 --model upstream/model.gguf --model-sha256 $modelHash --tokenizer upstream/darwin-metadata/tokenizer.json --runtime upstream/llama-server.exe --runtime-license upstream/llama.cpp/LICENSE --license upstream/darwin-metadata/LICENSE --source-provenance upstream/darwin-metadata/UPSTREAM_SHA256SUMS.txt --reference upstream/official-reference.json --output precision-pack-windows-dist --release-tag $env:RELEASE_TAG --upstream-revision $env:QWEN_REVISION --tokenizer-revision $env:QWEN_REVISION --runtime-revision $env:LLAMA_CPP_REVISION --builder-revision $env:BUILDER_REVISION --minimum-brain-version 1.0.0
+          Get-Content precision-pack-windows-dist/SHA256SUMS.txt | ForEach-Object {
+            $parts = $_ -split '\s+', 2
+            if ((Get-FileHash (Join-Path precision-pack-windows-dist $parts[1]) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $parts[0]) { throw "pack checksum mismatch: $($parts[1])" }
+          }
+          Move-Item precision-pack-windows-dist/SHA256SUMS.txt precision-pack-windows-dist/SHA256SUMS-windows-amd64.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: precision-pack-windows-amd64
+          path: |
+            precision-pack-windows-dist/*-metadata.tar.gz
+            precision-pack-windows-dist/*.part-*
+            precision-pack-windows-dist/*-descriptor.json
+            precision-pack-windows-dist/SHA256SUMS-windows-amd64.txt
+          if-no-files-found: error
+  publish:
+    name: Publish authorized Windows Precision pack
+    if: ${{ inputs.publish }}
+    needs: build
+    runs-on: windows-latest
+    environment: model-pack-publish
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: precision-pack-windows-amd64
+          path: precision-pack-windows-dist
+      - name: Publish only after explicit authorization
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          Get-Content precision-pack-windows-dist/SHA256SUMS-windows-amd64.txt | ForEach-Object {
+            $parts = $_ -split '\s+', 2
+            if ((Get-FileHash (Join-Path precision-pack-windows-dist $parts[1]) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $parts[0]) { throw "downloaded build artifact mismatch: $($parts[1])" }
+          }
+          gh release view $env:RELEASE_TAG 2>$null | Out-Null
+          $releaseExists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          gh api "repos/$env:GH_REPO/git/ref/tags/$env:RELEASE_TAG" --silent 2>$null
+          $tagExists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          if ($releaseExists -or $tagExists) { throw "release or tag appeared after validation; refusing publication" }
+          gh release create $env:RELEASE_TAG --draft --target $env:SOURCE_SHA --title "Project Brain Windows Precision Pack $env:RELEASE_TAG" --notes "Native Windows amd64 Precision pack. Publish only after the workflow's checksum and conformance gates pass."
+          $tagObject = gh api "repos/$env:GH_REPO/git/ref/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($tagObject.object.type -ne 'commit' -or $tagObject.object.sha -ne $env:SOURCE_SHA) { throw "created pack tag does not reference the reviewed builder commit" }
+          $assets = Get-ChildItem precision-pack-windows-dist -File | ForEach-Object { $_.FullName }
+          if (-not $assets) { throw "no verified Precision release assets were downloaded" }
+          gh release upload $env:RELEASE_TAG $assets
+          New-Item -ItemType Directory -Path release-verification | Out-Null
+          gh release download $env:RELEASE_TAG --dir release-verification
+          $checksum = Join-Path release-verification SHA256SUMS-windows-amd64.txt
+          $listed = @()
+          Get-Content $checksum | ForEach-Object {
+            $parts = $_ -split '\s+', 2
+            $listed += $parts[1]
+            if ((Get-FileHash (Join-Path release-verification $parts[1]) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $parts[0]) { throw "draft release artifact mismatch: $($parts[1])" }
+          }
+          $actual = @(Get-ChildItem release-verification -File | Where-Object { $_.Name -ne 'SHA256SUMS-windows-amd64.txt' } | ForEach-Object { $_.Name })
+          if (Compare-Object ($listed | Sort-Object) ($actual | Sort-Object)) { throw "draft release asset set differs from SHA256SUMS" }
+          gh release edit $env:RELEASE_TAG --draft=false --latest=false

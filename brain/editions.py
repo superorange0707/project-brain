@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .models import installed_packs, pack_compatibility_error
+from .platforms import atomic_managed_text_write, read_managed_text
 
 if TYPE_CHECKING:
     from .core import Settings
@@ -27,24 +28,24 @@ def capabilities(settings: Settings) -> dict[str, Any]:
         }
         for pack in packs
     ]
-    from .catalog import current_generation_ref
+    from .catalog import current_generation_ref, generation_root
     from .semantic import semantic_state_compatibility
 
     atlas = current_generation_ref(settings)
     component = atlas.component("semantic") if atlas is not None else {}
     semantic_path = settings.state_dir / "semantic-index.json"
+    semantic_root = settings.state_dir
     component_ready = atlas is not None and component.get("status") == "ready" and component.get("artifact_ref")
     if component_ready:
-        candidate = (settings.state_dir / str(component["artifact_ref"])).resolve()
-        if candidate.is_relative_to(settings.state_dir.resolve()):
-            semantic_path = candidate
-        else:
-            semantic_path = settings.state_dir / ".invalid-semantic-artifact"
+        semantic_path = settings.state_dir / str(component["artifact_ref"])
+        semantic_root = generation_root(settings)
     try:
-        semantic_state = json.loads(semantic_path.read_text(encoding="utf-8"))
+        semantic_state = json.loads(read_managed_text(
+            semantic_root, semantic_path, max_bytes=64 * 1024 * 1024,
+        ))
         if not isinstance(semantic_state, dict):
             semantic_state = {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
         semantic_state = {}
     snapshots = atlas.snapshots if atlas is not None else {
         repo.name: repo.source_sha or "working-tree" for repo in settings.repositories
@@ -54,8 +55,9 @@ def capabilities(settings: Settings) -> dict[str, Any]:
         semantic_state,
         snapshots,
         component=component if component_ready else None,
+        verify_artifacts=False,
     )
-    semantic_aligned = semantic_aligned and (atlas is None or bool(component_ready))
+    semantic_aligned = semantic_aligned and bool(component_ready)
     try:
         from .semantic import _usearch
 
@@ -71,8 +73,10 @@ def capabilities(settings: Settings) -> dict[str, Any]:
     from .backends.zoekt import status as zoekt_status
 
     zoekt = zoekt_status()
+    from .index import lexical_generation_ready
+
     return {
-        "lexical_index": (settings.state_dir / "search.sqlite3").is_file(),
+        "lexical_index": lexical_generation_ready(settings, atlas),
         "structural": bool(settings.graph_enabled),
         "embedding": embedding,
         "embedding_pack": embedding_pack,
@@ -89,10 +93,12 @@ def capabilities(settings: Settings) -> dict[str, Any]:
 
 def current_edition(settings: Settings) -> str:
     try:
-        value = json.loads(_path(settings).read_text(encoding="utf-8"))
+        value = json.loads(read_managed_text(
+            settings.state_dir, _path(settings), max_bytes=64 * 1024,
+        ))
         edition = str(value.get("edition") or "core")
         return edition if edition in EDITIONS else "core"
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
         return "core"
 
 
@@ -110,5 +116,7 @@ def set_edition(settings: Settings, edition: str) -> str:
         reason = next((pack["compatibility_error"] for pack in available["installed_packs"] if pack["capability"] == "reranker" and pack["compatibility_error"]), None)
         raise ValueError("Precision edition requires an installed, verified compatible local reranker pack" + (f": {reason}" if reason else ""))
     settings.state_dir.mkdir(parents=True, exist_ok=True)
-    _path(settings).write_text(json.dumps({"edition": edition}, indent=2) + "\n", encoding="utf-8")
+    atomic_managed_text_write(
+        settings.state_dir, _path(settings), json.dumps({"edition": edition}, indent=2) + "\n",
+    )
     return edition

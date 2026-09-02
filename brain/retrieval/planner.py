@@ -79,7 +79,12 @@ def compile_request(
     for item in request.get("searches") or []:
         if isinstance(item, dict):
             value = str(item["query"])
-            operations.append(QueryOperation("search", value, _repos(item), 1 if value.replace("_", "").isalnum() else 4, False, 2, "literal first"))
+            protected = int(request.get("version") or 1) in {4, 5}
+            operations.append(QueryOperation(
+                "search", value, _repos(item),
+                0 if protected else 1 if value.replace("_", "").isalnum() else 4,
+                protected, 2, "explicit investigation anchor" if protected else "literal first",
+            ))
     for item in request.get("history") or []:
         if isinstance(item, dict):
             operations.append(QueryOperation("history", str(item["query"]), _repos(item), 3, False, 4, "history expansion"))
@@ -87,7 +92,11 @@ def compile_request(
         (item.kind, item.value, item.repos, item.includes): item
         for item in operations
     }
-    ordered = sorted(unique.values(), key=lambda item: (item.tier, item.estimated_cost, item.kind, item.value, item.repos, item.includes))
+    ordered = [
+        item for _, item in sorted(
+            enumerate(unique.values()), key=lambda pair: (pair[1].tier, pair[1].estimated_cost, pair[0]),
+        )
+    ]
     limit = max(1, max_effective_operations)
     effective = ordered[:limit]
     deferred = max(0, len(ordered) - len(effective))

@@ -4,16 +4,16 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
-import signal
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
 import tarfile
 import tempfile
 import time
-from platform import machine, system
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
@@ -22,6 +22,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from .locks import model_lane
+from .platforms import (
+    atomic_managed_text_write,
+    filesystem_component,
+    normalize_platform_id,
+    platform_id,
+    read_managed_text,
+    start_managed_process,
+    terminate_process_tree,
+)
 
 if TYPE_CHECKING:
     from .core import Settings
@@ -39,12 +48,27 @@ PRODUCTION_PROVENANCE_FIELDS = {
     "weight_format", "quantization", "weight_sha256", "tokenizer_file", "tokenizer_sha256", "pooling", "normalization",
     "query_instruction_version", "document_card_version", "chunk_schema_version", "embedding_dimension", "converter_revision",
 }
+
+
+def valid_embedding_vector(value: object, *, dimension: int | None = None) -> list[float] | None:
+    if not isinstance(value, list) or not value or (dimension is not None and len(value) != dimension):
+        return None
+    try:
+        vector = [float(number) for number in value]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if any(not math.isfinite(number) for number in vector) or not any(number != 0.0 for number in vector):
+        return None
+    return vector
 DEFAULT_RERANK_POOL = 40
 MAX_RERANK_POOL = 80
 DEFAULT_EMBEDDING_BATCH_SIZE = 16
 DEFAULT_BENCHMARK_SAMPLES = 3
 DEFAULT_MODEL_LATENCY_BUDGET_MS = 3_000
 DEFAULT_RUNTIME_MAX_REQUESTS = 64
+SUPPORTED_NATIVE_PLATFORMS = {
+    "darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-amd64",
+}
 # The local llama.cpp Metal backend can differ very slightly between a batch
 # request and equivalent single-item requests. This permits only observed
 # floating-point reduction drift; reference-vector cosine and ranking gates
@@ -58,25 +82,41 @@ RERANKER_BATCH_PARITY_TOLERANCE = 1e-4
 # Each entry is added only after its separately versioned model-pack release
 # passes final-release checksum verification and a clean installation check.
 # Never resolve an unpinned "latest" release at install time.
-OFFICIAL_PACKS: dict[str, dict[str, str]] = {
+OFFICIAL_PACKS: dict[str, dict[str, dict[str, str]]] = {
     "semantic": {
-        "pack_id": "qwen3-embedding-4b-q6k-darwin-arm64",
-        "descriptor_url": (
-            "https://github.com/superorange0707/project-brain/releases/download/"
-            "semantic-pack-v1.0.6/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json"
-        ),
-        "descriptor_sha256": "cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc",
+        "darwin-arm64": {
+            "pack_id": "qwen3-embedding-4b-q6k-darwin-arm64",
+            "descriptor_url": (
+                "https://github.com/superorange0707/project-brain/releases/download/"
+                "semantic-pack-v1.0.6/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json"
+            ),
+            "descriptor_sha256": "cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc",
+        },
     },
     "precision": {
-        "pack_id": "qwen3-reranker-4b-q6k-darwin-arm64",
-        "descriptor_url": (
-            "https://github.com/superorange0707/project-brain/releases/download/"
-            "precision-pack-v1.0.2/qwen3-reranker-4b-q6k-darwin-arm64-descriptor.json"
-        ),
-        "descriptor_sha256": "9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7",
+        "darwin-arm64": {
+            "pack_id": "qwen3-reranker-4b-q6k-darwin-arm64",
+            "descriptor_url": (
+                "https://github.com/superorange0707/project-brain/releases/download/"
+                "precision-pack-v1.0.2/qwen3-reranker-4b-q6k-darwin-arm64-descriptor.json"
+            ),
+            "descriptor_sha256": "9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7",
+        },
     },
 }
 MODEL_PACK_DESCRIPTOR_SCHEMA = "project-brain-model-pack-v1"
+MAX_MODEL_PACK_DESCRIPTOR_BYTES = 1024 * 1024
+MAX_MODEL_PACK_SOURCE_ITEMS = 10_000
+MAX_MODEL_PACK_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_MODEL_PACK_SUITE_BYTES = 8 * 1024 * 1024
+MAX_MODEL_PACK_UNPACKED_BYTES = 128 * 1024 * 1024 * 1024
+MAX_MODEL_PACK_ARCHIVE_SECONDS = 300.0
+MAX_INSTALLED_PACK_DIRECTORIES = 1_024
+MAX_INSTALLED_PACK_SCAN_SECONDS = 5.0
+MAX_INSTALLED_PACK_MANIFEST_BYTES = 64 * 1024 * 1024
+MAX_MODEL_RUNTIME_REQUEST_BYTES = 16 * 1024 * 1024
+MAX_MODEL_RUNTIME_RESPONSE_BYTES = 64 * 1024 * 1024
+MAX_EMBEDDING_DIMENSION = 16_384
 MODEL_DOWNLOAD_TLS_ERROR = (
     "model download TLS certificate verification failed; certificate and hostname verification remain enabled. "
     "Run 'brain doctor' and ensure the enterprise root is trusted by the operating system or configure models.ca_bundle."
@@ -177,9 +217,15 @@ class LlamaCppRuntime:
         return urlopen(request, timeout=self.timeout_seconds)
 
     def _post(self, path: str, body: dict[str, object]) -> dict[str, object]:
-        request = Request(self.endpoint + path, data=_json_request_bytes(body), method="POST", headers=self._headers())
+        payload = _json_request_bytes(body)
+        if len(payload) > MAX_MODEL_RUNTIME_REQUEST_BYTES:
+            raise RuntimeError("local runtime request exceeds its byte limit")
+        request = Request(self.endpoint + path, data=payload, method="POST", headers=self._headers())
         with self._open(request) as response:
-            value = json.loads(response.read().decode("utf-8"))
+            raw = response.read(MAX_MODEL_RUNTIME_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_MODEL_RUNTIME_RESPONSE_BYTES:
+            raise RuntimeError("local runtime response exceeds its byte limit")
+        value = json.loads(raw.decode("utf-8"))
         if not isinstance(value, dict):
             raise RuntimeError("local runtime returned an invalid response")
         return value
@@ -191,9 +237,10 @@ class LlamaCppRuntime:
         value = self._post("/v1/embeddings", payload)
         rows = value.get("data") or []
         vectors = [list(item["embedding"]) for item in rows if isinstance(item, dict) and isinstance(item.get("embedding"), list)]
-        if len(vectors) != len(texts) or any(not vector for vector in vectors):
+        normalized = [valid_embedding_vector(vector, dimension=dimension) for vector in vectors]
+        if len(vectors) != len(texts) or any(vector is None for vector in normalized):
             raise RuntimeError("local embedding runtime returned an incomplete vector batch")
-        return [[float(number) for number in vector] for vector in vectors]
+        return [vector for vector in normalized if vector is not None]
 
     def rerank(self, query: str, documents: list[str], instruction: str = "") -> list[float]:
         value = self._post("/rerank", {"query": instruction + query if instruction else query, "documents": documents})
@@ -252,7 +299,12 @@ class ManagedLlamaCppRuntime:
         self.request_count = 0
 
     def _start(self) -> LlamaCppRuntime:
-        max_requests = max(1, int(self.manifest.get("max_requests_per_runtime") or DEFAULT_RUNTIME_MAX_REQUESTS))
+        try:
+            max_requests = max(1, int(self.manifest.get("max_requests_per_runtime") or DEFAULT_RUNTIME_MAX_REQUESTS))
+            request_timeout_seconds = min(300.0, max(5.0, float(self.manifest.get("request_timeout_seconds") or 30.0)))
+            startup_timeout_seconds = min(120.0, max(1.0, float(self.manifest.get("startup_timeout_seconds") or 30.0)))
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("model pack runtime limits must be numeric") from error
         if self.client is not None and self.process is not None and self.process.poll() is None and self.request_count < max_requests:
             return self.client
         if self.client is not None:
@@ -274,30 +326,31 @@ class ManagedLlamaCppRuntime:
             "--api-key", key, "--offline", "--no-webui",
         ]
         if capability == "embedding":
-            command.append("--embedding")
+            command.extend(["--embedding", "--pooling", "last"])
         else:
-            command.extend(["--embedding", "--pooling", "rank", "--rerank"])
+            command.extend(["--embedding", "--pooling", "rank", "--reranking"])
         runtime_args = self.manifest.get("runtime_args") or []
         if not isinstance(runtime_args, list) or not all(isinstance(value, str) and value for value in runtime_args):
             raise RuntimeError("model pack runtime_args must be a list of non-empty strings")
-        protected = {"--model", "-m", "--host", "--port", "--api-key", "--hf-repo", "--hf-file"}
-        if any(value in protected for value in runtime_args):
+        protected = {
+            "--model", "-m", "--host", "--port", "--api-key", "--hf-repo", "--hf-file",
+            "--offline", "--no-webui", "--embedding", "--rerank", "--reranking", "--pooling",
+        }
+        if any(
+            value in protected or any(value.startswith(flag + "=") for flag in protected)
+            for value in runtime_args
+        ):
             raise RuntimeError("model pack runtime_args may not override Project Brain local runtime controls")
         command.extend(runtime_args)
         try:
-            self.process = subprocess.Popen(
+            self.process = start_managed_process(
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True,
             )
         except OSError as error:
             raise RuntimeError("pack-owned llama.cpp runtime failed to start") from error
-        try:
-            request_timeout_seconds = min(300.0, max(5.0, float(self.manifest.get("request_timeout_seconds") or 30.0)))
-        except (TypeError, ValueError) as error:
-            raise RuntimeError("model pack request_timeout_seconds must be numeric") from error
         self.client = LlamaCppRuntime(
             f"http://127.0.0.1:{port}",
             api_key=key,
@@ -305,7 +358,7 @@ class ManagedLlamaCppRuntime:
             input_suffix=str(self.manifest.get("input_suffix") or ""),
             direct_loopback=True,
         )
-        deadline = time.monotonic() + min(120.0, max(1.0, float(self.manifest.get("startup_timeout_seconds") or 30)))
+        deadline = time.monotonic() + startup_timeout_seconds
         health_transport_failed = False
         health_unavailable = False
         while time.monotonic() < deadline:
@@ -360,20 +413,17 @@ class ManagedLlamaCppRuntime:
     def shutdown(self) -> None:
         process, self.process, self.client = self.process, None, None
         self.request_count = 0
-        if process is None or process.poll() is not None:
+        if process is None:
             return
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=3)
-        except (OSError, subprocess.TimeoutExpired):
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except OSError:
-                pass
+        terminate_process_tree(process, graceful_timeout=3)
 
 
 def model_root(settings: Settings) -> Path:
-    return settings.state_dir / "models"
+    configured = settings.state_dir / "models"
+    root = configured.resolve()
+    if configured.is_symlink() or root.parent != settings.state_dir.resolve():
+        raise ValueError("model pack root escapes managed state")
+    return root
 
 
 def _tuning_path(settings: Settings) -> Path:
@@ -383,8 +433,10 @@ def _tuning_path(settings: Settings) -> Path:
 def _model_tuning(settings: Settings, pack_id: str) -> dict[str, Any]:
     """Read only a tuning result made for this exact locally verified pack."""
     try:
-        result = json.loads(_tuning_path(settings).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        result = json.loads(read_managed_text(
+            settings.state_dir, _tuning_path(settings), max_bytes=16 * 1024 * 1024,
+        ))
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
     return result if isinstance(result, dict) and result.get("pack_id") == pack_id else {}
 
@@ -417,13 +469,52 @@ def _safe_pack_id(value: str) -> str:
     return safe
 
 
+def _pack_directory(settings: Settings, pack_id: str) -> Path:
+    root = model_root(settings)
+    logical = _safe_pack_id(pack_id)
+    legacy = root / logical
+    canonical = root / filesystem_component(pack_id)
+    if legacy != canonical and not legacy.is_symlink() and (legacy / "installed.json").is_file():
+        try:
+            if str(_load_manifest(legacy / "installed.json").get("pack_id") or "") == pack_id:
+                return legacy
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+    selected = canonical
+    if selected.is_symlink():
+        raise ValueError("model pack directory must not be a symbolic link")
+    if selected.exists() and not selected.is_dir():
+        raise ValueError("model pack path must be a directory")
+    return selected
+
+
+def _direct_pack_identity(settings: Settings, pack_id: str) -> tuple[Path, tuple[int, int]]:
+    directory = _pack_directory(settings, pack_id)
+    try:
+        metadata = directory.lstat()
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("model pack directory must be a direct managed directory")
+        if directory.resolve().parent != model_root(settings).resolve():
+            raise ValueError("model pack directory escapes managed state")
+    except OSError as error:
+        raise ValueError(f"model pack is not installed: {pack_id}") from error
+    return directory, (metadata.st_dev, metadata.st_ino)
+
+
 def _load_manifest(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("model pack manifest must be a direct regular file")
+    with path.open("rb") as source:
+        raw = source.read(MAX_MODEL_PACK_MANIFEST_BYTES + 1)
+    if len(raw) > MAX_MODEL_PACK_MANIFEST_BYTES:
+        raise ValueError("model pack manifest exceeds its byte limit")
+    text = raw.decode("utf-8")
     if path.suffix == ".json":
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(text)
     else:
         from .core import simple_yaml_load
 
-        value = simple_yaml_load(path.read_text(encoding="utf-8"))
+        value = simple_yaml_load(text)
     if not isinstance(value, dict):
         raise ValueError("model pack manifest must be a mapping")
     return {str(key): value for key, value in value.items()}
@@ -440,6 +531,14 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("runtime_name must be a pinned local runtime")
     if str(manifest["runtime_name"]) == "deterministic-test" and manifest["capability"] != "test" and not manifest.get("test_only"):
         raise ValueError("deterministic-test runtime is allowed only for a test-only pack")
+    dimension = manifest.get("embedding_dimension")
+    minimum_dimension = 0 if manifest["capability"] == "reranker" else 1
+    if dimension is not None and (
+        isinstance(dimension, bool)
+        or not isinstance(dimension, int)
+        or not minimum_dimension <= dimension <= MAX_EMBEDDING_DIMENSION
+    ):
+        raise ValueError(f"embedding_dimension must be between 1 and {MAX_EMBEDDING_DIMENSION}")
     if manifest["capability"] != "test" and not manifest.get("test_only") and not manifest.get("artifacts"):
         raise ValueError("production model packs must declare checksummed artifacts")
     if manifest["capability"] != "test" and not manifest.get("test_only"):
@@ -460,10 +559,38 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         if "" in required or not required <= set(str(name) for name in artifacts):
             raise ValueError("managed llama.cpp packs require checksummed runtime_binary and model_file artifacts")
     if manifest["capability"] != "test" and not manifest.get("test_only"):
+        compatibility = manifest.get("runtime_compatibility")
+        if compatibility is None:
+            pack_id = str(manifest.get("pack_id") or "")
+            declared = next(
+                (candidate for candidate in SUPPORTED_NATIVE_PLATFORMS if pack_id.endswith("-" + candidate)),
+                "",
+            )
+            if not declared:
+                raise ValueError("production model packs require runtime_compatibility")
+        else:
+            if not isinstance(compatibility, dict):
+                raise ValueError("runtime_compatibility must be a mapping")
+            runtime_os = str(compatibility.get("os") or "")
+            runtime_architecture = str(compatibility.get("architecture") or "")
+            if not runtime_os or not runtime_architecture:
+                raise ValueError("runtime_compatibility requires os and architecture")
+            declared = normalize_platform_id(f"{runtime_os}-{runtime_architecture}")
+        if declared not in SUPPORTED_NATIVE_PLATFORMS:
+            raise ValueError(f"model pack runtime platform is unsupported: {declared}")
+        if declared != platform_id():
+            raise ValueError(f"model pack runtime is for {declared}, not {platform_id()}")
         missing_provenance = sorted(
             field
             for field in PRODUCTION_PROVENANCE_FIELDS
-            if (field == "embedding_dimension" and (not isinstance(manifest.get(field), int) or int(manifest[field]) < 0))
+            if (
+                field == "embedding_dimension" and (
+                    isinstance(manifest.get(field), bool)
+                    or not isinstance(manifest.get(field), int)
+                    or not (0 if manifest["capability"] == "reranker" else 1)
+                    <= int(manifest[field]) <= MAX_EMBEDDING_DIMENSION
+                )
+            )
             or (field != "embedding_dimension" and not str(manifest.get(field) or "").strip())
         )
         if missing_provenance:
@@ -520,6 +647,33 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _pack_definition(manifest: dict[str, Any]) -> str:
+    """Canonical immutable pack definition; verification state is installation-local."""
+    ignored = {"installed_path", "verified", "checked_artifacts", "conformance"}
+    return json.dumps(
+        {key: value for key, value in manifest.items() if key not in ignored},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+
+
+def pack_compatibility_identity(manifest: dict[str, Any]) -> str:
+    """Bind vector compatibility to immutable weights, tokenizer, and model inputs."""
+    explicit = str(manifest.get("pack_compatibility_identity") or "")
+    if manifest.get("test_only") is True and re.fullmatch(r"sha256:[0-9a-f]{64}", explicit):
+        return explicit
+    return "sha256:" + hashlib.sha256(_pack_definition(manifest).encode("utf-8")).hexdigest()
+
+
+def _pack_artifacts_valid(manifest: dict[str, Any], root: Path) -> bool:
+    candidate = dict(manifest)
+    candidate["installed_path"] = str(root)
+    try:
+        _check_pack_integrity(candidate)
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _model_suite(manifest: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
     """Load an optional local conformance suite only after its artifact hash is checked."""
     name = str(manifest.get("golden_suite") or "")
@@ -530,7 +684,13 @@ def _model_suite(manifest: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
     if not expected or _sha256(path) != expected:
         raise ValueError("golden_suite checksum mismatch")
     try:
-        suite = json.loads(path.read_text(encoding="utf-8"))
+        if path.is_symlink() or path.stat().st_size > MAX_MODEL_PACK_SUITE_BYTES:
+            raise ValueError("golden_suite exceeds its byte limit")
+        with path.open("rb") as source:
+            raw = source.read(MAX_MODEL_PACK_SUITE_BYTES + 1)
+        if len(raw) > MAX_MODEL_PACK_SUITE_BYTES:
+            raise ValueError("golden_suite exceeds its byte limit")
+        suite = json.loads(raw)
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError("golden_suite must be valid local JSON") from error
     if not isinstance(suite, dict):
@@ -723,9 +883,9 @@ def _valid_sha256(value: str) -> bool:
 def model_download_ssl_context(settings: Settings) -> tuple[ssl.SSLContext, str]:
     """Return a verified context backed by OS trust, plus a safe diagnostic label.
 
-    `truststore` uses the macOS Keychain through Security.framework and the
-    platform OpenSSL store elsewhere. An administrator-supplied PEM bundle is
-    additive, never a replacement for TLS or hostname verification.
+    `truststore` uses the operating system certificate store on macOS and
+    Windows and the platform OpenSSL store on Linux. An administrator-supplied
+    PEM bundle is additive, never a replacement for TLS or hostname verification.
     """
     try:
         context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT) if truststore is not None else None
@@ -834,11 +994,17 @@ def install_pack_url(settings: Settings, source_url: str, expected_sha256: str) 
             handle = tempfile.NamedTemporaryFile(prefix="brain-pack-download-", suffix=".tar", dir=settings.state_dir, delete=False)
             staged = Path(handle.name)
             digest = hashlib.sha256()
+            downloaded = 0
             with handle:
                 while chunk := response.read(1024 * 1024):
+                    downloaded += len(chunk)
+                    if downloaded > projected_bytes:
+                        raise ValueError("model pack download exceeded its declared Content-Length")
                     handle.write(chunk)
                     digest.update(chunk)
-        if _sha256(staged) != expected_sha256:
+            if downloaded != projected_bytes:
+                raise ValueError("model pack download size does not match its declared Content-Length")
+        if digest.hexdigest() != expected_sha256:
             raise ValueError("downloaded model pack SHA-256 does not match --sha256")
         return install_pack(settings, staged)
     finally:
@@ -848,9 +1014,12 @@ def install_pack_url(settings: Settings, source_url: str, expected_sha256: str) 
 
 def official_packs() -> list[dict[str, str]]:
     """List source-pinned Project Brain controlled pack descriptors."""
+    current_platform = platform_id()
     return [
         {"alias": alias, **{key: value for key, value in pack.items() if key != "descriptor_sha256"}}
-        for alias, pack in sorted(OFFICIAL_PACKS.items())
+        for alias, platforms in sorted(OFFICIAL_PACKS.items())
+        for pack in [platforms.get(current_platform)]
+        if isinstance(pack, dict)
     ]
 
 
@@ -895,17 +1064,187 @@ def _download_verified_artifact(
         if content_length != int(artifact["size"]):
             raise ValueError("model pack download size does not match its pinned descriptor")
         digest = hashlib.sha256()
+        downloaded = 0
         with destination.open("ab" if append else "wb") as handle:
             while chunk := response.read(1024 * 1024):
+                downloaded += len(chunk)
+                if downloaded > int(artifact["size"]):
+                    raise ValueError("model pack release artifact exceeded its pinned size")
                 handle.write(chunk)
                 digest.update(chunk)
+    if downloaded != int(artifact["size"]):
+        raise ValueError("model pack release artifact size does not match its pinned descriptor")
     if digest.hexdigest() != str(artifact["sha256"]):
         raise ValueError("model pack release artifact SHA-256 does not match its pinned descriptor")
 
 
-def _extract_pack_archive(source: Path, destination: Path) -> None:
+def _archive_projected_size(source: Path, *, deadline: float | None = None) -> int:
+    total = 0
+    items = 0
+    deadline = deadline or time.monotonic() + MAX_MODEL_PACK_ARCHIVE_SECONDS
     with tarfile.open(source, "r:*") as archive:
-        for member in archive.getmembers():
+        for member in archive:
+            items += 1
+            if items > MAX_MODEL_PACK_SOURCE_ITEMS or time.monotonic() >= deadline:
+                raise ValueError("model pack archive exceeds its item or time limit")
+            if member.isfile():
+                total += member.size
+                if total > MAX_MODEL_PACK_UNPACKED_BYTES:
+                    raise ValueError("model pack archive exceeds its unpacked byte limit")
+    return total
+
+
+_PackSourceProjection = tuple[int, tuple[int, int], dict[str, tuple[str, int, int, int, int]]]
+
+
+def _directory_source_projection(
+    source: Path, *, deadline: float | None = None,
+) -> _PackSourceProjection:
+    """Seal one bounded unpacked source tree before managed-state copying."""
+    root = source.lstat()
+    if source.is_symlink() or not stat.S_ISDIR(root.st_mode):
+        raise ValueError("model pack source must be a direct directory")
+    total = 0
+    items = 0
+    deadline = deadline or time.monotonic() + MAX_MODEL_PACK_ARCHIVE_SECONDS
+    projection: dict[str, tuple[str, int, int, int, int]] = {}
+    for item in source.rglob("*"):
+        items += 1
+        if items > MAX_MODEL_PACK_SOURCE_ITEMS or time.monotonic() >= deadline:
+            raise ValueError("model pack source exceeds its item or time limit")
+        metadata = item.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError("model pack source must not contain symbolic links")
+        relative = item.relative_to(source).as_posix()
+        if stat.S_ISDIR(metadata.st_mode):
+            kind = "directory"
+            size = 0
+        elif stat.S_ISREG(metadata.st_mode):
+            kind = "file"
+            size = int(metadata.st_size)
+            total += size
+            if total > MAX_MODEL_PACK_UNPACKED_BYTES:
+                raise ValueError("model pack source exceeds its unpacked byte limit")
+        else:
+            raise ValueError("model pack source must contain only regular files and directories")
+        projection[relative] = (
+            kind, size, int(metadata.st_dev), int(metadata.st_ino), int(metadata.st_mtime_ns),
+        )
+    return total, (int(root.st_dev), int(root.st_ino)), projection
+
+
+def _directory_projected_size(source: Path) -> int:
+    """Apply the archive's hard source bounds to an unpacked local pack."""
+    return _directory_source_projection(source)[0]
+
+
+def _copy_bounded_pack_file(
+    source: Path,
+    destination: Path,
+    expected: tuple[str, int, int, int, int],
+    *,
+    deadline: float,
+    remaining_bytes: int,
+) -> int:
+    """Copy one sealed regular file without exceeding the reserved bytes."""
+    _, expected_size, expected_device, expected_inode, expected_mtime = expected
+    descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    copied = 0
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (expected_device, expected_inode)
+            or opened.st_size != expected_size
+            or opened.st_mtime_ns != expected_mtime
+        ):
+            raise ValueError("model pack source changed during installation")
+        with os.fdopen(descriptor, "rb", closefd=False) as input_file, destination.open("xb") as output_file:
+            while True:
+                if time.monotonic() >= deadline:
+                    raise ValueError("model pack source exceeds its item or time limit")
+                chunk = input_file.read(min(1024 * 1024, expected_size - copied + 1))
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > expected_size or copied > remaining_bytes:
+                    raise ValueError("model pack source changed or exceeded its unpacked byte limit")
+                output_file.write(chunk)
+        after = os.fstat(descriptor)
+        current = source.lstat()
+        if (
+            copied != expected_size
+            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (expected_device, expected_inode, expected_size, expected_mtime)
+            or (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+            != (expected_device, expected_inode, expected_size, expected_mtime)
+        ):
+            raise ValueError("model pack source changed during installation")
+        destination.chmod(opened.st_mode & 0o777)
+        return copied
+    finally:
+        os.close(descriptor)
+
+
+def _copy_bounded_pack_source(
+    source: Path,
+    destination: Path,
+    sealed: _PackSourceProjection,
+    *,
+    deadline: float | None = None,
+) -> None:
+    """Copy exactly one sealed source tree under hard physical-operation bounds."""
+    projected_bytes, root_identity, projection = sealed
+    current_root = source.lstat()
+    if (
+        source.is_symlink()
+        or not stat.S_ISDIR(current_root.st_mode)
+        or (current_root.st_dev, current_root.st_ino) != root_identity
+        or _directory_source_projection(source, deadline=deadline) != sealed
+    ):
+        raise ValueError("model pack source changed during installation")
+    destination.mkdir()
+    deadline = deadline or time.monotonic() + MAX_MODEL_PACK_ARCHIVE_SECONDS
+    copied_bytes = 0
+    for relative, expected in sorted(
+        projection.items(), key=lambda item: (item[0].count("/"), item[0]),
+    ):
+        if time.monotonic() >= deadline:
+            raise ValueError("model pack source exceeds its item or time limit")
+        target = destination / relative
+        if expected[0] == "directory":
+            target.mkdir()
+            continue
+        copied_bytes += _copy_bounded_pack_file(
+            source / relative,
+            target,
+            expected,
+            deadline=deadline,
+            remaining_bytes=projected_bytes - copied_bytes,
+        )
+    if (
+        copied_bytes != projected_bytes
+        or _directory_source_projection(source, deadline=deadline) != sealed
+    ):
+        raise ValueError("model pack source changed during installation")
+
+
+def _extract_pack_archive(
+    source: Path, destination: Path, *, deadline: float | None = None,
+) -> None:
+    total = 0
+    written_total = 0
+    items = 0
+    deadline = deadline or time.monotonic() + MAX_MODEL_PACK_ARCHIVE_SECONDS
+    with tarfile.open(source, "r:*") as archive:
+        for member in archive:
+            items += 1
+            if items > MAX_MODEL_PACK_SOURCE_ITEMS or time.monotonic() >= deadline:
+                raise ValueError("model pack archive exceeds its item or time limit")
+            if member.isfile():
+                total += member.size
+                if total > MAX_MODEL_PACK_UNPACKED_BYTES:
+                    raise ValueError("model pack archive exceeds its unpacked byte limit")
             target = (destination / member.name).resolve()
             if not target.is_relative_to(destination) or member.issym() or member.islnk():
                 raise ValueError("model pack contains an unsafe path")
@@ -917,7 +1256,20 @@ def _extract_pack_archive(source: Path, destination: Path) -> None:
                 if extracted is None:
                     raise ValueError("model pack contains an unreadable file")
                 with target.open("wb") as handle:
-                    shutil.copyfileobj(extracted, handle)
+                    member_bytes = 0
+                    while True:
+                        if time.monotonic() >= deadline:
+                            raise ValueError("model pack archive exceeds its item or time limit")
+                        chunk = extracted.read(min(1024 * 1024, member.size - member_bytes + 1))
+                        if not chunk:
+                            break
+                        member_bytes += len(chunk)
+                        written_total += len(chunk)
+                        if member_bytes > member.size or written_total > total:
+                            raise ValueError("model pack archive member exceeded its declared size")
+                        handle.write(chunk)
+                if member_bytes != member.size:
+                    raise ValueError("model pack archive member is incomplete")
                 target.chmod(member.mode & 0o777)
 
 
@@ -934,11 +1286,23 @@ def install_release_descriptor(settings: Settings, descriptor_url: str, expected
         request = Request(descriptor_url, headers={"User-Agent": "Project-Brain-model-pack/1"})
         with _open_model_download(settings, request, timeout=60) as response:
             _approved_pack_url(settings, response.geturl(), final=True)
+            try:
+                descriptor_length = int(response.headers.get("Content-Length") or 0)
+            except ValueError as error:
+                raise _descriptor_error("descriptor has an invalid Content-Length") from error
+            if descriptor_length > MAX_MODEL_PACK_DESCRIPTOR_BYTES:
+                raise _descriptor_error("descriptor exceeds its byte limit")
             digest = hashlib.sha256()
+            downloaded = 0
             with descriptor_path.open("wb") as handle:
                 while chunk := response.read(1024 * 1024):
+                    downloaded += len(chunk)
+                    if downloaded > MAX_MODEL_PACK_DESCRIPTOR_BYTES:
+                        raise _descriptor_error("descriptor exceeds its byte limit")
                     handle.write(chunk)
                     digest.update(chunk)
+            if descriptor_length and downloaded != descriptor_length:
+                raise _descriptor_error("descriptor size does not match Content-Length")
         if digest.hexdigest() != expected_sha256:
             raise ValueError("model-pack descriptor SHA-256 does not match the pinned Core catalog")
         try:
@@ -961,22 +1325,28 @@ def install_release_descriptor(settings: Settings, descriptor_url: str, expected
         parts = [_descriptor_artifact(part, "model.parts") for part in model.get("parts") or []]
         if not parts:
             raise _descriptor_error("model requires one or more parts")
-        platform_name = str(descriptor.get("platform") or "")
-        local_platform = f"{system().lower()}-{machine().lower()}"
-        supported_platforms = {"darwin-arm64", "darwin-aarch64"}
-        if platform_name and platform_name not in supported_platforms:
+        platform_name = normalize_platform_id(str(descriptor.get("platform") or ""))
+        local_platform = platform_id()
+        if not platform_name:
+            raise _descriptor_error("platform is required")
+        if platform_name not in SUPPORTED_NATIVE_PLATFORMS:
             raise _descriptor_error("platform is unsupported")
-        if platform_name and local_platform not in supported_platforms:
+        if platform_name != local_platform:
             raise ValueError(f"model pack {pack_id} is for {platform_name}, not {local_platform}")
         from .ops import ensure_write_capacity
 
         ensure_write_capacity(settings, int(metadata["size"]) + sum(int(part["size"]) for part in parts))
         archive = temporary / "metadata.tar"
         _download_verified_artifact(settings, metadata, archive)
+        ensure_write_capacity(settings, _archive_projected_size(archive))
         contents = temporary / "contents"
         contents.mkdir()
         _extract_pack_archive(archive, contents)
         assembled = contents / model_file
+        # The archive and unpacked metadata now both occupy managed state.
+        # Reserve the complete remaining model payload before appending the
+        # first part so the temporary peak cannot exceed the workspace guard.
+        ensure_write_capacity(settings, sum(int(part["size"]) for part in parts))
         for part in parts:
             _download_verified_artifact(settings, part, assembled, append=assembled.exists())
         if _sha256(assembled) != model_sha256:
@@ -985,6 +1355,18 @@ def install_release_descriptor(settings: Settings, descriptor_url: str, expected
         manifest = _load_manifest(manifest_path)
         if _safe_pack_id(str(manifest.get("pack_id") or "")) != pack_id:
             raise _descriptor_error("pack_id does not match embedded manifest")
+        compatibility = manifest.get("runtime_compatibility") or {}
+        if isinstance(compatibility, dict) and compatibility.get("os") and compatibility.get("architecture"):
+            manifest_platform = normalize_platform_id(
+                f"{compatibility['os']}-{compatibility['architecture']}"
+            )
+        else:
+            manifest_platform = next(
+                (candidate for candidate in SUPPORTED_NATIVE_PLATFORMS if pack_id.endswith("-" + candidate)),
+                "",
+            )
+        if not manifest_platform or manifest_platform != platform_name:
+            raise _descriptor_error("platform does not match embedded manifest")
         if str(manifest.get("model_file") or "") != model_file or str(manifest.get("weight_sha256") or "").lower() != model_sha256:
             raise _descriptor_error("embedded manifest does not pin the assembled model")
         return install_pack(settings, contents)
@@ -994,46 +1376,88 @@ def install_release_descriptor(settings: Settings, descriptor_url: str, expected
 
 def install_official_pack(settings: Settings, alias: str) -> dict[str, Any]:
     alias = alias.lower().strip()
-    pack = OFFICIAL_PACKS.get(alias)
-    if pack is None:
+    platforms = OFFICIAL_PACKS.get(alias)
+    if platforms is None:
         raise ValueError(f"no Project Brain-controlled release pack is available for {alias}")
+    pack = platforms.get(platform_id())
+    if pack is None:
+        raise ValueError(f"no Project Brain-controlled {alias} release pack is available for {platform_id()}")
     return install_release_descriptor(settings, str(pack["descriptor_url"]), str(pack["descriptor_sha256"]))
 
 
 def install_pack(settings: Settings, source: Path) -> dict[str, Any]:
     """Install an already-local pack. Runtime never performs a network download."""
-    source = source.expanduser().resolve()
+    supplied = source.expanduser()
+    if supplied.is_symlink():
+        raise ValueError("model pack source must not be a symbolic link")
+    source = supplied.resolve()
     if not source.exists():
         raise ValueError(f"model pack does not exist: {source}")
+    install_deadline = time.monotonic() + MAX_MODEL_PACK_ARCHIVE_SECONDS
+    source_is_archive = source.is_file() and tarfile.is_tarfile(source)
+    source_projection: _PackSourceProjection | None = None
     if source.is_dir():
-        projected_bytes = sum(item.stat().st_size for item in source.rglob("*") if item.is_file())
-    elif tarfile.is_tarfile(source):
-        with tarfile.open(source, "r:*") as archive:
-            projected_bytes = sum(member.size for member in archive.getmembers() if member.isfile())
+        source_projection = _directory_source_projection(source, deadline=install_deadline)
+        projected_bytes = source_projection[0]
+    elif source_is_archive:
+        projected_bytes = _archive_projected_size(source, deadline=install_deadline)
     else:
-        projected_bytes = source.stat().st_size
+        source_projection = _directory_source_projection(source.parent, deadline=install_deadline)
+        projected_bytes = source_projection[0]
     from .ops import ensure_write_capacity
 
-    ensure_write_capacity(settings, projected_bytes)
+    ensure_write_capacity(settings, projected_bytes * (2 if source_is_archive else 1))
     temporary: Path | None = None
+    staging: Path | None = None
     try:
-        if source.is_file() and tarfile.is_tarfile(source):
+        if source_is_archive:
             temporary = Path(tempfile.mkdtemp(prefix="brain-pack-", dir=settings.state_dir))
-            _extract_pack_archive(source, temporary)
+            _extract_pack_archive(source, temporary, deadline=install_deadline)
             source = temporary
+            source_projection = _directory_source_projection(source, deadline=install_deadline)
+        copy_source = source if source.is_dir() else source.parent
+        if source_projection is None:
+            raise ValueError("model pack source projection is unavailable")
         manifest_path = _manifest_file(source)
         manifest = _load_manifest(manifest_path)
         validate_manifest(manifest)
-        destination = model_root(settings) / _safe_pack_id(str(manifest["pack_id"]))
+        destination = _pack_directory(settings, str(manifest["pack_id"]))
         staging = destination.with_name(destination.name + ".installing")
         previous = destination.with_name(destination.name + ".previous")
         shutil.rmtree(staging, ignore_errors=True)
         shutil.rmtree(previous, ignore_errors=True)
         staging.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source if source.is_dir() else source.parent, staging, dirs_exist_ok=False)
+        _copy_bounded_pack_source(
+            copy_source, staging, source_projection, deadline=install_deadline,
+        )
         os.chmod(staging, 0o700)
+        if not _pack_artifacts_valid(manifest, staging):
+            raise ValueError("model pack contains an artifact that does not match its declared SHA-256")
+        manifest["installed_path"] = str(destination)
+        installed_path = staging / "installed.json"
+        atomic_managed_text_write(staging, installed_path, json.dumps(manifest, indent=2) + "\n")
+        staged_manifest = _load_manifest(installed_path)
+        validate_manifest(staged_manifest)
         if destination.exists():
-            destination.replace(previous)
+            try:
+                installed = _load_manifest(destination / "installed.json")
+                validate_manifest(installed)
+            except (OSError, json.JSONDecodeError, ValueError):
+                # A managed directory without valid publication metadata is an
+                # incomplete prior install, not an immutable pack definition.
+                destination.replace(previous)
+                installed = None
+            if installed is None:
+                pass
+            elif _pack_definition(installed) != _pack_definition(manifest):
+                raise ValueError(
+                    f"model pack ID {manifest['pack_id']} is immutable; publish changed weights or instructions under a new pack_id"
+                )
+            elif _pack_artifacts_valid(installed, destination):
+                shutil.rmtree(staging, ignore_errors=True)
+                return installed
+            else:
+                destination.replace(previous)
         try:
             staging.replace(destination)
         except Exception:
@@ -1042,16 +1466,20 @@ def install_pack(settings: Settings, source: Path) -> dict[str, Any]:
             raise
         finally:
             shutil.rmtree(previous, ignore_errors=True)
-        manifest["installed_path"] = str(destination)
-        (destination / "installed.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         semantic_state = settings.state_dir / "semantic-index.json"
         if semantic_state.is_file() and manifest["capability"] in {"embedding", "test"}:
             try:
-                state = json.loads(semantic_state.read_text(encoding="utf-8"))
+                state = json.loads(read_managed_text(
+                    settings.state_dir, semantic_state, max_bytes=64 * 1024 * 1024,
+                ))
+                if not isinstance(state, dict):
+                    raise ValueError("Semantic state must be an object")
                 state["stale"] = True
                 state["stale_reason"] = f"embedding pack changed to {manifest['pack_id']}"
-                semantic_state.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
-            except (OSError, json.JSONDecodeError):
+                atomic_managed_text_write(
+                    settings.state_dir, semantic_state, json.dumps(state, separators=(",", ":")),
+                )
+            except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
                 pass
         from .catalog import connect
 
@@ -1068,6 +1496,8 @@ def install_pack(settings: Settings, source: Path) -> dict[str, Any]:
             connection.close()
         return manifest
     finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
         if temporary:
             shutil.rmtree(temporary, ignore_errors=True)
 
@@ -1077,13 +1507,35 @@ def installed_packs(settings: Settings) -> list[dict[str, Any]]:
     packs: list[dict[str, Any]] = []
     if not root.is_dir():
         return packs
-    for directory in sorted(path for path in root.iterdir() if path.is_dir()):
+    directories: list[Path] = []
+    deadline = time.monotonic() + MAX_INSTALLED_PACK_SCAN_SECONDS
+    scanned = 0
+    for candidate in root.iterdir():
+        scanned += 1
+        if scanned > MAX_INSTALLED_PACK_DIRECTORIES or time.monotonic() >= deadline:
+            packs.append({"pack_id": "listing-truncated", "invalid": True, "listing_truncated": True})
+            return packs
+        if not candidate.is_symlink() and candidate.is_dir():
+            directories.append(candidate)
+    manifest_bytes = 0
+    for directory in sorted(directories):
         path = directory / "installed.json"
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(value, dict):
-                packs.append(value)
-        except (OSError, json.JSONDecodeError):
+            manifest_bytes += path.lstat().st_size
+            if manifest_bytes > MAX_INSTALLED_PACK_MANIFEST_BYTES or time.monotonic() >= deadline:
+                packs.append({"pack_id": "listing-truncated", "invalid": True, "listing_truncated": True})
+                return packs
+            value = _load_manifest(path)
+            pack_id = str(value.get("pack_id") or "")
+            installed_path = Path(str(value.get("installed_path") or ""))
+            if (
+                not installed_path.is_absolute()
+                or installed_path.resolve() != directory.resolve()
+                or _pack_directory(settings, pack_id).resolve() != directory.resolve()
+            ):
+                raise ValueError("installed model pack path identity is invalid")
+            packs.append(value)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             packs.append({"pack_id": directory.name, "invalid": True})
     return packs
 
@@ -1100,10 +1552,47 @@ def active_pack(settings: Settings, capability: str) -> dict[str, Any] | None:
     return min(candidates, key=lambda pack: str(pack["pack_id"])) if candidates else None
 
 
+def verified_pack(settings: Settings, pack_id: str, capability: str) -> dict[str, Any] | None:
+    """Resolve the exact verified pack retained by a pinned serving component."""
+    try:
+        directory, identity = _direct_pack_identity(settings, pack_id)
+        value = json.loads(read_managed_text(
+            settings.state_dir, directory / "installed.json",
+            max_bytes=MAX_MODEL_PACK_MANIFEST_BYTES,
+        ))
+        if not isinstance(value, dict):
+            return None
+        pack = {str(key): item for key, item in value.items()}
+        validate_manifest(pack)
+        installed_path = Path(str(pack.get("installed_path") or ""))
+        if (
+            str(pack.get("pack_id") or "") != pack_id
+            or pack.get("capability") != capability
+            or not pack.get("verified")
+            or installed_path.is_symlink()
+            or not installed_path.is_absolute()
+            or installed_path.resolve() != directory.resolve()
+            or _direct_pack_identity(settings, pack_id) != (directory, identity)
+            or pack_compatibility_error(pack) is not None
+        ):
+            return None
+        return pack
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+
+
 def verify_pack(settings: Settings, pack_id: str) -> dict[str, Any]:
-    path = model_root(settings) / _safe_pack_id(pack_id) / "installed.json"
+    directory, identity = _direct_pack_identity(settings, pack_id)
+    path = directory / "installed.json"
     manifest = _load_manifest(path)
     validate_manifest(manifest)
+    installed_path = Path(str(manifest.get("installed_path") or ""))
+    if (
+        not installed_path.is_absolute()
+        or installed_path.is_symlink()
+        or installed_path.resolve() != directory.resolve()
+    ):
+        raise ValueError("installed model pack path identity is invalid")
     checked: list[str] = []
     artifacts = manifest.get("artifacts") or {}
     if artifacts and not isinstance(artifacts, dict):
@@ -1113,12 +1602,14 @@ def verify_pack(settings: Settings, pack_id: str) -> dict[str, Any]:
         if _sha256(target) != str(expected).lower():
             raise ValueError(f"checksum mismatch for {name}")
         checked.append(str(name))
+    if _direct_pack_identity(settings, pack_id) != (directory, identity):
+        raise ValueError("model pack directory changed during verification")
     conformance = _run_model_conformance(manifest)
     manifest["verified"] = True
     manifest["checked_artifacts"] = checked
     if conformance is not None:
         manifest["conformance"] = conformance
-    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    atomic_managed_text_write(path.parent, path, json.dumps(manifest, indent=2) + "\n")
     from .catalog import connect
     from datetime import UTC, datetime
 
@@ -1138,8 +1629,8 @@ def runtime_for_pack(manifest: dict[str, Any]) -> ModelRuntime:
     if manifest.get("runtime_name") == "deterministic-test":
         return DeterministicRuntime(int(manifest.get("embedding_dimension") or 64))
     if manifest.get("runtime_name") == "llama.cpp":
-        _check_pack_integrity(manifest)
         if manifest.get("runtime_url"):
+            _check_pack_integrity(manifest)
             if not manifest.get("test_only"):
                 raise RuntimeError("production llama.cpp packs must use their checksummed local runtime")
             key_name = str(manifest.get("runtime_api_key_env") or "")
@@ -1321,9 +1812,12 @@ def benchmark_pack(settings: Settings, pack_id: str, *, samples: int = DEFAULT_B
                 **_measurement_memory(),
             }
             filename = "RERANKER_BAKEOFF_REPORT.md"
-        settings.generated_dir.mkdir(parents=True, exist_ok=True)
         lines = [f"# {filename.removesuffix('.md').replace('_', ' ').title()}", "", "This local synthetic benchmark and conformance report is not a holdout-quality claim.", "", *[f"- {key}: `{value}`" for key, value in report.items()]]
-        (settings.generated_dir / filename).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        from .core import _atomic_generated_text_write
+
+        _atomic_generated_text_write(
+            settings, settings.generated_dir / filename, "\n".join(lines) + "\n",
+        )
         from .metrics import record_metric
 
         record_metric(settings, "model_benchmark", pack_id=pack_id, capability=report["capability"], samples=samples)
@@ -1377,23 +1871,37 @@ def autotune_pack(
     }
     settings.state_dir.mkdir(parents=True, exist_ok=True)
     target = _tuning_path(settings)
-    temporary = target.with_suffix(".writing")
-    temporary.write_text(json.dumps(tuning, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(target)
+    atomic_managed_text_write(settings.state_dir, target, json.dumps(tuning, indent=2) + "\n")
     return {**tuning, "profile_path": str(target)}
 
 
 def remove_pack(settings: Settings, pack_id: str) -> None:
-    target = model_root(settings) / _safe_pack_id(pack_id)
-    if not target.is_dir():
+    target = _pack_directory(settings, pack_id)
+    if target.is_symlink() or not target.is_dir():
         raise ValueError(f"model pack is not installed: {pack_id}")
+    from .catalog import connect
+
+    connection = connect(settings)
+    try:
+        referenced = any(
+            str((json.loads(details) if details else {}).get("pack_id") or "") == pack_id
+            for (details,) in connection.execute(
+                "SELECT details_json FROM generation_components WHERE component='semantic' AND status IN ('ready','degraded')"
+            )
+        )
+    except (TypeError, json.JSONDecodeError):
+        referenced = True
+    finally:
+        connection.close()
+    if referenced:
+        raise ValueError(
+            f"model pack {pack_id} is retained by an Atlas generation; remove it only after reachability GC reclaims those generations"
+        )
     try:
         capability = str(_load_manifest(target / "installed.json").get("capability") or "")
     except (OSError, ValueError, json.JSONDecodeError):
         capability = ""
     shutil.rmtree(target)
-    from .catalog import connect
-
     connection = connect(settings)
     try:
         connection.execute("DELETE FROM model_packs WHERE pack_id=?", (pack_id,))
@@ -1403,9 +1911,15 @@ def remove_pack(settings: Settings, pack_id: str) -> None:
     if capability in {"embedding", "test"}:
         semantic_state = settings.state_dir / "semantic-index.json"
         try:
-            state = json.loads(semantic_state.read_text(encoding="utf-8"))
+            state = json.loads(read_managed_text(
+                settings.state_dir, semantic_state, max_bytes=64 * 1024 * 1024,
+            ))
+            if not isinstance(state, dict):
+                raise ValueError("Semantic state must be an object")
             state["stale"] = True
             state["stale_reason"] = f"embedding pack {pack_id} was removed"
-            semantic_state.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
-        except (OSError, json.JSONDecodeError):
+            atomic_managed_text_write(
+                settings.state_dir, semantic_state, json.dumps(state, separators=(",", ":")),
+            )
+        except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
             pass

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from .locks import WorkspaceOperationBusy
+from .platforms import atomic_managed_text_write, read_managed_text
 
 if TYPE_CHECKING:
     from .core import Repository, Settings
@@ -69,7 +70,7 @@ def _probe_repository(repo: Repository, stored: dict[str, Any], branch_priority:
     if _ssh_endpoint(remote):
         command = _git_text(repo, "config", "--get", "core.sshCommand") or os.environ.get("GIT_SSH_COMMAND") or "ssh"
         try:
-            executable = Path(shlex.split(command)[0]).name.lower()
+            executable = Path(shlex.split(command, posix=os.name != "nt")[0].strip("\"'")).name.lower()
         except (ValueError, IndexError):
             return False, True
         if executable not in {"ssh", "ssh.exe"}:
@@ -123,9 +124,11 @@ def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
         indexes = load_index_state(settings)
         configured_paths = {repo.path.resolve() for repo in settings.repositories}
         discovered = set(discover_git_repositories([settings.root])) - configured_paths
-        if discovered and settings.config_path.suffix.lower() != ".toml":
-            return FreshnessDecision.action_required("Configuration requires attention.")
-        reasons: set[str] = {"New repositories are pending."} if discovered else set()
+        if discovered:
+            return FreshnessDecision.action_required(
+                "New repositories require an explicit brain.toml edit."
+            )
+        reasons: set[str] = set()
 
         for repo in settings.repositories:
             source = sources.get(repo.name) or {}
@@ -217,22 +220,22 @@ class AutoRefreshService:
 
     def _load(self) -> dict[str, Any]:
         try:
-            loaded = json.loads(self._path.read_text(encoding="utf-8"))
+            loaded = json.loads(read_managed_text(
+                self.settings.state_dir, self._path, max_bytes=256 * 1024,
+            ))
             return loaded if isinstance(loaded, dict) else {}
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
             return {}
 
     def _save(self) -> None:
         if not self._persist_enabled:
             return
         self.settings.state_dir.mkdir(parents=True, exist_ok=True)
-        temporary = self._path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({
+        atomic_managed_text_write(self.settings.state_dir, self._path, json.dumps({
             "mode": self._mode,
             "last_check": self._last_check,
             "last_refresh": self._last_refresh,
-        }, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(self._path)
+        }, indent=2) + "\n")
         try:
             self._path.chmod(0o600)
         except OSError:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import importlib.util
 import io
 import socket
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -11,10 +13,11 @@ from contextlib import redirect_stdout
 from http.client import RemoteDisconnected
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from brain.cli import main
-from brain.core import load_settings
+from brain.core import load_settings, snapshot_indexes
 from brain.editions import capabilities
 from brain.models import LlamaCppRuntime, ManagedLlamaCppRuntime, embedding_request_bytes
 from brain.semantic import (
@@ -22,10 +25,13 @@ from brain.semantic import (
     SEMANTIC_MAX_REQUEST_BODY_BYTES,
     Chunk,
     SemanticEmbeddingError,
+    _atomic_index_save,
     _bounded_embedding_batches,
     _bounded_semantic_card,
     _cache_vectors,
+    _partition_semantic_inputs,
     _query_vector,
+    _shard_sha256,
     build_semantic_index,
     chunk_source,
     search_semantic,
@@ -117,6 +123,57 @@ class SemanticRobustnessTest(unittest.TestCase):
                 SEMANTIC_MAX_REQUEST_BODY_BYTES,
             )
 
+    def test_hundred_repository_semantic_inputs_are_partitioned_in_one_pass(self) -> None:
+        class CountingManifest(dict[tuple[str, str], str]):
+            visits = 0
+
+            def items(self):  # type: ignore[override]
+                for item in super().items():
+                    self.visits += 1
+                    yield item
+
+        class CountingCards(list[dict[str, object]]):
+            visits = 0
+
+            def __iter__(self):  # type: ignore[override]
+                for item in super().__iter__():
+                    self.visits += 1
+                    yield item
+
+        repositories = [SimpleNamespace(name=f"repo-{index:03d}") for index in range(100)]
+        manifest = CountingManifest({
+            (repo.name, "src/Main.java"): f"blob-{index}"
+            for index, repo in enumerate(repositories)
+        })
+        cards = CountingCards([
+            {"repo": repo.name, "card_id": f"card-{index}"}
+            for index, repo in enumerate(repositories)
+        ])
+
+        manifests, partitioned_cards = _partition_semantic_inputs(
+            repositories, manifest, cards,
+        )
+
+        self.assertEqual(100, manifest.visits)
+        self.assertEqual(100, cards.visits)
+        self.assertIsNotNone(manifests)
+        assert manifests is not None
+        self.assertTrue(all(len(manifests[repo.name]) == 1 for repo in repositories))
+        self.assertTrue(all(len(partitioned_cards[repo.name]) == 1 for repo in repositories))
+
+    def test_windows_shard_hash_does_not_reuse_same_stat_projection(self) -> None:
+        shard = self.root / "semantic-shard.usearch"
+        shard.write_bytes(b"original")
+        stable_stat = shard.stat()
+        with (
+            mock.patch("brain.semantic.os.name", "nt"),
+            mock.patch.object(Path, "stat", return_value=stable_stat),
+        ):
+            original = _shard_sha256(shard)
+            shard.write_bytes(b"tampered")
+            tampered = _shard_sha256(shard)
+        self.assertNotEqual(original, tampered)
+
     def test_runtime_posts_the_same_utf8_json_body_that_size_accounting_measures(self) -> None:
         runtime = LlamaCppRuntime("http://127.0.0.1:9999", input_suffix="\n<eos>你好")
         response = mock.MagicMock()
@@ -133,6 +190,394 @@ class SemanticRobustnessTest(unittest.TestCase):
             json.loads((request.data or b"").decode("utf-8"))["input"],
         )
 
+    def test_runtime_response_is_physically_byte_bounded_before_json_decode(self) -> None:
+        runtime = LlamaCppRuntime("http://127.0.0.1:9999")
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.side_effect = lambda size: b"x" * size
+        with (
+            mock.patch.object(runtime, "_open", return_value=response),
+            mock.patch("brain.models.MAX_MODEL_RUNTIME_RESPONSE_BYTES", 32),
+            self.assertRaisesRegex(RuntimeError, "response exceeds its byte limit"),
+        ):
+            runtime.embed(["card"], dimension=2)
+        response.__enter__.return_value.read.assert_called_once_with(33)
+
+    def test_semantic_shard_save_ignores_predictable_symlink_traps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shard = root / "generation.usearch"
+            outside = root / "outside.bin"
+            outside.write_bytes(b"outside marker")
+            shard.with_suffix(".building").symlink_to(outside)
+
+            class FakeIndex:
+                @staticmethod
+                def save(path: str) -> None:
+                    Path(path).write_bytes(b"new shard")
+
+            _atomic_index_save(FakeIndex(), shard)
+            self.assertEqual(b"outside marker", outside.read_bytes())
+            self.assertEqual(b"new shard", shard.read_bytes())
+
+    def test_non_finite_embedding_vectors_fail_closed_and_cached_values_self_heal(self) -> None:
+        runtime = LlamaCppRuntime("http://127.0.0.1:9999")
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"data":[{"embedding":[NaN,1.0]}]}'
+        with mock.patch.object(runtime, "_open", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "incomplete vector batch"):
+                runtime.embed(["card"], dimension=2)
+
+        chunks = self._chunks(2)
+        _cache_vectors(self.settings, "finite-pack", chunks, dimension=2, embed=self._vectors)
+        connection = sqlite3.connect(self.settings.state_dir / "catalog.sqlite3")
+        try:
+            connection.execute(
+                "UPDATE embedding_cache SET vector_json=? WHERE pack_id=?",
+                (json.dumps([float("nan"), 1.0]), "finite-pack"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        rebuilt: list[list[str]] = []
+
+        def finite(cards: list[str]) -> list[list[float]]:
+            rebuilt.append(cards)
+            return self._vectors(cards)
+
+        vectors = _cache_vectors(self.settings, "finite-pack", chunks, dimension=2, embed=finite)
+        self.assertEqual(2, len(vectors))
+        self.assertTrue(rebuilt)
+
+        _query_vector(self.settings, "finite query", pack_id="finite-pack", dimension=2, embed=self._vectors)
+        connection = sqlite3.connect(self.settings.state_dir / "catalog.sqlite3")
+        try:
+            connection.execute(
+                "UPDATE embedding_cache SET vector_json=? WHERE cache_key LIKE 'query:%'",
+                (json.dumps([float("inf"), 1.0]),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        query_calls: list[list[str]] = []
+
+        def query_embed(values: list[str]) -> list[list[float]]:
+            query_calls.append(values)
+            return [[1.0, 2.0]]
+
+        self.assertEqual(
+            [1.0, 2.0],
+            _query_vector(self.settings, "finite query", pack_id="finite-pack", dimension=2, embed=query_embed),
+        )
+        self.assertEqual([["finite query"]], query_calls)
+
+    def test_embedding_cache_capacity_fails_before_pruning_or_inserting(self) -> None:
+        from brain.catalog import connect
+
+        connection = connect(self.settings)
+        try:
+            connection.execute(
+                "INSERT INTO embedding_cache(cache_key,pack_id,dimension,vector_json,created_at,last_used_at) "
+                "VALUES ('sentinel','old-pack',2,'[]','2020','2020')"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with mock.patch("brain.ops.remaining_write_capacity", return_value=0), self.assertRaisesRegex(
+            SemanticEmbeddingError, "query embedding cache",
+        ):
+            _query_vector(
+                self.settings, "disk-full-query", pack_id="query-pack", dimension=2, embed=self._vectors,
+            )
+        connection = connect(self.settings)
+        try:
+            self.assertEqual(
+                0,
+                connection.execute("SELECT COUNT(*) FROM embedding_cache WHERE cache_key LIKE 'query:%'").fetchone()[0],
+            )
+        finally:
+            connection.close()
+        with mock.patch("brain.ops.remaining_write_capacity", return_value=0), self.assertRaisesRegex(
+            SemanticEmbeddingError, "remaining managed write capacity",
+        ):
+            _cache_vectors(
+                self.settings, "disk-full-pack", self._chunks(1), dimension=2, embed=self._vectors,
+            )
+        connection = connect(self.settings)
+        try:
+            self.assertEqual(
+                [("sentinel", "[]")],
+                connection.execute("SELECT cache_key,vector_json FROM embedding_cache").fetchall(),
+            )
+        finally:
+            connection.close()
+        with mock.patch("brain.semantic.MAX_EMBEDDING_CACHE_BYTES", 4), self.assertRaisesRegex(
+            SemanticEmbeddingError, "cache entry batch exceeds",
+        ):
+            _cache_vectors(
+                self.settings, "new-pack", self._chunks(1), dimension=2, embed=self._vectors,
+            )
+        connection = connect(self.settings)
+        try:
+            self.assertEqual(
+                [("sentinel", "[]")],
+                connection.execute("SELECT cache_key,vector_json FROM embedding_cache").fetchall(),
+            )
+        finally:
+            connection.close()
+
+    def test_semantic_shard_capacity_is_reserved_before_native_save(self) -> None:
+        saved: list[str] = []
+
+        class Runtime:
+            @staticmethod
+            def embed(cards: list[str], *, instruction: str = "", dimension: int = 0) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in cards]
+
+            @staticmethod
+            def shutdown() -> None:
+                return None
+
+        class Index:
+            def __init__(self, **_: object) -> None:
+                pass
+
+            @staticmethod
+            def add(keys: object, values: object) -> None:
+                return None
+
+            @staticmethod
+            def save(path: str) -> None:
+                saved.append(path)
+                Path(path).write_bytes(b"native shard")
+
+        class Numpy:
+            uint64 = "uint64"
+            float32 = "float32"
+
+            @staticmethod
+            def arange(value: int, dtype: object = None) -> list[int]:
+                return list(range(value))
+
+            @staticmethod
+            def asarray(value: object, dtype: object = None) -> object:
+                return value
+
+        manifest = {
+            "pack_id": "capacity-pack", "embedding_dimension": 2, "test_only": True,
+            "pack_compatibility_identity": "sha256:" + "1" * 64,
+        }
+        with (
+            mock.patch("brain.semantic.active_pack", return_value=manifest),
+            mock.patch("brain.semantic.runtime_for_pack", return_value=Runtime()),
+            mock.patch("brain.semantic._usearch", return_value=(Index, Numpy)),
+            mock.patch("brain.ops.remaining_write_capacity", return_value=1024 * 1024),
+            self.assertRaisesRegex(SemanticEmbeddingError, "Semantic shard exceeds"),
+        ):
+            build_semantic_index(self.settings)
+        self.assertEqual([], saved)
+        self.assertFalse(list((self.settings.state_dir / "semantic-shards").glob("*.usearch")))
+
+    def test_semantic_chunk_limit_fails_before_embedding_or_shard_write(self) -> None:
+        calls: list[list[str]] = []
+
+        def embed(cards: list[str]) -> list[list[float]]:
+            calls.append(cards)
+            return self._vectors(cards)
+
+        with (
+            mock.patch("brain.semantic.MAX_SEMANTIC_CHUNKS_PER_REPOSITORY", 0),
+            self.assertRaisesRegex(SemanticEmbeddingError, "chunk limit"),
+        ):
+            build_semantic_index(self.settings, embed=embed, pack_id="bounded-chunks")
+        self.assertEqual([], calls)
+        self.assertFalse((self.settings.state_dir / "semantic-index.json").exists())
+
+    def test_semantic_build_streams_preflighted_membership_without_full_manifest(self) -> None:
+        snapshot_indexes(self.settings)
+        embedded: list[list[str]] = []
+
+        def embed(cards: list[str]) -> list[list[float]]:
+            embedded.append(cards)
+            return self._vectors(cards)
+
+        with mock.patch(
+            "brain.index.indexed_snapshot_file_manifest",
+            side_effect=AssertionError("complete manifest must not be materialized"),
+        ):
+            result = build_semantic_index(
+                self.settings, embed=embed, pack_id="streamed-source",
+            )
+        self.assertGreater(result["chunks"], 0)
+        self.assertTrue(embedded)
+
+    def test_semantic_source_budget_fails_before_embedding(self) -> None:
+        snapshot_indexes(self.settings)
+        embedded: list[list[str]] = []
+        with (
+            mock.patch("brain.semantic.MAX_SEMANTIC_SOURCE_FILES_PER_REPOSITORY", 0),
+            self.assertRaisesRegex(SemanticEmbeddingError, "source budget"),
+        ):
+            build_semantic_index(
+                self.settings,
+                embed=lambda cards: embedded.append(cards) or self._vectors(cards),
+                pack_id="bounded-source",
+            )
+        self.assertEqual([], embedded)
+
+    def test_semantic_stream_rejects_same_size_membership_substitution(self) -> None:
+        from brain.index import (
+            indexed_snapshot_source_contents,
+            indexed_snapshot_source_projection,
+        )
+
+        first = self.repository / "src" / "alpha.py"
+        second = self.repository / "src" / "bravo.py"
+        first.write_text("def alpha():\n    return 1\n", encoding="utf-8")
+        second.write_text("def bravo():\n    return 2\n", encoding="utf-8")
+        state, _ = snapshot_indexes(self.settings)
+        workload_snapshot = str(state["workload"]["sha"])
+        snapshots = {"workload": workload_snapshot}
+        projection = indexed_snapshot_source_projection(
+            self.settings,
+            snapshots,
+            max_repositories=10,
+            max_items_per_repository=100,
+            max_items=1_000,
+            max_bytes_per_repository=1_000_000,
+            max_bytes=2_000_000,
+            max_file_bytes=3_000_000,
+            max_seconds=10.0,
+        )
+        connection = sqlite3.connect(self.settings.state_dir / "search.sqlite3")
+        try:
+            replacement = connection.execute(
+                "SELECT blob FROM file_membership WHERE repo='workload' "
+                "AND snapshot_sha=? AND path='src/bravo.py'",
+                (workload_snapshot,),
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE file_membership SET blob=? WHERE repo='workload' "
+                "AND snapshot_sha=? AND path='src/alpha.py'",
+                (replacement, workload_snapshot),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(sqlite3.DatabaseError, "changed before Semantic build"):
+            list(indexed_snapshot_source_contents(
+                self.settings,
+                "workload",
+                workload_snapshot,
+                projection["workload"],
+                max_seconds=10.0,
+            ))
+
+    def test_legacy_semantic_walk_is_entry_bounded_before_embedding(self) -> None:
+        embedded: list[list[str]] = []
+        with (
+            mock.patch("brain.semantic.MAX_SEMANTIC_LEGACY_SCAN_ENTRIES", 1),
+            self.assertRaisesRegex(SemanticEmbeddingError, "bounded repository contract"),
+        ):
+            build_semantic_index(
+                self.settings,
+                embed=lambda cards: embedded.append(cards) or self._vectors(cards),
+                pack_id="bounded-legacy-source",
+            )
+        self.assertEqual([], embedded)
+
+    def test_corrupt_current_shard_is_rebuilt_from_cached_embeddings(self) -> None:
+        saved: list[str] = []
+        embedded: list[list[str]] = []
+
+        class Runtime:
+            def embed(self, cards: list[str], *, instruction: str = "", dimension: int = 0) -> list[list[float]]:
+                embedded.append(cards)
+                return [[1.0, float(index + 1)] for index, _ in enumerate(cards)]
+
+            @staticmethod
+            def shutdown() -> None:
+                return None
+
+        class Index:
+            def __init__(self, **_: object) -> None:
+                pass
+
+            @staticmethod
+            def add(keys: object, values: object) -> None:
+                return None
+
+            @staticmethod
+            def save(path: str) -> None:
+                saved.append(path)
+                Path(path).write_bytes(b"valid shard " + str(len(saved)).encode("ascii"))
+
+        class Numpy:
+            uint64 = "uint64"
+            float32 = "float32"
+
+            @staticmethod
+            def arange(value: int, dtype: object = None) -> list[int]:
+                return list(range(value))
+
+            @staticmethod
+            def asarray(value: object, dtype: object = None) -> object:
+                return value
+
+        manifest = {
+            "pack_id": "repair-pack", "embedding_dimension": 2, "test_only": True,
+            "pack_compatibility_identity": "sha256:" + "2" * 64,
+        }
+        patches = (
+            mock.patch("brain.semantic.active_pack", return_value=manifest),
+            mock.patch("brain.semantic.runtime_for_pack", return_value=Runtime()),
+            mock.patch("brain.semantic._usearch", return_value=(Index, Numpy)),
+        )
+        with patches[0], patches[1], patches[2]:
+            build_semantic_index(self.settings)
+        state_path = self.settings.state_dir / "semantic-index.json"
+        first = json.loads(state_path.read_text(encoding="utf-8"))
+        corrupt = Path(str(first["shards"][0]["path"]))
+        corrupt.write_bytes(b"corrupt shard")
+        saved.clear()
+        embedded.clear()
+        with (
+            mock.patch("brain.semantic.active_pack", return_value=manifest),
+            mock.patch("brain.semantic.runtime_for_pack", return_value=Runtime()),
+            mock.patch("brain.semantic._usearch", return_value=(Index, Numpy)),
+        ):
+            build_semantic_index(self.settings)
+        repaired = json.loads(state_path.read_text(encoding="utf-8"))
+        repaired_path = Path(str(next(
+            shard["path"] for shard in repaired["shards"] if shard["repo"] == first["shards"][0]["repo"]
+        )))
+        self.assertNotEqual(corrupt, repaired_path)
+        self.assertTrue(saved)
+        self.assertEqual([], embedded)
+        self.assertEqual(hashlib.sha256(repaired_path.read_bytes()).hexdigest(), next(
+            shard["artifact_sha256"] for shard in repaired["shards"] if shard["path"] == str(repaired_path)
+        ))
+
+    def test_same_pack_id_with_different_definition_never_reuses_legacy_vectors(self) -> None:
+        chunks = self._chunks(1)
+        first_identity = "sha256:" + "1" * 64
+        second_identity = "sha256:" + "2" * 64
+        _cache_vectors(
+            self.settings, "replaced-pack", chunks, dimension=2, embed=lambda _cards: [[1.0, 0.0]],
+            pack_compatibility_identity=first_identity,
+        )
+        calls: list[list[str]] = []
+
+        def replacement(cards: list[str]) -> list[list[float]]:
+            calls.append(cards)
+            return [[0.0, 1.0]]
+
+        vectors = _cache_vectors(
+            self.settings, "replaced-pack", chunks, dimension=2, embed=replacement,
+            pack_compatibility_identity=second_identity,
+        )
+        self.assertEqual([[0.0, 1.0]], vectors)
+        self.assertTrue(calls)
+
     def test_cached_query_vector_skips_runtime_and_model_lane_startup(self) -> None:
         build_semantic_index(self.settings, embed=self._vectors, pack_id="query-cache-pack")
         state = json.loads((self.settings.state_dir / "semantic-index.json").read_text(encoding="utf-8"))
@@ -141,9 +586,13 @@ class SemanticRobustnessTest(unittest.TestCase):
             self.settings, "cached semantic query", pack_id="query-cache-pack", dimension=dimension,
             embed=self._vectors,
         )
-        manifest = {"pack_id": "query-cache-pack", "query_instruction": ""}
+        manifest = {
+            "pack_id": "query-cache-pack", "query_instruction": "", "embedding_dimension": dimension,
+            "pack_compatibility_identity": state["pack_compatibility_identity"],
+            "test_only": True,
+        }
         with (
-            mock.patch("brain.semantic.active_pack", return_value=manifest),
+            mock.patch("brain.semantic.verified_pack", return_value=manifest),
             mock.patch("brain.semantic.runtime_for_pack") as runtime,
             mock.patch("brain.semantic.model_lane") as lane,
         ):
@@ -250,6 +699,125 @@ class SemanticRobustnessTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual([], calls)
         self.assertEqual(published, state_path.read_bytes())
+
+    def test_routed_search_hashes_only_selected_shard_and_ignores_other_repo_corruption(self) -> None:
+        from brain.catalog import _content_hash, source_signature
+        from brain.semantic import (
+            ATLAS_CARD_VERSION, CARD_VERSION, CHUNK_SCHEMA_VERSION,
+            SEMANTIC_EMBEDDING_INPUT_VERSION, SEMANTIC_SHARD_MANIFEST_VERSION,
+            _SERVING_STATE_CACHE, _SHARD_HASH_CACHE, _injected_pack_identity, semantic_schema_version,
+        )
+
+        shard_root = self.settings.state_dir / "semantic-shards"
+        shard_root.mkdir(parents=True, exist_ok=True)
+        shards = []
+        for repo, content in (("workload", b"healthy-a"), ("second-workload", b"healthy-b")):
+            path = shard_root / f"{repo}.usearch"
+            path.write_bytes(content)
+            shards.append({
+                "repo": repo, "snapshot": "working-tree", "path": str(path),
+                "artifact_ref": path.name, "artifact_bytes": len(content),
+                "artifact_sha256": hashlib.sha256(content).hexdigest(),
+                "entries": [{"path": "src/workload.py", "line": 1, "chunk_id": repo}],
+            })
+        snapshots = {"workload": "working-tree", "second-workload": "working-tree"}
+        state = {
+            "chunk_schema_version": CHUNK_SCHEMA_VERSION, "card_version": CARD_VERSION,
+            "embedding_input_version": SEMANTIC_EMBEDDING_INPUT_VERSION,
+            "atlas_card_version": ATLAS_CARD_VERSION,
+            "shard_manifest_version": SEMANTIC_SHARD_MANIFEST_VERSION,
+            "backend": "usearch", "pack_id": "routed-pack", "dimension": 2, "stale": False,
+            "pack_compatibility_identity": _injected_pack_identity("routed-pack"),
+            "snapshots": snapshots, "entries": [], "shards": shards,
+        }
+        artifact = self.settings.state_dir / "generations" / "generation-000001" / "semantic.json"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text(json.dumps(state), encoding="utf-8")
+        component = {
+            "schema_version": semantic_schema_version(), "status": "ready",
+            "content_hash": _content_hash(state),
+            "artifact_ref": str(artifact.relative_to(self.settings.state_dir)),
+            "details": {
+                "pack_id": "routed-pack", "dimension": 2, "backend": "usearch",
+                "pack_compatibility_identity": state["pack_compatibility_identity"],
+                "snapshots": snapshots, "source_signature": source_signature(snapshots),
+            },
+        }
+
+        class Generation:
+            identity = "routed-generation"
+
+            def __init__(self) -> None:
+                self.snapshots = snapshots
+
+            @staticmethod
+            def component(name: str) -> dict[str, object]:
+                return component if name == "semantic" else {}
+
+        class Index:
+            restored: list[str] = []
+
+            @classmethod
+            def restore(cls, path: str, view: bool = True) -> object:
+                cls.restored.append(path)
+                return cls()
+
+            @staticmethod
+            def search(vector: object, limit: int) -> list[object]:
+                return []
+
+        class Numpy:
+            float32 = object()
+
+            @staticmethod
+            def asarray(value: object, dtype: object = None) -> object:
+                return value
+
+        # Preserve manifest metadata but corrupt the unselected repository's bytes.
+        Path(str(shards[1]["path"])).write_bytes(b"corrupt-b")
+        hashed: list[Path] = []
+
+        def digest(path: Path) -> str:
+            hashed.append(path)
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+
+        _SERVING_STATE_CACHE.clear()
+        _SHARD_HASH_CACHE.clear()
+        serving: dict[str, str] = {}
+        with (
+            mock.patch("brain.semantic._usearch", return_value=(Index, Numpy)),
+            mock.patch("brain.semantic._shard_sha256", side_effect=digest),
+        ):
+            results = search_semantic(
+                self.settings, "workload", repos={"workload"}, embed=lambda values: [[1.0, 0.0]],
+                generation=Generation(), serving_status=serving,
+            )
+        self.assertEqual([], results)
+        self.assertEqual("ready", serving["status"])
+        self.assertEqual([Path(str(shards[0]["path"]))], hashed)
+        self.assertEqual([str(shards[0]["path"])], Index.restored)
+
+        _SERVING_STATE_CACHE.clear()
+        _SHARD_HASH_CACHE.clear()
+        both_serving: dict[str, str] = {}
+        with (
+            mock.patch("brain.semantic._usearch", return_value=(Index, Numpy)),
+            mock.patch("brain.semantic._shard_sha256", side_effect=digest),
+        ):
+            search_semantic(
+                self.settings, "workload", repos={"workload", "second-workload"},
+                embed=lambda values: [[1.0, 0.0]], generation=Generation(),
+                serving_status=both_serving,
+            )
+        self.assertEqual("degraded", both_serving["status"])
+        from brain.core import _effective_retrieval_edition
+
+        self.assertEqual(
+            "Degraded Core",
+            _effective_retrieval_edition(
+                "precision", semantic_used=True, reranker_used=True, semantic_status=both_serving["status"],
+            ),
+        )
 
     def test_semantic_progress_reports_cold_build_cache_reuse_and_generation_reuse(self) -> None:
         self.source.write_text(

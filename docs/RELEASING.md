@@ -3,8 +3,9 @@
 Project Brain Core releases and model packs are separate artifacts. Neither the
 Core wheel/standalone archives nor the Homebrew formula contain model weights.
 Core release validation must also include the packaged `truststore` dependency:
-the standalone binary uses native macOS Keychain trust (and platform OpenSSL
-trust on Linux) for one-time verified model-pack downloads. Do not replace it
+the standalone binary uses native macOS Keychain trust, the Windows certificate
+store, and platform OpenSSL trust on Linux for one-time verified model-pack
+downloads. Do not replace it
 with an insecure context or a Project Brain-managed corporate CA bundle.
 For an already-installed verified pack, separately smoke-test the Brain-owned
 `127.0.0.1` runtime boundary with enterprise proxy configuration present. Its
@@ -15,13 +16,23 @@ or weakening TLS.
 
 ## Core release and Homebrew
 
-1. Run the full public/synthetic test suite, build the wheel/sdist, and verify
-   the standalone archives from a clean tagged commit.
-2. Push a `vX.Y.Z` tag. The release workflow builds all artifacts, writes
-   `SHA256SUMS.txt`, and creates the GitHub Release.
-3. Only after that release succeeds, the `homebrew-tap` job downloads the
+1. Run the full public/synthetic test suite on Python 3.11–3.14 for Linux and
+   native Windows, build the wheel/sdist, and verify the macOS/Linux archives
+   plus the native Windows amd64 ZIP from a clean tagged commit.
+2. Smoke-test `install-project-brain.sh` against each macOS/Linux archive and
+   `install-project-brain.ps1` against the Windows ZIP before publishing both
+   installers as release assets. Each installer must consume the final
+   `SHA256SUMS.txt` and preserve existing Brain-owned state.
+3. Push a `vX.Y.Z` tag. The release workflow builds all artifacts, writes
+   `SHA256SUMS.txt`, creates signed GitHub build-provenance attestations for
+   every asset, and creates the GitHub Release. Verify the downloaded Windows
+   ZIP (and any other asset) with
+   `gh attestation verify <asset> --repo superorange0707/project-brain` in
+   addition to checking `SHA256SUMS.txt`; provenance verification is a stable
+   v1 release gate, not an optional installer reset or workspace migration.
+4. Only after that release succeeds, the `homebrew-tap` job downloads the
    published checksum asset and compares it with the build checksum file.
-4. If both match and the repository has a narrowly scoped
+5. If both match and the repository has a narrowly scoped
    `HOMEBREW_TAP_TOKEN` Actions secret with write access only to
    `superorange0707/homebrew-tap`, it renders, syntax-checks, commits, and
    pushes the formula.
@@ -58,6 +69,18 @@ local and offline.
 Do not add an entry to the Core catalog until a clean temporary installation
 also verifies the packaged local runtime can start and complete its golden
 suite.
+
+The manually dispatched Windows Semantic and Precision workflows default to
+build-only mode. They use immutable upstream/model descriptors, build a native
+portable `llama-server.exe`, run the same bounded public conformance, and upload
+Actions artifacts. Setting their `publish` input is a separate protected release
+action from the default branch: it requires a new `*-pack-windows-vX.Y.Z` tag,
+creates a draft release at the reviewed builder commit, uploads and re-downloads
+the complete checksummed asset set, and only then publishes it as immutable. It
+never appends Windows assets to an already-published Darwin pack release. After
+publication, verify the release assets on a clean Windows 11 x64 host and only
+then pin the exact Windows descriptor SHA-256 in a later reviewed Core change.
+Never copy the Darwin descriptor into the Windows catalog.
 
 No release workflow claims target-machine latency, M3 Pro memory usage, or
 private-ticket replay quality until those local validations exist. A verified

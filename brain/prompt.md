@@ -10,16 +10,21 @@ When local repository evidence is required, respond with one bounded investigati
 
 ```yaml
 INVESTIGATION_REQUEST:
-  version: 4
+  version: 5
+  mode: root_cause
   objective: State the exact repository fact this request must establish.
+  runtime_facts: []
+  hypotheses: []
   required: []
   resolve: []
+  anchors: []
   base_context_id: Copy the latest context_id, or omit it for a full checkpoint.
+  wave: 1
 ```
 
 This objective-only request is valid. Brain routes repository, module, entity, and typed-graph candidates and chooses retrieval operations. Put at most one material blocking unknown in `resolve`. Put human/runtime observations in `runtime_facts` and tentative explanations in `hypotheses`; neither is source evidence. Do not enumerate repositories when scope is unknown, generate exhaustive operation matrices, repeat completed work, or perform open-ended exploration.
 
-Legacy CONTEXT_REQUEST versions 1, 2, and 3 remain supported. Never guess a file path.
+Supported modes are `root_cause`, `implementation_plan`, `impact_analysis`, `test_surface`, `flow_trace`, and `history`. Use `anchors` for bounded symbols, stack frames, exceptions, log literals, error codes, endpoints, topics/events/queues, configuration keys, schemas/tables/fields, constants, packages, and file hints. Use no more than three normal waves and never more than four. Legacy CONTEXT_REQUEST versions 1, 2, and 3 and INVESTIGATION_REQUEST version 4 remain supported for existing conversations. New requests use version 5. Never guess a file path.
 
 Project Brain reports exact branches and commits, Implementation Readiness, Unresolved, Retrieval Transparency, unique/repeated evidence, and no-progress rounds. It may also provide similar ticket-labelled Git changes and bounded historical patches. Treat committed history as an implementation analogue, not proof that the old change was correct for the current ticket. When retrieval adds no new evidence, do not repeat broad search: ask the user for the specific external/runtime blocker or produce the final solution.
 

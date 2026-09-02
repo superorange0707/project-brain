@@ -14,10 +14,21 @@ from urllib.request import Request, urlopen
 
 from brain.auto_refresh import AutoRefreshService, FreshnessDecision
 from brain.cli import _refresh_all, main
-from brain.core import BrainError, load_settings
+from brain.core import BrainError, load_settings, session_dir, start_session
 from brain.ops import RefreshOutcome, format_refresh_progress, refresh_brain
 from brain.sync import SyncResult
-from brain.ui import _OperationCoordinator, _Server, serve_ui
+from brain.ui import (
+    MAX_SESSION_ARTIFACT_RESULTS,
+    MAX_SESSION_RESULTS,
+    _OperationCoordinator,
+    _Server,
+    _artifact,
+    _session_artifacts,
+    _session_detail,
+    _sessions,
+    project_status,
+    serve_ui,
+)
 
 
 class OperationCoordinatorTest(unittest.TestCase):
@@ -51,6 +62,109 @@ class OperationCoordinatorTest(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertEqual("succeeded", coordinator.get(job["id"])["status"])
+
+
+class SessionSummaryTest(unittest.TestCase):
+    def test_project_status_never_reads_symlinked_graph_or_evaluation_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "service").mkdir()
+            config = root / "brain.toml"
+            config.write_text(
+                "[project]\nname='ui-managed-state'\n"
+                "[[repositories]]\nname='service'\npath='service'\n",
+                encoding="utf-8",
+            )
+            settings = load_settings(config)
+            settings.repo("service").source_sha = "sha-g1"
+            settings.state_dir.mkdir(parents=True, exist_ok=True)
+            outside_graph = root / "outside-graphs.json"
+            outside_eval = root / "outside-eval.json"
+            outside_graph.write_text(json.dumps({"service": {"sha": "sha-g1"}}), encoding="utf-8")
+            outside_eval.write_text(json.dumps({"evaluated_sessions": 999}), encoding="utf-8")
+            try:
+                (settings.state_dir / "graphs.json").symlink_to(outside_graph)
+                (settings.state_dir / "experience-eval.json").symlink_to(outside_eval)
+            except OSError as error:
+                self.skipTest(f"file symlinks unavailable: {error}")
+            dashboard = {
+                "edition": "core", "capabilities": {}, "freshness": {"components": {}},
+                "health": "Action required", "core": {"ready": False},
+            }
+            with (
+                patch("brain.ui.load_source_state", return_value={
+                    "service": {"status": "current", "sha": "sha-g1"},
+                }),
+                patch("brain.ui.load_index_state", return_value={"service": {"sha": "sha-g1"}}),
+                patch("brain.ui.load_experience_index", return_value={}),
+                patch("brain.ui._sessions", return_value=[]),
+                patch("brain.ops.dashboard_status", return_value=dashboard),
+                patch("brain.ops.storage", return_value={}),
+                patch("brain.metrics.benchmark_report", return_value={}),
+                patch("brain.catalog.current_generation", return_value=None),
+            ):
+                status = project_status(settings)
+            self.assertFalse(status["repositories"][0]["structural"])
+            self.assertEqual(0, status["summary"]["evaluated_sessions"])
+            self.assertEqual(999, json.loads(outside_eval.read_text(encoding="utf-8"))["evaluated_sessions"])
+
+    def test_cockpit_session_summaries_reject_unsafe_state_and_cap_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "service").mkdir()
+            config = root / "brain.toml"
+            config.write_text(
+                "[project]\nname='ui-session-bounds'\n[graph]\nenabled=false\n"
+                "[[repositories]]\nname='service'\npath='service'\n",
+                encoding="utf-8",
+            )
+            settings = load_settings(config)
+            secret = root / "outside-session.json"
+            secret.write_text(json.dumps({"ticket": "OUTSIDE-SECRET"}), encoding="utf-8")
+            linked = settings.runs_dir / "LINKED"
+            linked.mkdir()
+            try:
+                (linked / "session.json").symlink_to(secret)
+            except OSError as error:
+                self.skipTest(f"symbolic links unavailable: {error}")
+            oversized = settings.runs_dir / "OVERSIZED"
+            oversized.mkdir()
+            (oversized / "session.json").write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+            for index in range(MAX_SESSION_RESULTS + 5):
+                directory = settings.runs_dir / f"SAFE-{index:03d}"
+                directory.mkdir()
+                (directory / "session.json").write_text(
+                    json.dumps({"ticket": f"SAFE-{index:03d}", "requests": index}),
+                    encoding="utf-8",
+                )
+            summaries = _sessions(settings)
+            self.assertLessEqual(len(summaries), MAX_SESSION_RESULTS)
+            rendered = json.dumps(summaries)
+            self.assertNotIn("OUTSIDE-SECRET", rendered)
+            self.assertNotIn("OVERSIZED", rendered)
+
+            detail = settings.runs_dir / "DETAIL"
+            detail.mkdir()
+            (detail / "session.json").write_text(
+                json.dumps({"ticket": "DETAIL", "requests": 0}), encoding="utf-8",
+            )
+            ticket = detail / "ticket.md"
+            ticket.symlink_to(secret)
+            with self.assertRaisesRegex(BrainError, "Invalid managed session artifact"):
+                _session_detail(settings, "DETAIL")
+            ticket.unlink()
+            ticket.write_bytes(b"x" * (1024 * 1024 + 1))
+            with self.assertRaisesRegex(BrainError, "exceeds its byte limit"):
+                _session_detail(settings, "DETAIL")
+            ticket.write_text("bounded ticket", encoding="utf-8")
+            for index in range(MAX_SESSION_ARTIFACT_RESULTS + 5):
+                (detail / f"context-{index:03d}.md").write_text("bounded", encoding="utf-8")
+            artifacts = _session_artifacts(settings, "DETAIL")
+            self.assertLessEqual(len(artifacts), MAX_SESSION_ARTIFACT_RESULTS)
+            linked_artifact = detail / "context-linked.md"
+            linked_artifact.symlink_to(secret)
+            with self.assertRaisesRegex(BrainError, "Artifact does not exist"):
+                _artifact(settings, "DETAIL", linked_artifact.name)
 
 
 class LocalUiTest(unittest.TestCase):
@@ -232,7 +346,30 @@ CONTEXT_REQUEST:
 
         _, final, _ = self.post(
             "/api/continue",
-            {"ticket": "UI-1", "text": "FINAL_SOLUTION\nChange HelloService.", "target": "m365"},
+            {"ticket": "UI-1", "text": """FINAL_SOLUTION
+## Ticket interpretation and remaining assumptions
+The requested change is bounded.
+## Verified current behavior
+Pinned source verifies the behavior.
+## Ordered execution flow and integration flow
+The ordered flow is established.
+## Root cause
+The verified branch omits the case.
+## Exact repositories, files, symbols, and configuration/data
+Exact paths and symbols are listed.
+## Suggested production changes
+Update the existing branch.
+## Impact and test surfaces; tests and assertions
+The exact test assertions are listed.
+## Validation commands
+Run the approved tests.
+## Edge cases and compatibility risks
+Compatibility is preserved.
+## Implementation order
+Source, tests, validation.
+## Remaining assumptions
+None beyond the stated boundary.
+""", "target": "m365"},
         )
         self.assertEqual("final_solution", final["data"]["kind"])
         self.assertEqual("ready_to_implement", final["data"]["session"]["status"])
@@ -277,17 +414,18 @@ CONTEXT_REQUEST:
         self.assertEqual(400, caught.exception.code)
         caught.exception.close()
 
-    def test_sync_discovers_a_newly_cloned_repository_once(self) -> None:
+    def test_sync_reports_new_repository_without_mutating_user_config(self) -> None:
         (self.root / "service-b/.git").mkdir(parents=True)
+        before = self.config.read_bytes()
 
-        _, refreshed, _ = self.post("/api/sync", {})
-        self.assertEqual(["service-b"], refreshed["data"]["discovered"])
-        self.assertEqual(2, refreshed["data"]["status"]["summary"]["repositories"])
-        self.assertIn('name = "service-b"', self.config.read_text(encoding="utf-8"))
-
-        _, repeated, _ = self.post("/api/sync", {})
-        self.assertEqual([], repeated["data"]["discovered"])
-        self.assertEqual(1, self.config.read_text(encoding="utf-8").count('name = "service-b"'))
+        with self.assertRaises(HTTPError) as caught:
+            self.post("/api/sync", {})
+        self.assertEqual(400, caught.exception.code)
+        error = json.loads(caught.exception.read())
+        caught.exception.close()
+        self.assertIn("explicit brain.toml edit", error["error"])
+        self.assertEqual(before, self.config.read_bytes())
+        self.assertEqual(1, len(self.settings.repositories))
 
     def test_cli_and_ui_sync_delegate_to_the_same_refresh_service(self) -> None:
         outcome = self.refresh_outcome()
@@ -308,12 +446,13 @@ CONTEXT_REQUEST:
             "brain.relations.generate_relationship_map"
         ), patch("brain.experience.build_experience_index", return_value={"cases": []}), patch(
             "brain.experience.evaluate_sessions", return_value={"evaluated_sessions": 0}
-        ), patch("brain.graph.index_graph", return_value=[]), patch(
+        ), patch("brain.graph.index_graph", return_value=[]) as graph, patch(
             "brain.editions.current_edition", return_value="semantic"
         ), patch("brain.semantic.build_semantic_index", return_value={"chunks": 3}) as build, patch(
             "brain.ops.semantic_status", return_value=semantic
         ):
             outcome = refresh_brain(self.settings)
+        graph.assert_called_once_with(self.settings, defer_lazy=True)
         build.assert_called_once_with(self.settings)
         self.assertEqual("ready", outcome.semantic["status"])
         self.assertTrue(outcome.semantic["aligned"])
@@ -500,15 +639,149 @@ CONTEXT_REQUEST:
             "/api/start",
             {"ticket": "UI-DELETE-OTHER", "ticket_text": "Keep this history.", "sync": False, "target": "m365"},
         )
+        handoffs = self.root / "generated/handoffs"
+        for suffix in ("checkpoint-001", "checkpoint-delta-001"):
+            (handoffs / f"UI-DELETE-{suffix}.md").write_text("private exact source", encoding="utf-8")
+            (handoffs / f"UI-DELETE-OTHER-{suffix}.md").write_text("keep", encoding="utf-8")
 
         _, deleted, _ = self.post("/api/session/delete", {"ticket": "UI-DELETE"})
         self.assertEqual("UI-DELETE", deleted["data"]["ticket"])
         self.assertFalse((self.root / ".runs/UI-DELETE").exists())
         self.assertFalse((self.root / "generated/handoffs/UI-DELETE-current.md").exists())
         self.assertFalse((self.root / "generated/handoffs/UI-DELETE-start.md").exists())
+        self.assertFalse((handoffs / "UI-DELETE-checkpoint-001.md").exists())
+        self.assertFalse((handoffs / "UI-DELETE-checkpoint-delta-001.md").exists())
         self.assertTrue((self.root / ".runs/UI-DELETE-OTHER").is_dir())
         self.assertTrue((self.root / "generated/handoffs/UI-DELETE-OTHER-current.md").is_file())
+        self.assertTrue((handoffs / "UI-DELETE-OTHER-checkpoint-001.md").is_file())
+        self.assertTrue((handoffs / "UI-DELETE-OTHER-checkpoint-delta-001.md").is_file())
         self.assertTrue((self.root / "service-a").is_dir())
+
+    def test_delete_session_rejects_symlinked_handoff_root_before_session_mutation(self) -> None:
+        from brain.ui import _delete_session
+
+        start_session(self.settings, "UI-SYMLINK-DELETE", "Keep this session on unsafe deletion.")
+        session = session_dir(self.settings, "UI-SYMLINK-DELETE")
+        handoffs = self.settings.generated_dir / "handoffs"
+        preserved = self.settings.generated_dir / "handoffs-preserved"
+        handoffs.mkdir(parents=True, exist_ok=True)
+        handoffs.rename(preserved)
+        outside = self.root / "outside-handoffs"
+        outside.mkdir()
+        (outside / "UI-SYMLINK-DELETE-current.md").write_text("outside", encoding="utf-8")
+        handoffs.symlink_to(outside, target_is_directory=True)
+        try:
+            with self.assertRaisesRegex(BrainError, "handoff directory escapes"):
+                _delete_session(self.settings, "UI-SYMLINK-DELETE")
+            self.assertTrue(session.is_dir())
+            self.assertTrue((outside / "UI-SYMLINK-DELETE-current.md").is_file())
+        finally:
+            handoffs.unlink(missing_ok=True)
+            preserved.rename(handoffs)
+
+    def test_delete_session_rejects_substituted_generated_root(self) -> None:
+        from brain.ui import _delete_session
+
+        ticket = "UI-GENERATED-ROOT"
+        start_session(self.settings, ticket, "Keep this session on unsafe deletion.")
+        session = session_dir(self.settings, ticket)
+        generated = self.settings.generated_dir
+        preserved = generated.with_name("generated-preserved")
+        outside = self.root / "outside-generated"
+        outside_handoffs = outside / "handoffs"
+        outside_handoffs.mkdir(parents=True)
+        outside_marker = outside_handoffs / f"{ticket}-current.md"
+        outside_marker.write_text("outside", encoding="utf-8")
+        generated.rename(preserved)
+        try:
+            generated.symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            preserved.rename(generated)
+            self.skipTest(f"symbolic links unavailable: {error}")
+        try:
+            with self.assertRaisesRegex(BrainError, "handoff directory escapes"):
+                _delete_session(self.settings, ticket)
+            self.assertTrue(session.is_dir())
+            self.assertEqual(b"outside", outside_marker.read_bytes())
+        finally:
+            generated.unlink(missing_ok=True)
+            preserved.rename(generated)
+
+    def test_session_listing_ignores_a_substituted_runs_root(self) -> None:
+        from brain.ui import _sessions
+
+        preserved = self.settings.runs_dir.with_name("runs-ui-preserved")
+        outside = self.root / "outside-ui-runs"
+        external = outside / "EXTERNAL"
+        external.mkdir(parents=True)
+        (external / "session.json").write_text(
+            json.dumps({"ticket": "EXTERNAL", "status": "must-not-leak"}),
+            encoding="utf-8",
+        )
+        self.settings.runs_dir.rename(preserved)
+        try:
+            self.settings.runs_dir.symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            preserved.rename(self.settings.runs_dir)
+            self.skipTest(f"symbolic links unavailable: {error}")
+        try:
+            self.assertEqual([], _sessions(self.settings))
+        finally:
+            self.settings.runs_dir.unlink(missing_ok=True)
+            preserved.rename(self.settings.runs_dir)
+
+    def test_progressive_checkpoint_and_continuation_are_both_reachable_in_ui(self) -> None:
+        source = self.root / "service-a/src/main/java/demo/HelloService.java"
+        source.write_text(
+            'package demo;\nclass HelloService { @GetMapping("/hello") String hello() { return "hello"; } }\n',
+            encoding="utf-8",
+        )
+        _refresh_all(self.settings, fetch=False, discover=False)
+        self.post(
+            "/api/start",
+            {"ticket": "UI-PROGRESSIVE", "ticket_text": "Trace /hello.", "sync": False, "target": "m365"},
+        )
+        request = json.dumps({"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "root_cause", "objective": "Trace /hello",
+            "runtime_facts": [], "hypotheses": [], "required": ["production entry point"],
+            "resolve": ["/hello"], "anchors": [{"kind": "endpoint", "value": "/hello"}],
+            "base_context_id": None, "checkpoint": True, "wave": 1,
+        }})
+        from brain.investigation import build_ticket_runtime as original_build
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_build(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return original_build(*args, **kwargs)
+
+        with patch("brain.investigation.build_ticket_runtime", side_effect=slow_build):
+            code, requested, _ = self.post(
+                "/api/retrieval",
+                {"ticket": "UI-PROGRESSIVE", "text": request, "include_diff": False, "target": "m365"},
+            )
+            self.assertEqual(202, code)
+            self.assertTrue(entered.wait(5))
+            _, running, _ = self.get("/api/job?id=" + quote(requested["data"]["id"], safe=""))
+            checkpoint_name = running["data"]["progress"]["checkpoint_artifact"]
+            _, checkpoint, _ = self.get(
+                "/api/artifact?ticket=UI-PROGRESSIVE&name=" + quote(checkpoint_name, safe=""),
+            )
+            self.assertIn("FIRST USEFUL CHECKPOINT", checkpoint["data"]["content"])
+            release.set()
+            completed = self.job(requested["data"]["id"])
+        progressive = completed["result"]["progressive_delivery"]
+        self.assertEqual(checkpoint_name, progressive["checkpoint_artifact"])
+        self.assertTrue(progressive["continuation_artifact"])
+        _, continuation, _ = self.get(
+            "/api/artifact?ticket=UI-PROGRESSIVE&name="
+            + quote(progressive["continuation_artifact"], safe=""),
+        )
+        self.assertIn("Base context ID: `CTX-001-P1`", continuation["data"]["content"])
+        self.assertTrue(Path(progressive["checkpoint_handoff_artifact"]).is_file())
+        self.assertTrue(Path(progressive["continuation_handoff_artifact"]).is_file())
 
 
 class UiShutdownTest(unittest.TestCase):
@@ -519,9 +792,13 @@ class UiShutdownTest(unittest.TestCase):
         server.serve_forever.side_effect = KeyboardInterrupt
         server.server_close.side_effect = KeyboardInterrupt
 
-        serve_ui(object(), port=8765, open_browser=False)
+        with patch("builtins.print") as printed:
+            serve_ui(object(), port=8765, open_browser=False)
 
         server.server_close.assert_called_once_with()
+        startup = [call for call in printed.call_args_list if "Project Brain UI:" in str(call.args[0])]
+        self.assertEqual(1, len(startup))
+        self.assertTrue(startup[0].kwargs.get("flush"))
 
 
 if __name__ == "__main__":

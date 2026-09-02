@@ -2,6 +2,49 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.0] - 2026-08-28
+
+### Added
+
+- Native Windows 11 x64 support with Python 3.11–3.14 CI, native process-tree
+  cleanup, PowerShell clipboard integration, `.exe` backend discovery, and a
+  four-executable standalone ZIP release gate.
+- Source-pinned Windows Semantic and Precision model-pack build/conformance
+  workflows whose publication must be explicitly enabled after verification.
+- Generation-scoped Runtime Anchor Resolver and deterministic Java/Spring MVC,
+  Feign, Kafka, component/cache/configuration, JPA, and test intelligence,
+  published atomically as additive Atlas components.
+- Bounded ordered ExecutionFlow, cross-repository IntegrationFlow, Program Slice
+  Lite, and implementation/test/impact/contract/config-data surfaces with
+  candidate-versus-exact-source authority labels.
+- Ticket-session Hypothesis Ledger, Evidence Frontier, stable evidence/anchor/
+  flow/blocker/context IDs, first-useful checkpoint, and a three-wave default /
+  four-wave hard-limit controller pinned to one immutable serving generation.
+- Investigation Protocol v5, M365 Agent Kit v4 and protocol guide, progressive
+  metadata events, Investigation Cockpit state, and integrated Brain/M365 local
+  evaluation metrics and ablations.
+
+### Changed
+
+- Windows workspace readers now use native byte-range leases so different
+  tickets can retrieve concurrently while publication remains exclusive;
+  repository-relative evidence paths are separator-independent.
+- Runtime-anchor and flow reuse now validates generation, component schema,
+  compatibility identity, membership, and cache payloads before use; corrupt or
+  missing pinned state degrades explicitly without newer-generation substitution.
+- All new request and source-derived inputs are bounded by deterministic item,
+  UTF-8 byte, candidate, traversal, statement, context, and physical-operation
+  limits. Python 3.11–3.14 remains the mandatory compatibility matrix.
+- Refresh detects unconfigured repositories but no longer mutates user-owned
+  `brain.toml`; users explicitly add repository blocks, eliminating concurrent
+  editor overwrite and partial-append failure modes.
+
+### Compatibility
+
+- The catalog migration is additive and transactional. Existing v0.9 snapshots,
+  Atlas/Semantic generations, model packs, embedding cache, and ticket sessions
+  remain readable and reachable; protocols v1–v4 remain accepted.
+
 ## [0.9.2] - 2026-08-28
 
 ### Fixed
@@ -450,6 +493,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.0]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.0
 [0.9.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.2
 [0.9.1]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.1
 [0.9.0]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.0

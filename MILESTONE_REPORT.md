@@ -1,6 +1,6 @@
 # Project Brain milestone readiness report
 
-**Snapshot:** 2026-08-28 · **v0.9.2 stable compatibility gate:** 172/172 tests pass across Python 3.11–3.14; remaining target-machine/private measurements are nonblocking · **Prior published Core release:** 0.9.1
+**Snapshot:** 2026-08-28 · **v1.0 implementation gate:** generation-pinned Investigation Runtime under final supervisory review; Python 3.11–3.14 remains mandatory · **Clean baseline:** v0.9.2 (`b22cfee8058f0c9772a1372e53a0401efd2e7983`)
 
 This report separates completed, locally tested engineering from validations
 that must run later on the target machine or private local data. It contains no
@@ -30,10 +30,11 @@ intentional local-only validation steps, not engineering blockers.
 | v0.8 M00–M10 | COMPLETE | Trace schema v2 and stage accounting; objective-first CONTEXT_REQUEST v3; deterministic repo routing/widening; operation fusion and request-local memoization; physical/effective/candidate budgets; bounded shared repository and Semantic shard parallelism; one model lane; shared-workspace/per-ticket locks; two-ticket UI jobs and investigation board; M365 kit v2/protocol v3; 50-repository synthetic fan-out and concurrency coverage. Exact pinned-source hydration, v1/v2, Core fallback, and workspace mutation exclusion remain intact. |
 | v0.8 M11 | COMPLETE | Opt-in Auto Refresh: When idle; read-only selected-ref/Core/Semantic/repository-discovery checks shared with `brain watch`; debounce and one coalesced authoritative refresh after retrieval idle; bounded cooldown/backoff; non-refreshable Action Required latching; pinned-session preservation; and source-free local status/preference persistence. |
 | v0.9 M00–M15 | COMPLETE | Real immutable generation pinning; catalog-native repository/module/file/entity/region hierarchy; provenance-backed typed graph; change intelligence; Repo/Module/Entity semantic cards; blob-level incremental refresh; generation-scoped cache; session Investigation Memory/Coverage Map; completed-investigation priors; hierarchical routing; deterministic Next-Best-Evidence; ticket prefetch; protocol v4 full/delta lineage; M365 Agent Kit v3; expanded local evaluation; and cross-process model-lane serialization. |
+| v1.0 Investigation Runtime | IMPLEMENTED — WINDOWS GATES PENDING | Generation-scoped runtime anchors and Java/Spring intelligence; ordered execution/integration flows; Program Slice Lite; implementation/test/impact/contract/config-data surfaces; Hypothesis Ledger and Evidence Frontier; bounded multi-wave controller; stable v5 identities and checkpoint lineage; M365 Agent Kit v4; Investigation Cockpit; integrated evaluation/scale/adversarial coverage; permanent Python 3.11–3.14 gates; and native Windows source/CI/release paths. Completion still requires real Windows matrix, standalone, and official model-pack evidence. |
 
 ## Completed local verification for this snapshot
 
-The full local regression suite (172 public/synthetic tests for this stable release) covers deterministic retrieval, generations,
+The full local public/synthetic regression suite covers deterministic retrieval, generations,
 incremental indexes, semantic/reranker failure fallback, corrupt local state,
 pack tampering, production-manifest provenance, public synthetic conformance,
 machine-profile privacy, low-disk preflight, UI loopback protection, release
@@ -95,12 +96,11 @@ brain model autotune PACK --latency-budget-ms 3000
   published release, and the `v0.6.2` tag was never released: its
   CI/release-workflow defects were discovered before any artifact or tap
   mutation.
-- `v0.9.2` is authorized for stable publication from this exact reviewed gate.
-  The immutable Git tag, GitHub Release, workflow, checksums, and Homebrew tap
-  provide the external publication evidence; model-pack releases remain
-  separate and untouched.
-- Project Brain v1.0 starts from the latest verified v0.9.x baseline, currently
-  v0.9.2; its release gate must run the complete Python 3.11–3.14 matrix.
+- Project Brain v1.0 is implemented from exact v0.9.2 commit
+  `b22cfee8058f0c9772a1372e53a0401efd2e7983` and awaits final supervisory
+  review. No v1 tag, push, publication, release, tap update, or deployment is
+  part of this implementation gate.
+- The v1 release gate permanently requires the complete Python 3.11–3.14 matrix.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.
 - The Semantic pack's packaging download is a release-engineering operation

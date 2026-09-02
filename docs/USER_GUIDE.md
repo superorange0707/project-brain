@@ -6,7 +6,7 @@ ticket investigations, configuration, command reference, and troubleshooting.
 
 ## 1. Requirements
 
-- Homebrew/standalone installs: no Python or Xcode requirement
+- Homebrew/standalone installs: no Python, Xcode, Go, or WSL requirement
 - Python installs: Python 3.11 or newer
 - `git` recommended for repository state and history
 - `rg` (ripgrep) recommended for fast search
@@ -36,6 +36,16 @@ This installs prebuilt executables and does not compile against the local Xcode
 toolchain. Homebrew maps `superorange0707/tap` to the separate
 [`homebrew-tap`](https://github.com/superorange0707/homebrew-tap) formula index.
 
+### Linux installer
+
+```bash
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/latest/download/install-project-brain.sh
+sh install-project-brain.sh
+```
+
+This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
+adjacent executables in `~/.local/bin` without changing Brain workspace state.
+
 ### Standalone macOS/Linux archive
 
 Download the matching archive from the
@@ -43,10 +53,53 @@ Download the matching archive from the
 then keep `brain`, `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the
 same directory on `PATH`.
 
+### Native Windows 11 x64 installer
+
+```powershell
+$installer = Join-Path $env:TEMP "install-project-brain.ps1"
+Invoke-WebRequest https://github.com/superorange0707/project-brain/releases/latest/download/install-project-brain.ps1 -OutFile $installer
+Set-ExecutionPolicy -Scope Process Bypass -Force
+& $installer
+brain.exe --version
+```
+
+The installer verifies the native ZIP against the release checksum, preserves
+workspace/model/session state, and adds its managed binary directory to the
+user `PATH`. No WSL or Python runtime is required.
+
+### Manual native Windows 11 x64 standalone
+
+Download `project-brain-v1.0.0-windows-amd64.zip` and the published
+`SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
+keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
+`zoekt-index.exe` together:
+
+```powershell
+Get-FileHash .\project-brain-v1.0.0-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.0-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+$env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
+brain.exe --version
+brain.exe --help
+```
+
+The archive is native amd64 Windows software. It does not invoke WSL, Git Bash,
+Homebrew, Python, or Go. Git for Windows is the only recommended external tool
+for the complete synchronized-snapshot workflow: install it before `brain init`
+or `brain refresh` if the repositories are Git-backed. `brain doctor` reports
+whether Git is discoverable. Without Git, the established read-only non-Git
+working-tree fallback remains available.
+
+Windows paths may contain spaces and Unicode. Project Brain stores local paths
+in native form but canonicalizes repository-relative evidence and stable IDs to
+`/`, so protocol-v5 identities remain portable. Clipboard operations use native
+PowerShell. State, Atlas generations, Semantic shards, ticket sessions, and
+model packs remain below the configured Brain workspace directories; upgrading
+the executable does not reset them.
+
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.2"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.0"
 ```
 
 Upgrade later with:
@@ -58,7 +111,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v0.9.2"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.0"
 ```
 
 ### From a source checkout
@@ -121,7 +174,10 @@ payments-platform/
 └── risk-service/
 ```
 
-Explicit repository paths remain available when you want a narrower scope.
+Explicit repository paths remain available when you want a narrower scope. The
+workspace is still created in the current/common parent directory, never inside
+an explicitly targeted repository. Use `-c /path/to/brain.toml` when you need a
+different workspace location.
 
 Initialization is the full setup: it discovers all repos, fetches their `origin`
 refs, exports immutable source snapshots, records the deterministic index, and
@@ -131,17 +187,20 @@ not pay the startup cost for every repo. Run `brain doctor` only when you want t
 detailed health report.
 
 After initialization, clone new repositories normally. The next `brain refresh`,
-synced ticket start, or cockpit **Refresh Brain** automatically finds them and
-appends only the missing `[[repositories]]` blocks to `brain.toml`. Existing
-descriptions, tags, comments, branch overrides, and settings are not rewritten.
-Use `--no-discover` when a workspace intentionally excludes other Git repos below
-the same parent folder.
+synced ticket start, or cockpit **Refresh Brain** reports unconfigured repositories
+as an explicit action. Add their `[[repositories]]` blocks to `brain.toml`, then
+refresh again. Refresh never mutates this user-owned config implicitly, so an
+editor save cannot be overwritten or partially appended. Use `--no-discover`
+when a workspace intentionally excludes other Git repos below the same parent
+folder and should skip the pending-repository check.
 
 The cockpit's opt-in **Auto Refresh: When idle** mode checks selected commit refs,
 Core index alignment, required Semantic generation alignment, and newly cloned
-repositories. It ignores ordinary working-tree edits. Multiple changes are
-debounced into one call to the same `refresh_brain()` pipeline used by manual
-refresh. Active ticket retrievals leave that refresh pending; new tickets may
+repositories. A newly cloned repository becomes **Action Required** until its
+explicit `brain.toml` block is added; it is not placed in a failing refresh loop.
+Ordinary working-tree edits are ignored. Recoverable changes are debounced into
+one call to the same `refresh_brain()` pipeline used by manual refresh. Active
+ticket retrievals leave that refresh pending; new tickets may
 still pin the current ready snapshot, and existing tickets retain their original
 snapshots. Missing/incompatible model packs, storage guards, invalid config,
 Git/network failures, and runtime failures require explicit action and are not
@@ -602,7 +661,8 @@ work, stay in the page:
 
 1. Open **Brain** and check overall health, effective retrieval state, model
    verification, Semantic chunk count/alignment, and repository freshness.
-2. Click **Refresh Brain**. By default it discovers repositories, fetches
+2. Click **Refresh Brain**. By default it checks for unconfigured repositories
+   and requests an explicit `brain.toml` edit when needed; otherwise it fetches
    allowed remote refs, creates immutable snapshots, updates Core indexes/maps,
    and builds the Semantic generation when the selected edition requires it.
    The single progress surface reports its current phase and safe repository,
@@ -624,8 +684,9 @@ work, stay in the page:
    snapshots: Semantic must be aligned, and Precision must also have its
    verified compatible reranker. If either condition fails, the ticket is not
    started unless you explicitly choose the displayed degraded continuation.
-5. Use **Continue with AI** for the complete reply containing a v4
-   `INVESTIGATION_REQUEST`. Retrieval runs as a background ticket job, so a second
+5. Use **Continue with AI** for the complete reply containing a v5
+   `INVESTIGATION_REQUEST`. Protocol v4 requests remain accepted only for legacy
+   sessions. Retrieval runs as a background ticket job, so a second
    investigation may progress independently. Then inspect Evidence and
    Retrieval transparency.
 
@@ -688,10 +749,11 @@ The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
 sent into Brain, while `ABC-1234-context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
-After upgrading to v0.9.2, rerun `brain agent-kit m365`, replace Agent Builder
+After upgrading to v1.0.0, rerun `brain agent-kit m365`, replace Agent Builder
 Instructions and `PROJECT_KNOWLEDGE.md`, and optionally refresh Suggested
-Prompts. `AGENT_KIT.json` records the Brain, kit, and protocol versions.
-Existing Agents need not be rebuilt; use a new conversation to validate v4 delta lineage.
+Prompts and `INVESTIGATION_PROTOCOL.md`. `AGENT_KIT.json` records Brain 1.0.0,
+Agent Kit v4, and Investigation Protocol v5. Existing Agents need not be rebuilt;
+use a new conversation to validate v5 multi-wave and delta lineage.
 
 ```bash
 brain agent-kit m365 --json
@@ -739,35 +801,46 @@ history**. The confirmation names the ticket; this deletes only `.runs/TICKET`
 and that ticket's generated handoffs. Repositories, branches, and source files
 are never deleted.
 
-### `INVESTIGATION_REQUEST` v4 format
+### `INVESTIGATION_REQUEST` v5 format
 
 The AI should either ask for evidence or return a final solution. The normal
 request is objective-first; every optional hint list may be omitted or empty:
 
 ```yaml
 INVESTIGATION_REQUEST:
-  version: 4
+  version: 5
+  mode: root_cause
   objective: Determine the online eligibility recalculation flow.
   runtime_facts: [The issue is observed only after customer.updated.]
   hypotheses: [The event consumer may bypass EligibilityEvaluator.]
   required: [main execution flow, tests]
   resolve: [Which consumer handles JURISDICTION_CHANGED?]
-  base_context_id: ctx-copy-from-the-latest-context
+  anchors:
+    - kind: event
+      value: JURISDICTION_CHANGED
+  base_context_id: CTX-001
+  wave: 2
 ```
 
 This is also valid and does not require a repair round:
 
 ```yaml
 INVESTIGATION_REQUEST:
-  version: 4
+  version: 5
+  mode: root_cause
   objective: Locate the production flow and tests responsible for this behavior.
+  runtime_facts: []
+  hypotheses: []
+  anchors: []
+  wave: 1
 ```
 
 Brain starts from stored Investigation Memory, the Coverage Map, ticket prefetch,
 and generation-validated similar investigations. It routes Repo, Module, and
 Entity Cards, expands typed relationships, then performs targeted lexical/path/
 semantic fallback and exact source verification. It widens 4/6 → 8/16 → all only
-when required coverage is missing. Legacy v1/v2/v3 CONTEXT_REQUEST remains valid.
+when required coverage is missing. Legacy v1/v2/v3 CONTEXT_REQUEST and v4
+INVESTIGATION_REQUEST remain valid for existing conversations; new requests use v5.
 
 From the clipboard:
 
@@ -947,8 +1020,10 @@ binary and a source-pinned Zoekt command pair. Project Brain calls the structura
 backend's local JSON CLI for symbol and call-path queries and Zoekt only for local
 immutable shards; it stores both caches under Brain's ignored `state/` directory.
 It never runs an installer or changes Claude, Codex, or other agent configuration.
-The default `graph.mode = "lazy"` indexes only repositories identified by exact
-symbol evidence. Run `brain index` for an eager full-workspace graph, or set
+For generation safety, `graph.mode = "eager"` builds structural state during
+the authoritative `brain refresh` writer phase. The default `lazy` mode defers
+that optional work; retrieval never mutates graph state under its shared
+workspace lease. Run `brain index` for an explicit build, or set
 `graph.enabled = false` when deterministic lexical analysis is sufficient.
 
 Python-only installs can add that executable to `PATH` or set

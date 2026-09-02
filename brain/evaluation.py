@@ -4,23 +4,42 @@ import hashlib
 import json
 import math
 import time
+import tempfile
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
+
+from .locks import workspace_exclusive
+from .platforms import atomic_managed_text_write, read_direct_file_bytes
 
 if TYPE_CHECKING:
     from .core import Settings
 
 
-def _load(path: Path) -> dict[str, Any]:
+V1_EVALUATION_ABLATIONS = frozenset({
+    "anchors", "graph_flow", "program_slice", "historical_prior", "prefetch",
+    "generation_cache", "multi_wave",
+})
+MAX_EVALUATION_SUITE_BYTES = 8 * 1024 * 1024
+MAX_EVALUATION_CASES = 512
+MAX_EVALUATION_WAVES_PER_CASE = 4
+MAX_EVALUATION_REQUEST_BYTES = 100_000
+
+
+def _load(path: Path) -> tuple[dict[str, Any], bytes]:
+    raw, exceeded = read_direct_file_bytes(path, max_bytes=MAX_EVALUATION_SUITE_BYTES)
+    if exceeded:
+        raise ValueError("golden evaluation suite exceeds its byte limit")
+    text = raw.decode("utf-8")
     if path.suffix.lower() == ".json":
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(text)
     else:
         from .core import simple_yaml_load
 
-        value = simple_yaml_load(path.read_text(encoding="utf-8"))
+        value = simple_yaml_load(text)
     if not isinstance(value, dict):
         raise ValueError("golden evaluation suite must be a mapping")
-    return value
+    return value, raw
 
 
 def _files(value: object) -> set[str]:
@@ -39,7 +58,10 @@ def _request(value: object) -> dict[str, Any]:
     from .core import parse_context_request
 
     if isinstance(value, str):
-        return parse_context_request(value)
+        request = parse_context_request(value)
+        if len(value.encode("utf-8")) > MAX_EVALUATION_REQUEST_BYTES:
+            raise ValueError("golden evaluation request exceeds its byte limit")
+        return request
     if not isinstance(value, dict):
         raise ValueError("every golden case needs a request mapping or CONTEXT_REQUEST text")
     request = {str(key): item for key, item in value.items()}
@@ -49,6 +71,8 @@ def _request(value: object) -> dict[str, Any]:
         request.setdefault(key, [])
     request.setdefault("expand", [])
     request.setdefault("version", 2)
+    if len(json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > MAX_EVALUATION_REQUEST_BYTES:
+        raise ValueError("golden evaluation request exceeds its byte limit")
     return request
 
 
@@ -140,6 +164,137 @@ def _peak_rss_mb() -> float | None:
         return None
 
 
+def _runtime_metrics(runtime: dict[str, Any], expect: dict[str, Any]) -> dict[str, float | None]:
+    anchors = (runtime.get("anchors") or {}).get("candidates") or []
+    expected_anchors = {str(value).casefold() for value in expect.get("required_anchors") or []}
+    anchor_values = [str(item.get("value") or "").casefold() for item in anchors]
+    expected_execution = {str(value) for value in expect.get("execution_steps") or []}
+    execution = runtime.get("execution_flow") or {}
+    execution_values = [str(item.get("edge_type") or item.get("target") or "") for item in execution.get("steps") or []]
+    expected_integration_repos = {str(value) for value in expect.get("integration_repositories") or []}
+    integration_repos = set((runtime.get("integration_flow") or {}).get("repositories") or [])
+    expected_surfaces = _files(expect.get("required_surfaces"))
+    surfaces = runtime.get("surfaces") or {}
+    found_surfaces = {
+        f"{name}:{item.get('repo')}:{item.get('path')}"
+        for name in ("implementation", "test", "impact", "contract", "config_data")
+        for item in surfaces.get(name) or []
+    }
+    expected_order = [str(value) for value in expect.get("execution_steps") or []]
+    return {
+        "anchor_top1_accuracy": (
+            1.0 if expected_anchors and anchor_values and anchor_values[0] in expected_anchors else 0.0
+        ) if expected_anchors else None,
+        "anchor_recall_at_5": _recall(set(anchor_values[:5]), expected_anchors),
+        "execution_flow_step_recall": _recall(set(execution_values), expected_execution),
+        "execution_flow_order_accuracy": (
+            sum(
+                index < len(execution_values) and execution_values[index] == expected
+                for index, expected in enumerate(expected_order)
+            ) / len(expected_order)
+            if expected_order else None
+        ),
+        "integration_repo_recall": _recall(integration_repos, expected_integration_repos),
+        "surface_recall": _recall(found_surfaces, expected_surfaces),
+        "program_slice_statement_count": float(len((runtime.get("program_slice") or {}).get("statements") or [])),
+        "hypothesis_supported_rate": (
+            sum(item.get("status") == "supported" for item in (runtime.get("hypothesis_ledger") or {}).get("items") or [])
+            / len((runtime.get("hypothesis_ledger") or {}).get("items") or [])
+        ) if (runtime.get("hypothesis_ledger") or {}).get("items") else None,
+        "frontier_blocker_count": float(len((runtime.get("evidence_frontier") or {}).get("items") or [])),
+        "first_useful_checkpoint_rate": 1.0 if runtime.get("first_useful_checkpoint") else 0.0,
+    }
+
+
+def evaluate_m365_response(response: str, required_evidence_ids: Iterable[str] = ()) -> dict[str, Any]:
+    """Deterministically score an attached M365 response without invoking a model."""
+    required = {str(value) for value in required_evidence_ids}
+    present = {value for value in required if value in response}
+    final_sections = (
+        "Ticket interpretation", "Verified current behavior", "Root cause", "Exact repository",
+        "Tests", "Validation", "Edge cases", "Implementation order",
+    )
+    return {
+        "final_solution": "FINAL_SOLUTION" in response,
+        "evidence_id_recall": len(present) / len(required) if required else None,
+        "final_contract_coverage": sum(section.casefold() in response.casefold() for section in final_sections) / len(final_sections),
+        "repeated_retrieval_requests": max(0, response.count("INVESTIGATION_REQUEST") - 1),
+        "unsupported_authority_claims": sum(
+            token in response for token in ("Program Slice proves", "Atlas card proves", "historical ticket proves")
+        ),
+    }
+
+
+def _evaluate_public_v5_waves(
+    settings: Settings,
+    ticket: str,
+    requests: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, float | int | None]]:
+    """Drive the public ticket/context protocol; never invoke a hosted model."""
+    from .core import create_context, session_state, start_session
+
+    start_session(settings, ticket, str(requests[0].get("objective") or ticket))
+    contents: list[str] = []
+    ready_round: int | None = None
+    nbe_useful = 0
+    previous_context: str | None = None
+    selected_requests = requests[:1] if "multi_wave" in settings.evaluation_ablations else requests
+    for index, raw in enumerate(selected_requests, 1):
+        allowed = {
+            "version", "mode", "objective", "runtime_facts", "hypotheses", "required", "resolve",
+            "anchors", "base_context_id", "checkpoint", "wave",
+        }
+        request = {key: value for key, value in json.loads(json.dumps(raw)).items() if key in allowed}
+        request["version"] = 5
+        request["wave"] = index
+        if previous_context:
+            request["base_context_id"] = previous_context
+        else:
+            request.pop("base_context_id", None)
+        content, _, _ = create_context(
+            settings,
+            ticket,
+            json.dumps({"INVESTIGATION_REQUEST": request}, ensure_ascii=False),
+        )
+        contents.append(content)
+        state = session_state(settings, ticket)
+        runtime = dict(state.get("investigation_runtime") or {})
+        previous_context = str(state.get("last_context_id") or "") or None
+        history = state.get("request_history") or []
+        current_new_evidence = int((history[-1] if history else {}).get("new_evidence") or 0)
+        if index > 1 and current_new_evidence > 0:
+            nbe_useful += 1
+        if ready_round is None and runtime.get("stop_reason") == "coverage_satisfied":
+            ready_round = index
+        if runtime.get("stop_reason") in {"coverage_satisfied", "no_progress"}:
+            break
+    final_state = session_state(settings, ticket)
+    runtime = dict(final_state.get("investigation_runtime") or {})
+    full_bytes = len(contents[0].encode("utf-8")) if contents else 0
+    delta_values = [len(value.encode("utf-8")) for value in contents[1:] if value.startswith("# PROJECT BRAIN CONTEXT DELTA")]
+    delta_bytes = sum(delta_values) / len(delta_values) if delta_values else None
+    return runtime, {
+        "full_context_chars": float(full_bytes),
+        "delta_context_chars": float(delta_bytes) if delta_bytes is not None else None,
+        "delta_reduction_percent": (
+            max(0.0, (1.0 - float(delta_bytes) / full_bytes) * 100.0)
+            if delta_bytes is not None and full_bytes else None
+        ),
+        "delta_context_reduction": (
+            max(0.0, 1.0 - float(delta_bytes) / full_bytes)
+            if delta_bytes is not None and full_bytes else None
+        ),
+        "brain_rounds_until_ready": float(ready_round) if ready_round is not None else None,
+        "no_progress_rounds": float(final_state.get("no_progress_rounds") or 0),
+        "focused_followup_count": float(max(0, len(contents) - 1)),
+        "next_best_evidence_usefulness": (
+            nbe_useful / max(1, len(contents) - 1) if len(contents) > 1 else None
+        ),
+        "rounds_until_final_solution": None,
+    }
+
+
+@workspace_exclusive
 def evaluate_golden(
     settings: Settings,
     suite_path: str | Path,
@@ -149,11 +304,16 @@ def evaluate_golden(
     evaluation_ablation: set[str] | None = None,
 ) -> dict[str, Any]:
     """Replay local, hand-labelled tickets without leaking request text to metrics."""
+    unknown_ablations = set(evaluation_ablation or ()) - V1_EVALUATION_ABLATIONS
+    if unknown_ablations:
+        raise ValueError(f"unknown v1 evaluation ablation(s): {', '.join(sorted(unknown_ablations))}")
     path = Path(suite_path).expanduser().resolve()
-    suite = _load(path)
+    suite, raw = _load(path)
     cases = suite.get("cases") or suite.get("tickets") or []
     if not isinstance(cases, list) or not cases:
         raise ValueError("golden evaluation suite needs a non-empty cases list")
+    if len(cases) > MAX_EVALUATION_CASES:
+        raise ValueError("golden evaluation suite exceeds its case limit")
     if split and split not in {"calibration", "validation", "holdout"}:
         raise ValueError("split must be calibration, validation, or holdout")
     selected: list[dict[str, Any]] = []
@@ -170,24 +330,67 @@ def evaluate_golden(
             raise ValueError(f"golden case {identifier} has invalid split")
         if split and case_split != split:
             continue
-        selected.append({"id": identifier, "split": case_split, "request": _request(item.get("request")), "expect": item.get("expect") or item})
+        request = _request(item.get("request"))
+        raw_waves = item.get("waves") or [request]
+        if not isinstance(raw_waves, list) or not raw_waves:
+            raise ValueError(f"golden case {identifier} waves must be a non-empty list")
+        if len(raw_waves) > MAX_EVALUATION_WAVES_PER_CASE:
+            raise ValueError(f"golden case {identifier} exceeds its wave limit")
+        waves = [_request(value) for value in raw_waves]
+        selected.append({
+            "id": identifier, "split": case_split, "request": request, "waves": waves,
+            "expect": item.get("expect") or item,
+        })
     if not selected:
         raise ValueError("no golden cases matched the requested split")
 
     from .core import pack_context, retrieve_context
 
     reports: list[dict[str, Any]] = []
+    ablations = frozenset(evaluation_ablation or ())
     for case in selected:
         request = json.loads(json.dumps(case["request"]))
-        if evaluation_ablation:
-            request["_evaluation_ablation"] = sorted(evaluation_ablation)
-        bundle = retrieve_context(settings, request)
+        ranking_settings = replace(settings, evaluation_ablations=ablations)
+        if ablations:
+            request["_evaluation_ablation"] = sorted(ablations)
+        bundle = retrieve_context(ranking_settings, request)
         pack_started = time.perf_counter()
-        full_context = pack_context(settings, f"EVAL-{case['id']}", 1, bundle)
+        full_context = pack_context(ranking_settings, f"EVAL-{case['id']}", 1, bundle)
         context_pack_ms = (time.perf_counter() - pack_started) * 1000
         ranking = _ranking(bundle)
         raw_ranking = _raw_ranking(bundle)
         expect = case["expect"] if isinstance(case["expect"], dict) else {}
+        runtime: dict[str, Any] = {}
+        protocol_metrics: dict[str, float | int | None] = {
+            "full_context_chars": float(len(full_context.encode("utf-8"))),
+            "delta_context_chars": None, "delta_reduction_percent": None,
+            "delta_context_reduction": None, "brain_rounds_until_ready": None,
+            "no_progress_rounds": None, "focused_followup_count": None,
+            "next_best_evidence_usefulness": None, "rounds_until_final_solution": None,
+        }
+        if int(request.get("version") or 1) == 5 and bundle.atlas_generation is not None:
+            with tempfile.TemporaryDirectory(prefix="brain-v1-evaluation-") as temporary:
+                evaluation_root = Path(temporary).resolve()
+                evaluation_runs = evaluation_root / "runs"
+                evaluation_generated = evaluation_root / "generated"
+                evaluation_runs.mkdir(mode=0o700)
+                evaluation_generated.mkdir(mode=0o700)
+                evaluation_settings = replace(
+                    ranking_settings,
+                    runs_dir=evaluation_runs,
+                    generated_dir=evaluation_generated,
+                    evaluation_ablations=ablations,
+                    persist_investigation_records=False,
+                )
+                runtime, protocol_metrics = _evaluate_public_v5_waves(
+                    evaluation_settings,
+                    f"EVAL-{hashlib.sha256(str(case['id']).encode()).hexdigest()[:12]}",
+                    case["waves"],
+                )
+        runtime_metrics = _runtime_metrics(runtime, expect) if runtime else {}
+        m365_metrics = evaluate_m365_response(
+            str(expect.get("m365_response") or ""), expect.get("required_evidence_ids") or [],
+        ) if expect.get("m365_response") else {}
         production = _files(expect.get("production_files") or expect.get("required_production_files"))
         tests = _files(expect.get("test_config_files") or expect.get("required_test_config_files"))
         required = production | tests | _files(expect.get("required_files"))
@@ -270,28 +473,29 @@ def evaluate_golden(
             "prefetch_hit_rate": 1.0 if prefetch_reused else 0.0,
             "cache_hit_rate": 1.0 if cache_hit else 0.0,
             "prefetch_usefulness": 1.0 if (cache_hit or prefetch_reused) and bool(set(ranking[:18]) & required) else 0.0,
-            "full_context_chars": len(full_context),
-            "delta_context_chars": None,
-            "delta_reduction_percent": None,
-            "delta_context_reduction": None,
-            "brain_rounds_until_ready": None,
-            "no_progress_rounds": None,
-            "focused_followup_count": None,
-            "next_best_evidence_usefulness": None,
-            "rounds_until_final_solution": None,
+            **protocol_metrics,
+            "m365_evaluation_mode": "attached-response contract only; live M365 behavior is an external gate",
+            "evaluation_execution_model": (
+                "ranking retrieval and protocol-v5 replay are separate measured executions; "
+                "total_ms is ranking retrieval latency, not end-to-end protocol latency"
+            ),
             "process_peak_rss_mb": _peak_rss_mb(),
             "stale_warning": any("stale" in warning.lower() for warning in bundle.warnings),
+            **runtime_metrics,
+            **{f"m365_{key}": value for key, value in m365_metrics.items()},
         })
 
     def average(key: str) -> float | None:
         values = [float(item[key]) for item in reports if isinstance(item.get(key), (float, int))]
         return round(sum(values) / len(values), 6) if values else None
 
-    raw = path.read_bytes()
     report = {
         "suite_hash": hashlib.sha256(raw).hexdigest(),
         "suite_name": str(suite.get("name") or path.name),
         "evaluation_ablation": sorted(evaluation_ablation or set()),
+        "evaluation_execution_model": (
+            "ranking retrieval and protocol-v5 replay are separate measured executions; latencies are not combined"
+        ),
         "limit": limit,
         "cases": reports,
         "summary": {
@@ -362,10 +566,28 @@ def evaluate_golden(
             "rounds_until_final_solution": average("rounds_until_final_solution"),
             "process_peak_rss_mb": average("process_peak_rss_mb"),
             "stale_cases": sum(bool(item["stale_warning"]) for item in reports),
+            "anchor_top1_accuracy": average("anchor_top1_accuracy"),
+            "anchor_recall_at_5": average("anchor_recall_at_5"),
+            "execution_flow_step_recall": average("execution_flow_step_recall"),
+            "execution_flow_order_accuracy": average("execution_flow_order_accuracy"),
+            "integration_repo_recall": average("integration_repo_recall"),
+            "surface_recall": average("surface_recall"),
+            "program_slice_statement_count": average("program_slice_statement_count"),
+            "hypothesis_supported_rate": average("hypothesis_supported_rate"),
+            "frontier_blocker_count": average("frontier_blocker_count"),
+            "first_useful_checkpoint_rate": average("first_useful_checkpoint_rate"),
+            "m365_evidence_id_recall": average("m365_evidence_id_recall"),
+            "m365_final_contract_coverage": average("m365_final_contract_coverage"),
+            "m365_repeated_retrieval_requests": average("m365_repeated_retrieval_requests"),
+            "m365_unsupported_authority_claims": average("m365_unsupported_authority_claims"),
         },
     }
     settings.state_dir.mkdir(parents=True, exist_ok=True)
-    (settings.state_dir / "golden-eval.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    atomic_managed_text_write(
+        settings.state_dir,
+        settings.state_dir / "golden-eval.json",
+        json.dumps(report, indent=2) + "\n",
+    )
     from .catalog import record_metric_run
 
     record_metric_run(settings, "golden_evaluation", {"suite_hash": report["suite_hash"], "summary": report["summary"]})

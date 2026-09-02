@@ -271,16 +271,15 @@ class AutoRefreshServiceTests(unittest.TestCase):
         self.assertEqual("refresh", decision.kind)
         self.assertIn("Selected source snapshots changed.", decision.reasons)
 
-    def test_new_repository_and_semantic_misalignment_are_refreshable(self) -> None:
+    def test_new_repository_requires_explicit_config_action_without_refresh_loop(self) -> None:
         (self.root / "service-b/.git").mkdir(parents=True)
         with patch("brain.editions.current_edition", return_value="semantic"), patch(
             "brain.editions.capabilities", return_value={"embedding": True, "reranker": False}
         ), patch("brain.ops.semantic_status", return_value={"aligned": False}):
             decision = detect_auto_refresh(self.settings)
 
-        self.assertEqual("refresh", decision.kind)
-        self.assertIn("New repositories are pending.", decision.reasons)
-        self.assertIn("Semantic generation is stale or misaligned.", decision.reasons)
+        self.assertEqual("action_required", decision.kind)
+        self.assertEqual(("New repositories require an explicit brain.toml edit.",), decision.reasons)
 
     def test_model_and_storage_action_required_states_are_not_refreshable(self) -> None:
         with patch("brain.editions.current_edition", return_value="semantic"), patch(

@@ -252,8 +252,8 @@
             <p class="help" id="semantic-status">No semantic generation status yet.</p>
           </article>
           <article class="card wide">
-            <div class="row"><div class="grow"><h2>Refresh Brain</h2><p class="help">Normal refresh discovers repositories, fetches allowed refs, creates immutable snapshots, builds Core intelligence, then aligns Semantic indexing when the chosen edition requires it.</p></div><button class="button primary" id="brain-refresh">Refresh Brain</button></div>
-            <div class="row"><label class="check"><input type="checkbox" id="refresh-fetch" checked> Fetch remotes</label><label class="check"><input type="checkbox" id="refresh-discover" checked> Discover repositories</label><span class="help" id="job-status">No operation running.</span></div>
+            <div class="row"><div class="grow"><h2>Refresh Brain</h2><p class="help">Normal refresh checks for unconfigured repositories and requests an explicit brain.toml edit, fetches allowed refs, creates immutable snapshots, builds Core intelligence, then aligns Semantic indexing when the chosen edition requires it.</p></div><button class="button primary" id="brain-refresh">Refresh Brain</button></div>
+            <div class="row"><label class="check"><input type="checkbox" id="refresh-fetch" checked> Fetch remotes</label><label class="check"><input type="checkbox" id="refresh-discover" checked> Check for new repositories</label><span class="help" id="job-status">No operation running.</span></div>
             <div class="row"><label for="auto-refresh-mode"><strong>Auto Refresh</strong></label><select id="auto-refresh-mode"><option value="off">Off</option><option value="when_idle">When idle</option></select><span class="help">Last check: <span id="auto-refresh-last-check">Never</span> · Last refresh: <span id="auto-refresh-last-refresh">Never</span> · <span id="auto-refresh-status">Off</span></span></div>
             <div class="refresh-progress" id="refresh-progress" aria-live="polite">
               <div class="refresh-phase" id="refresh-phase">No Refresh Brain operation started.</div>
@@ -338,6 +338,9 @@
           </article>
           <article class="card wide">
             <h2>Retrieval transparency</h2><p class="help">Atlas routing, Investigation Memory, Coverage Map, local model participation, pinned generation, and safe timings for the latest request.</p><div class="plan" id="retrieval-status"><div class="empty">Run an INVESTIGATION_REQUEST to inspect retrieval state.</div></div>
+          </article>
+          <article class="card wide">
+            <h2>Investigation Cockpit</h2><p class="help">Pinned generation, bounded wave, anchors, flows, hypotheses, frontier, and first useful checkpoint. Candidate intelligence never replaces exact source evidence.</p><div class="plan" id="investigation-cockpit"><div class="empty">Run a protocol-v5 investigation wave to inspect cockpit state.</div></div>
           </article>
         </div>
       </section>
@@ -495,10 +498,11 @@
       renderRefreshProgress(job);
     }
     function pause(milliseconds) { return new Promise(function (resolve) { setTimeout(resolve, milliseconds); }); }
-    async function waitForJob(job) {
+    async function waitForJob(job, onProgress) {
       var current = job;
       while (current.status === "pending" || current.status === "running") {
         setJob(current);
+        if (onProgress) await onProgress(current);
         await pause(350);
         current = await api("/api/job?id=" + encodeURIComponent(current.id));
       }
@@ -658,6 +662,30 @@
       ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
       document.getElementById("retrieval-status").innerHTML = summary + '<details><summary>Detailed profiler</summary>' + detailed + '</details>';
     }
+    function renderCockpit(cockpit) {
+      var target = document.getElementById("investigation-cockpit");
+      if (!target) return;
+      if (!cockpit || !cockpit.schema_version) {
+        target.innerHTML = '<div class="empty">No protocol-v5 investigation state yet.</div>';
+        return;
+      }
+      var anchors = cockpit.anchors && cockpit.anchors.candidates || [];
+      var execution = cockpit.execution_flow && cockpit.execution_flow.steps || [];
+      var integration = cockpit.integration_flow && cockpit.integration_flow.steps || [];
+      var hypotheses = cockpit.hypothesis_ledger && cockpit.hypothesis_ledger.items || [];
+      var frontier = cockpit.evidence_frontier && cockpit.evidence_frontier.items || [];
+      var checkpoint = cockpit.first_useful_checkpoint || {};
+      target.innerHTML = [
+        ["Pinned generation", cockpit.generation],
+        ["Wave / hard limit", String(cockpit.wave) + " / " + String(cockpit.hard_max_waves)],
+        ["Anchors", anchors.length],
+        ["Execution / integration steps", String(execution.length) + " / " + String(integration.length)],
+        ["Hypotheses / blockers", String(hypotheses.length) + " / " + String(frontier.length)],
+        ["First useful checkpoint", checkpoint.checkpoint_id || checkpoint.context_id || "Not reached"],
+        ["Checkpoint / continuation", String(checkpoint.artifact || "—") + " / " + String(checkpoint.continuation_artifact || "pending")],
+        ["Stop reason", cockpit.stop_reason]
+      ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
+    }
     function setDelivery(data, viewId) {
       var delivery = data || {current:0,total:0,content:""};
       var view = document.getElementById(viewId);
@@ -787,10 +815,23 @@
           target: document.getElementById("request-target").value
         };
         var job = await api("/api/retrieval", {method:"POST",body:JSON.stringify(body)});
-        var data = await waitForJob(job);
+        var shownCheckpoint = "";
+        var data = await waitForJob(job, async function (current) {
+          var checkpoint = current.progress && current.progress.checkpoint_artifact || "";
+          if (!checkpoint || checkpoint === shownCheckpoint) return;
+          shownCheckpoint = checkpoint;
+          var early = await api("/api/artifact?ticket=" + encodeURIComponent(body.ticket) + "&name=" + encodeURIComponent(checkpoint));
+          setDelivery({current:1,total:1,content:early.content,path:checkpoint}, "view-request");
+          showToast("First useful checkpoint ready — you can copy it while the investigation continues");
+        });
         state.ticket = data.ticket;
-        if (data.delivery) setDelivery(data.delivery, "view-request");
-        if (data.session) renderRetrieval(data.session.retrieval);
+        if (shownCheckpoint && data.progressive_delivery && data.progressive_delivery.continuation_artifact) {
+          var continuationName = data.progressive_delivery.continuation_artifact;
+          var continuation = await api("/api/artifact?ticket=" + encodeURIComponent(body.ticket) + "&name=" + encodeURIComponent(continuationName));
+          setDelivery({current:1,total:1,content:continuation.content,path:continuationName}, "view-request");
+          showToast("Checkpoint continuation ready — apply it to the first useful checkpoint");
+        } else if (data.delivery) setDelivery(data.delivery, "view-request");
+        if (data.session) { renderRetrieval(data.session.retrieval); renderCockpit(data.session.cockpit); }
         await loadStatus();
         completed = true;
         showToast(data.kind === "final_solution" ? "Final plan archived — ready to implement" : "Evidence ready — return it to the same AI chat");
@@ -831,6 +872,7 @@
       var detail = await api("/api/session?ticket=" + encodeURIComponent(ticket));
       state.ticket = ticket;
       renderRetrieval(detail.retrieval);
+      renderCockpit(detail.cockpit);
       setDelivery({current:0,total:0,content:"Select a request or context artifact from the history above."}, "view-overview");
       var list = document.getElementById("artifact-list");
       list.innerHTML = detail.artifacts.map(function (artifact) {
@@ -875,7 +917,7 @@
         document.getElementById("agent-instructions").textContent = data.instructions;
         var paths = document.getElementById("agent-paths");
         paths.style.display = "block";
-        paths.textContent = "Created " + data.instructions_path + " · " + data.knowledge_path + " · " + data.suggested_prompts_path + " · " + data.setup_path + " · " + data.manifest_path;
+        paths.textContent = "Created " + data.instructions_path + " · " + data.knowledge_path + " · " + data.suggested_prompts_path + " · " + data.setup_path + " · " + data.protocol_path + " · " + data.manifest_path;
         showToast("M365 Agent setup kit generated");
       } catch (error) { report(error); } finally { busy(button, false); }
     });

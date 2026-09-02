@@ -25,9 +25,120 @@ jobs:
       - name: Install package
         run: python -m pip install ".[semantic]"
       - name: Run tests
+        env:
+          PYTHONWARNINGS: error::ResourceWarning
         run: python -m unittest discover -s tests -v
       - name: Compile sources
         run: python -m compileall -q brain tests
+
+  windows-compatibility:
+    name: Native Windows Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install ".[semantic]"
+      - name: Run native tests without WSL
+        env:
+          PYTHONWARNINGS: error::ResourceWarning
+        run: python -m unittest discover -s tests -v
+      - name: Compile sources
+        run: python -m compileall -q brain tests
+
+  v1-release-readiness:
+    name: Stable v1 model-pack catalog readiness
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: darwin-arm64
+          - os: windows-latest
+            platform: windows-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install release dependencies
+        run: python -m pip install ".[semantic]"
+      - name: Exercise the exact native Semantic and Precision serving lifecycle
+        shell: python
+        run: |
+          import os, tempfile
+          from pathlib import Path
+          from brain.catalog import current_generation_ref
+          from brain.core import load_settings, retrieve_context
+          from brain.editions import capabilities, set_edition
+          from brain.models import OFFICIAL_PACKS, install_official_pack, platform_id, verify_pack
+          from brain.ops import refresh_brain
+          from brain.semantic import search_semantic
+          if os.environ["GITHUB_REF_NAME"].startswith("v1."):
+              expected_platform = "${{ matrix.platform }}"
+              if platform_id() != expected_platform:
+                  raise SystemExit(f"native model-pack runner mismatch: {platform_id()} != {expected_platform}")
+              missing = [alias for alias in ("semantic", "precision") if expected_platform not in OFFICIAL_PACKS.get(alias, {})]
+              if missing:
+                  raise SystemExit(
+                      f"stable v1 release blocked: missing official {expected_platform} descriptors for "
+                      + ", ".join(missing)
+                  )
+              root = Path(tempfile.mkdtemp(prefix="brain-v1-pack-readiness-"))
+              repository = root / "fixture"
+              repository.mkdir()
+              config = root / "brain.toml"
+              config.write_text(
+                  "[project]\nname='v1-pack-readiness'\n[graph]\nenabled=false\n"
+                  "[[repositories]]\nname='fixture'\npath='fixture'\n",
+                  encoding="utf-8",
+              )
+              settings = load_settings(config)
+              for alias in ("semantic", "precision"):
+                  installed = install_official_pack(settings, alias)
+                  report = verify_pack(settings, str(installed["pack_id"]))
+                  if not report.get("verified") or not report.get("conformance"):
+                      raise SystemExit(f"stable v1 release blocked: {alias} did not pass installed conformance")
+              marker = "ProjectBrainNativeSemanticMarker"
+              (repository / "RuntimeAnchor.java").write_text(
+                  "final class RuntimeAnchor { String marker = '" + marker + "'; }\n",
+                  encoding="utf-8",
+              )
+              set_edition(settings, "semantic")
+              outcome = refresh_brain(settings, fetch=False, discover=False)
+              generation = current_generation_ref(settings)
+              available = capabilities(settings)
+              if generation is None or generation.component("semantic").get("status") != "ready":
+                  raise SystemExit("stable v1 release blocked: Semantic component was not authoritatively registered")
+              if outcome.semantic.get("status") != "ready" or not available.get("semantic_aligned") or available.get("semantic_stale"):
+                  raise SystemExit("stable v1 release blocked: Semantic refresh is not ready/aligned/fresh")
+              semantic_hits = search_semantic(settings, marker, generation=generation)
+              if not semantic_hits or not any(item.get("path") == "RuntimeAnchor.java" for item in semantic_hits):
+                  raise SystemExit("stable v1 release blocked: native USearch serving returned no marker evidence")
+              set_edition(settings, "precision")
+              request = {
+                  "objective": marker,
+                  "searches": [{"query": marker, "repos": ["fixture"]}],
+                  "paths": [], "symbols": [], "files": [], "history": [], "expand": [],
+                  "coverage": {}, "constraints": {},
+              }
+              bundle = retrieve_context(settings, request)
+              found_by = {source for item in bundle.evidence for source in item.found_by}
+              if bundle.trace.get("semantic_status") != "ready" or "local semantic index" not in found_by:
+                  raise SystemExit("stable v1 release blocked: Precision did not use aligned Semantic recall")
+              if not bundle.evidence or "local reranker" not in found_by or not bundle.metrics.get("rerank_input_count"):
+                  raise SystemExit("stable v1 release blocked: Precision reranker did not serve the bounded candidate set")
 
   build:
     name: Build distributions
@@ -87,7 +198,7 @@ jobs:
         run: |
           python -m pip install ".[semantic]" pyinstaller
           pyinstaller --clean --onefile --name brain --collect-data brain --collect-all usearch --collect-all truststore brain/standalone.py
-          dist/brain --version
+          test "$(dist/brain --version)" = "brain ${GITHUB_REF_NAME#v}"
       - name: Build pinned Zoekt command pair
         env:
           ZOEKTVERSION: v0.0.0-20251202141441-886b229dcd5e
@@ -120,43 +231,308 @@ jobs:
           cp zoekt-bin/ZOEKt_LICENSE package/
           cp zoekt-bin/ZOEKt_VERSION package/
           tar -czf "project-brain-${GITHUB_REF_NAME}-${PLATFORM}.tar.gz" -C package .
+      - name: Smoke-test checksum installer
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          FIXTURE="$RUNNER_TEMP/project-brain-installer-assets"
+          INSTALL_DIR="$RUNNER_TEMP/project-brain-installer-bin"
+          mkdir -p "$FIXTURE"
+          cp "project-brain-${GITHUB_REF_NAME}-${PLATFORM}.tar.gz" "$FIXTURE/"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$FIXTURE/project-brain-${GITHUB_REF_NAME}-${PLATFORM}.tar.gz" > "$FIXTURE/SHA256SUMS.txt"
+          else
+            shasum -a 256 "$FIXTURE/project-brain-${GITHUB_REF_NAME}-${PLATFORM}.tar.gz" > "$FIXTURE/SHA256SUMS.txt"
+          fi
+          sh scripts/install-project-brain.sh --version "$VERSION" --release-base-url "file://$FIXTURE" --install-dir "$INSTALL_DIR"
+          test "$("$INSTALL_DIR/brain" --version)" = "brain $VERSION"
+          "$INSTALL_DIR/codebase-memory-mcp" --version
+          test -f "$INSTALL_DIR/PROJECT_BRAIN_LICENSE"
+          test -f "$INSTALL_DIR/CODEBASE_MEMORY_THIRD_PARTY_NOTICES.md"
+          test -f "$INSTALL_DIR/ZOEKt_LICENSE"
+      - name: Exercise deterministic native Core parity fixture
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          python scripts/cross_platform_fixture.py --brain "$GITHUB_WORKSPACE/package/brain" --platform "$PLATFORM" --output "parity-${PLATFORM}.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: parity-${{ matrix.platform }}
+          path: parity-${{ matrix.platform }}.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:
           name: standalone-${{ matrix.platform }}
           path: project-brain-*.tar.gz
           if-no-files-found: error
 
+  standalone-windows:
+    name: Standalone Windows amd64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.7"
+      - name: Build standalone Project Brain
+        run: |
+          python -m pip install ".[semantic]" pyinstaller
+          pyinstaller --clean --onefile --name brain --collect-data brain --collect-all usearch --collect-all truststore brain/standalone.py
+          $expectedVersion = "brain " + $env:GITHUB_REF_NAME.TrimStart("v")
+          $actualVersion = .\dist\brain.exe --version
+          if ($LASTEXITCODE -ne 0 -or $actualVersion -cne $expectedVersion) { throw "standalone Project Brain version mismatch" }
+          .\dist\brain.exe --help
+      - name: Build pinned Zoekt command pair
+        env:
+          ZOEKT_REVISION: 886b229dcd5e7bec0c9918002b77345d27c84e3c
+        run: |
+          git clone https://github.com/sourcegraph/zoekt.git upstream/zoekt
+          git -C upstream/zoekt checkout --detach $env:ZOEKT_REVISION
+          if ((git -C upstream/zoekt rev-parse HEAD) -ne $env:ZOEKT_REVISION) { throw "Zoekt revision mismatch" }
+          git -C upstream/zoekt apply --check "$env:GITHUB_WORKSPACE/scripts/windows/zoekt-windows-amd64.patch"
+          git -C upstream/zoekt apply "$env:GITHUB_WORKSPACE/scripts/windows/zoekt-windows-amd64.patch"
+          New-Item -ItemType Directory -Path zoekt-bin | Out-Null
+          $output = (Resolve-Path zoekt-bin).Path
+          Push-Location upstream/zoekt
+          try {
+            go build -trimpath -buildvcs=false -o "$output/zoekt.exe" ./cmd/zoekt
+            go build -trimpath -buildvcs=false -o "$output/zoekt-index.exe" ./cmd/zoekt-index
+          } finally {
+            Pop-Location
+          }
+          if (-not (Test-Path "zoekt-bin/zoekt.exe") -or -not (Test-Path "zoekt-bin/zoekt-index.exe")) { throw "Zoekt build did not produce both executables" }
+          Copy-Item upstream/zoekt/LICENSE "zoekt-bin/ZOEKt_LICENSE"
+          Copy-Item scripts/windows/zoekt-windows-amd64.patch "zoekt-bin/ZOEKt_WINDOWS_PATCH"
+          Set-Content -Path "zoekt-bin/ZOEKt_VERSION" -Value $env:ZOEKT_REVISION -Encoding ascii
+      - name: Download pinned structural backend
+        env:
+          CBM_ASSET: codebase-memory-mcp-windows-amd64.zip
+          CBM_SHA256: 1e5ba3cca69194b9229f89a0cafe4a6538ba9e0040d892d57bf472e992420273
+        run: |
+          curl.exe --fail --location --output $env:CBM_ASSET "https://github.com/DeusData/codebase-memory-mcp/releases/download/v0.10.5/$env:CBM_ASSET"
+          $actual = (Get-FileHash -Algorithm SHA256 $env:CBM_ASSET).Hash.ToLowerInvariant()
+          if ($actual -ne $env:CBM_SHA256) { throw "codebase-memory-mcp checksum mismatch" }
+          Expand-Archive -Path $env:CBM_ASSET -DestinationPath cbm
+          if (-not (Test-Path "cbm/codebase-memory-mcp.exe")) { throw "structural backend executable is missing" }
+      - name: Package and smoke-test native tools
+        run: |
+          New-Item -ItemType Directory -Path package | Out-Null
+          Copy-Item dist/brain.exe,cbm/codebase-memory-mcp.exe,zoekt-bin/zoekt.exe,zoekt-bin/zoekt-index.exe package/
+          Copy-Item LICENSE package/PROJECT_BRAIN_LICENSE
+          Copy-Item cbm/LICENSE package/CODEBASE_MEMORY_LICENSE
+          Copy-Item cbm/THIRD_PARTY_NOTICES.md package/CODEBASE_MEMORY_THIRD_PARTY_NOTICES.md
+          Copy-Item zoekt-bin/ZOEKt_LICENSE,zoekt-bin/ZOEKt_VERSION,zoekt-bin/ZOEKt_WINDOWS_PATCH package/
+          $archive = "project-brain-$env:GITHUB_REF_NAME-windows-amd64.zip"
+          Compress-Archive -Path package/* -DestinationPath $archive
+          Expand-Archive -Path $archive -DestinationPath verified
+          $expectedVersion = "brain " + $env:GITHUB_REF_NAME.TrimStart("v")
+          $actualVersion = .\verified\brain.exe --version
+          if ($LASTEXITCODE -ne 0 -or $actualVersion -cne $expectedVersion) { throw "packaged Project Brain version mismatch" }
+          .\verified\brain.exe --help
+          .\verified\codebase-memory-mcp.exe --version
+          New-Item -ItemType Directory -Path zoekt-smoke-source,zoekt-smoke-index | Out-Null
+          Set-Content -Path zoekt-smoke-source/example.txt -Value "brain-native-windows-smoke" -Encoding utf8
+          .\verified\zoekt-index.exe -index zoekt-smoke-index zoekt-smoke-source
+          $result = .\verified\zoekt.exe -index_dir zoekt-smoke-index "brain-native-windows-smoke"
+          if ($LASTEXITCODE -ne 0 -or "$result" -notmatch "example.txt") { throw "Zoekt native smoke failed" }
+          $brain = (Resolve-Path .\verified\brain.exe).Path
+          $workspace = Join-Path $env:RUNNER_TEMP ("Project Brain 原生 空格 " + ("long-segment-" * 18))
+          New-Item -ItemType Directory -Path (Join-Path $workspace "repository") -Force | Out-Null
+          Set-Content -Path (Join-Path $workspace "repository/WindowsService.py") -Value "class WindowsService: pass # windows-native-retrieval-marker" -Encoding utf8
+          $nativeRepo = Join-Path $workspace "repository"
+          git -C $nativeRepo init
+          git -C $nativeRepo config user.name project-brain-ci
+          git -C $nativeRepo config user.email project-brain-ci@example.invalid
+          git -C $nativeRepo add WindowsService.py
+          git -C $nativeRepo commit -m fixture
+          Push-Location $workspace
+          try {
+            & $brain init .\repository --name windows-native-smoke --no-fetch
+            if ($LASTEXITCODE -ne 0) { throw "Project Brain native init smoke failed" }
+            & $brain -c .\brain.toml capabilities
+            if ($LASTEXITCODE -ne 0) { throw "Project Brain native capabilities smoke failed" }
+            & $brain -c .\brain.toml refresh --no-fetch --no-discover
+            if ($LASTEXITCODE -ne 0) { throw "Project Brain native refresh smoke failed" }
+            & $brain -c .\brain.toml agent-kit m365 --json
+            if ($LASTEXITCODE -ne 0) { throw "Project Brain native Agent Kit smoke failed" }
+            & $brain -c .\brain.toml start WINDOWS-A --text "Trace WindowsService" --no-sync --json
+            if ($LASTEXITCODE -ne 0) { throw "Project Brain native first ticket smoke failed" }
+            & $brain -c .\brain.toml start WINDOWS-B --text "Trace the same workspace independently" --no-sync --json
+            if ($LASTEXITCODE -ne 0) { throw "Project Brain native second ticket smoke failed" }
+            $request = '{"INVESTIGATION_REQUEST":{"version":5,"mode":"root_cause","objective":"Locate windows-native-retrieval-marker","runtime_facts":[],"hypotheses":[],"required":["production entry point"],"resolve":["windows-native-retrieval-marker"],"anchors":[],"base_context_id":null,"checkpoint":true,"wave":1}}'
+            Set-Content -Path request.json -Value $request -Encoding utf8
+            & $brain -c .\brain.toml ctx WINDOWS-A --file request.json --json
+            if ($LASTEXITCODE -ne 0) { throw "Project Brain native Core retrieval smoke failed" }
+            & $brain -c .\brain.toml ctx WINDOWS-B --file request.json --json
+            if ($LASTEXITCODE -ne 0) { throw "Project Brain native multi-ticket smoke failed" }
+            & $brain -c .\brain.toml watch --once
+            if ($LASTEXITCODE -ne 0) { throw "Project Brain native Auto Refresh smoke failed" }
+            $uiListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+            $uiListener.Start()
+            $uiPort = ([Net.IPEndPoint]$uiListener.LocalEndpoint).Port
+            $uiListener.Stop()
+            $uiStdout = Join-Path $env:RUNNER_TEMP "project-brain-ui.stdout.log"
+            $uiStderr = Join-Path $env:RUNNER_TEMP "project-brain-ui.stderr.log"
+            Remove-Item $uiStdout,$uiStderr -Force -ErrorAction SilentlyContinue
+            $ui = Start-Process -FilePath $brain -ArgumentList @("-c", ".\brain.toml", "ui", "--port", "$uiPort", "--no-open") -PassThru -WindowStyle Hidden -RedirectStandardOutput $uiStdout -RedirectStandardError $uiStderr
+            try {
+              $uiToken = $null
+              $uiDeadline = (Get-Date).AddSeconds(15)
+              do {
+                if ($ui.HasExited) {
+                  $uiError = if (Test-Path $uiStderr) { Get-Content $uiStderr -Raw } else { "no stderr" }
+                  throw "Project Brain native UI exited before smoke: $uiError"
+                }
+                if (Test-Path $uiStdout) {
+                  $uiOutput = Get-Content $uiStdout -Raw
+                  $tokenMatch = [regex]::Match($uiOutput, '\?token=([A-Za-z0-9_-]+)')
+                  if ($tokenMatch.Success) { $uiToken = $tokenMatch.Groups[1].Value }
+                }
+                if (-not $uiToken) { Start-Sleep -Milliseconds 200 }
+              } while (-not $uiToken -and (Get-Date) -lt $uiDeadline)
+              if (-not $uiToken) { throw "Project Brain native UI token was not published before timeout" }
+              $status = Invoke-RestMethod -Uri "http://127.0.0.1:$uiPort/api/status" -Headers @{"X-Brain-Token"=$uiToken}
+              if (-not $status.ok) { throw "Project Brain native UI status smoke failed" }
+            } finally {
+              Stop-Process -Id $ui.Id -Force -ErrorAction SilentlyContinue
+            }
+          } finally {
+            Pop-Location
+          }
+          python scripts/cross_platform_fixture.py --brain .\verified\brain.exe --platform windows-amd64 --output parity-windows-amd64.json
+          $fixture = Join-Path $env:RUNNER_TEMP "project-brain-installer-assets"
+          $installed = Join-Path $env:RUNNER_TEMP "project-brain-installer-bin"
+          New-Item -ItemType Directory -Path $fixture -Force | Out-Null
+          Copy-Item $archive $fixture
+          $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          Set-Content -Path (Join-Path $fixture "SHA256SUMS.txt") -Value "$digest  $archive" -Encoding ascii
+          $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+          $listener.Start()
+          $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+          $listener.Stop()
+          $server = Start-Process -FilePath python -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", $fixture) -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 1
+            $version = $env:GITHUB_REF_NAME.TrimStart("v")
+            & scripts/install-project-brain.ps1 -Version $version -InstallDir $installed -ReleaseBaseUrl "http://127.0.0.1:$port" -NoPathUpdate
+            $installedVersion = & (Join-Path $installed "brain.exe") --version
+            if ($LASTEXITCODE -ne 0 -or $installedVersion -cne "brain $version") { throw "installed Project Brain version mismatch" }
+            & (Join-Path $installed "codebase-memory-mcp.exe") --version
+            foreach ($notice in "PROJECT_BRAIN_LICENSE","CODEBASE_MEMORY_THIRD_PARTY_NOTICES.md","ZOEKt_LICENSE","ZOEKt_WINDOWS_PATCH") {
+              if (-not (Test-Path (Join-Path $installed $notice))) { throw "installed notice is missing: $notice" }
+            }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: parity-windows-amd64
+          path: parity-windows-amd64.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: standalone-windows-amd64
+          path: project-brain-*-windows-amd64.zip
+          if-no-files-found: error
+
+  cross-platform-parity:
+    name: Compare deterministic behavior across five native artifacts
+    needs: [standalone, standalone-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: parity-*
+          path: parity-results/
+          merge-multiple: true
+      - name: Require identical anchors, evidence, flows, surfaces, and LF/CRLF identities
+        run: python scripts/cross_platform_fixture.py --compare parity-results
+
   github-release:
     name: Publish GitHub release
-    needs: [compatibility, build, standalone]
+    needs: [compatibility, windows-compatibility, v1-release-readiness, build, standalone, standalone-windows, cross-platform-parity]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
+          name: python-package-distributions
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: standalone-*
           path: dist/
           merge-multiple: true
       - name: Create checksums
-        run: sha256sum dist/*.whl dist/*.tar.gz > dist/SHA256SUMS.txt
-      - name: Create release
+        run: |
+          cp scripts/install-project-brain.sh scripts/install-project-brain.ps1 dist/
+          cd dist
+          sha256sum *.whl *.tar.gz *.zip *.sh *.ps1 > SHA256SUMS.txt
+      - name: Preserve final checksums for downstream publication jobs
+        uses: actions/upload-artifact@v7
+        with:
+          name: final-release-checksums
+          path: dist/SHA256SUMS.txt
+          if-no-files-found: error
+      - name: Sign build provenance for every release asset
+        uses: actions/attest@v4
+        with:
+          subject-path: "dist/*"
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME" --prerelease
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME" --draft --prerelease
           else
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME"
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME" --draft
+          fi
+      - name: Verify downloaded draft assets and provenance before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir release-verification
+          gh release download "$GITHUB_REF_NAME" --dir release-verification
+          cd release-verification
+          sha256sum -c SHA256SUMS.txt
+          for asset in *; do
+            gh attestation verify "$asset" --repo "$GH_REPO"
+          done
+      - name: Publish only the verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease
+          else
+            gh release edit "$GITHUB_REF_NAME" --draft=false --latest
           fi
 
   homebrew-tap:
-    name: Update Homebrew tap after final release
+    name: Verify and update Homebrew tap after final release
     needs: github-release
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     permissions:
       contents: read
     steps:
@@ -165,8 +541,8 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
+          name: final-release-checksums
           path: dist/
-          merge-multiple: true
       - name: Check tap authorization
         id: authorization
         env:
@@ -179,7 +555,6 @@ jobs:
             echo "Homebrew tap token is not configured; skipping tap update."
           fi
       - name: Confirm published checksums are final
-        if: steps.authorization.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -187,12 +562,9 @@ jobs:
           mkdir published
           gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS.txt --dir published
           cmp published/SHA256SUMS.txt dist/SHA256SUMS.txt
-      - name: Render, test, and publish the formula
-        if: steps.authorization.outputs.available == 'true'
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      - name: Render and verify the formula from published assets
         run: |
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/superorange0707/homebrew-tap.git" homebrew-tap
+          git clone https://github.com/superorange0707/homebrew-tap.git homebrew-tap
           VERSION="${GITHUB_REF_NAME#v}"
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             FORMULA=homebrew-tap/Formula/project-brain-rc.rb
@@ -203,17 +575,35 @@ jobs:
           fi
           ruby -c "$FORMULA"
           git -C homebrew-tap diff --check
+          brew update
+          brew install --formula "$FORMULA"
+          EXPECTED_VERSION="$(python -c 'import pathlib, re; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("brain/__init__.py").read_text()).group(1))')"
+          test "$(brain --version)" = "brain ${EXPECTED_VERSION}"
+          brain --help >/dev/null
+          brew test "$FORMULA"
+      - name: Publish the verified formula
+        if: steps.authorization.outputs.available == 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            FORMULA=homebrew-tap/Formula/project-brain-rc.rb
+          else
+            FORMULA=homebrew-tap/Formula/project-brain.rb
+          fi
           if git -C homebrew-tap diff --quiet; then exit 0; fi
           git -C homebrew-tap config user.name "project-brain-release[bot]"
           git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C homebrew-tap add "${FORMULA#homebrew-tap/}"
           git -C homebrew-tap commit -m "project-brain ${GITHUB_REF_NAME}"
+          git -C homebrew-tap remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/superorange0707/homebrew-tap.git"
           git -C homebrew-tap push origin main
 
   pypi:
     name: Publish to PyPI with OIDC
     if: ${{ vars.PUBLISH_PYPI == 'true' && !contains(github.ref_name, '-') }}
-    needs: [compatibility, build]
+    needs: [github-release, build]
     runs-on: ubuntu-latest
     environment:
       name: pypi
