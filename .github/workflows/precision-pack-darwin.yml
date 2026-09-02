@@ -123,9 +123,9 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
           cmake --build upstream/llama.cpp/build --target llama-server --parallel 3
           test -x upstream/llama.cpp/build/bin/llama-server
-          file upstream/llama.cpp/build/bin/llama-server | rg 'arm64'
-          ! otool -L upstream/llama.cpp/build/bin/llama-server | rg '(@rpath|/opt/homebrew|/usr/local)'
-          test "$(vtool -show-build upstream/llama.cpp/build/bin/llama-server | awk '/minos/{print $2; exit}')" = "15.0"
+          file upstream/llama.cpp/build/bin/llama-server | grep 'arm64'
+          ! otool -L upstream/llama.cpp/build/bin/llama-server | grep -E '(@rpath|/opt/homebrew|/usr/local)'
+          test "$(otool -l upstream/llama.cpp/build/bin/llama-server | awk '$1 == "minos" {print $2; exit}')" = "15.0"
       - name: Build and clean-install verify the compatibility pack
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}

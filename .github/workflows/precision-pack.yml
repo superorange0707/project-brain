@@ -67,8 +67,8 @@ jobs:
           cmake --build upstream/llama.cpp/build --target llama-server llama-quantize --parallel 3
           test -x upstream/llama.cpp/build/bin/llama-server
           test -x upstream/llama.cpp/build/bin/llama-quantize
-          ! otool -L upstream/llama.cpp/build/bin/llama-server | rg '(@rpath|/opt/homebrew|/usr/local)'
-          vtool -show-build upstream/llama.cpp/build/bin/llama-server | rg 'minos 15\.0'
+          ! otool -L upstream/llama.cpp/build/bin/llama-server | grep -E '(@rpath|/opt/homebrew|/usr/local)'
+          test "$(otool -l upstream/llama.cpp/build/bin/llama-server | awk '$1 == "minos" {print $2; exit}')" = "15.0"
       - name: Convert official source to Q6_K and generate official-reference scores
         env:
           PYTORCH_MPS_HIGH_WATERMARK_RATIO: "0.0"
