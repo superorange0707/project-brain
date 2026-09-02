@@ -156,7 +156,37 @@ jobs:
           mkdir "$temporary/repository"
           printf '%s\n' '[project]' 'state_dir = "state"' 'generated_dir = "generated"' '' '[storage]' 'max_state_gb = 0' 'minimum_free_disk_gb = 0' '' '[[repositories]]' 'name = "public-fixture"' 'path = "repository"' > "$temporary/brain.toml"
           PYTHONPATH=. python -m brain.cli -c "$temporary/brain.toml" model install precision-pack-darwin-dist/qwen3-reranker-4b-q6k-darwin-arm64
-          PYTHONPATH=. python -m brain.cli -c "$temporary/brain.toml" model verify qwen3-reranker-4b-q6k-darwin-arm64
+          PYTHONPATH=. python - "$temporary/brain.toml" <<'PY'
+          import math
+          import sys
+          from pathlib import Path
+
+          from brain.core import load_settings
+          from brain.models import installed_packs, runtime_for_pack
+
+          settings = load_settings(Path(sys.argv[1]))
+          pack_id = "qwen3-reranker-4b-q6k-darwin-arm64"
+          manifest = next(pack for pack in installed_packs(settings) if pack.get("pack_id") == pack_id)
+          verification_manifest = {
+              **manifest,
+              "request_timeout_seconds": manifest["verification_request_timeout_seconds"],
+          }
+          runtime = runtime_for_pack(verification_manifest, verification=True)
+          try:
+              runtime.warmup()
+              scores = runtime.rerank(
+                  "Where is CustomerUpdated used to recalculate eligibility?",
+                  [
+                      "CustomerUpdatedListener invokes eligibilityService.recalculate(customerId).",
+                      "The release runbook describes rotating log files.",
+                  ],
+              )
+          finally:
+              runtime.shutdown()
+          if len(scores) != 2 or any(not math.isfinite(score) for score in scores) or scores[0] <= scores[1]:
+              raise SystemExit("clean-installed Precision runtime smoke test failed")
+          print("clean-installed Precision runtime integrity and inference smoke passed", flush=True)
+          PY
       - uses: actions/upload-artifact@v7
         with:
           name: precision-pack-darwin-arm64
