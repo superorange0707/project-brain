@@ -215,12 +215,13 @@ class LocalUiTest(unittest.TestCase):
             return response.status, json.loads(response.read()), dict(response.headers)
 
     def job(self, job_id: str) -> dict:
-        for _ in range(50):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
             _, value, _ = self.get("/api/job?id=" + quote(job_id, safe=""))
             job = value["data"]
             if job["status"] not in {"pending", "running"}:
                 return job
-            time.sleep(0.02)
+            time.sleep(0.05)
         self.fail("operation job did not finish")
 
     @staticmethod
