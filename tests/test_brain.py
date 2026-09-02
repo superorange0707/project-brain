@@ -4489,12 +4489,22 @@ class ReleaseSafetyTest(unittest.TestCase):
                         "descriptor_url": "https://github.com/superorange0707/project-brain/releases/download/semantic-pack-v1.0.6/qwen3-embedding-4b-q6k-darwin-arm64-descriptor.json",
                         "descriptor_sha256": "cbd09af575fb1b2e036abc17ed3e693e5bab4807af19efd2c1a9b5cd75ae8afc",
                     },
+                    "windows-amd64": {
+                        "pack_id": "qwen3-embedding-4b-q6k-windows-amd64",
+                        "descriptor_url": "https://github.com/superorange0707/project-brain/releases/download/semantic-pack-windows-v1.0.0/qwen3-embedding-4b-q6k-windows-amd64-descriptor.json",
+                        "descriptor_sha256": "69ca378fc2a00f01b23ae047ab46a7137c1b952d3c07a478350aaf2e2c6e2a30",
+                    },
                 },
                 "precision": {
                     "darwin-arm64": {
                         "pack_id": "qwen3-reranker-4b-q6k-darwin-arm64",
                         "descriptor_url": "https://github.com/superorange0707/project-brain/releases/download/precision-pack-v1.0.2/qwen3-reranker-4b-q6k-darwin-arm64-descriptor.json",
                         "descriptor_sha256": "9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7",
+                    },
+                    "windows-amd64": {
+                        "pack_id": "qwen3-reranker-4b-q6k-windows-amd64",
+                        "descriptor_url": "https://github.com/superorange0707/project-brain/releases/download/precision-pack-windows-v1.0.0/qwen3-reranker-4b-q6k-windows-amd64-descriptor.json",
+                        "descriptor_sha256": "524ac460c07b55891029b1de54120c47664969cdc985df713c19957657150d59",
                     },
                 },
             },

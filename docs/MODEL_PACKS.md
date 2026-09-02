@@ -87,7 +87,11 @@ with a source-pinned portable Windows CPU runtime. Each Windows pack is first
 published from a new draft Windows-specific pack tag; immutable Darwin releases
 are never reopened or appended. A Windows alias is not added
 to the Core catalog until the published descriptor SHA-256, reconstructed pack,
-clean install, and actual Windows conformance have all been verified.
+clean install, and actual Windows conformance have all been verified. The v1
+catalog now pins the verified `semantic-pack-windows-v1.0.0` descriptor
+`69ca378fc2a00f01b23ae047ab46a7137c1b952d3c07a478350aaf2e2c6e2a30`
+and `precision-pack-windows-v1.0.0` descriptor
+`524ac460c07b55891029b1de54120c47664969cdc985df713c19957657150d59`.
 
 ```json
 {

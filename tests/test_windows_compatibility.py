@@ -494,12 +494,30 @@ class WindowsCompatibilityTest(unittest.TestCase):
                 second.close()
                 writer.close()
 
-    def test_windows_official_pack_absence_fails_before_any_download(self) -> None:
-        with mock.patch("brain.models.platform_id", return_value="windows-amd64"), mock.patch("brain.models.install_release_descriptor") as install:
-            self.assertEqual([], official_packs())
-            with self.assertRaisesRegex(ValueError, "available for windows-amd64"):
-                install_official_pack(mock.Mock(), "semantic")
-        install.assert_not_called()
+    def test_windows_official_pack_catalog_pins_verified_native_descriptors(self) -> None:
+        expected = [
+            {
+                "alias": "precision",
+                "pack_id": "qwen3-reranker-4b-q6k-windows-amd64",
+                "descriptor_url": "https://github.com/superorange0707/project-brain/releases/download/precision-pack-windows-v1.0.0/qwen3-reranker-4b-q6k-windows-amd64-descriptor.json",
+            },
+            {
+                "alias": "semantic",
+                "pack_id": "qwen3-embedding-4b-q6k-windows-amd64",
+                "descriptor_url": "https://github.com/superorange0707/project-brain/releases/download/semantic-pack-windows-v1.0.0/qwen3-embedding-4b-q6k-windows-amd64-descriptor.json",
+            },
+        ]
+        installed = {"pack_id": "qwen3-embedding-4b-q6k-windows-amd64"}
+        with mock.patch("brain.models.platform_id", return_value="windows-amd64"), mock.patch(
+            "brain.models.install_release_descriptor", return_value=installed,
+        ) as install:
+            self.assertEqual(expected, official_packs())
+            self.assertEqual(installed, install_official_pack(mock.Mock(), "semantic"))
+        install.assert_called_once_with(
+            mock.ANY,
+            expected[1]["descriptor_url"],
+            "69ca378fc2a00f01b23ae047ab46a7137c1b952d3c07a478350aaf2e2c6e2a30",
+        )
 
     def test_windows_official_pack_catalog_resolves_a_platform_descriptor_without_alias_rewrite(self) -> None:
         descriptor = {

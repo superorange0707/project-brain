@@ -432,6 +432,10 @@ every release part, and the assembled GGUF are checked before the local pack is
 registered. It never contacts Hugging Face or any hosted model service while
 indexing or querying.
 
+On native Windows amd64 the same commands resolve the independently verified
+`semantic-pack-windows-v1.0.0` descriptor, pinned by SHA-256
+`69ca378fc2a00f01b23ae047ab46a7137c1b952d3c07a478350aaf2e2c6e2a30`.
+
 ```bash
 python -m pip install 'project-brain-context[semantic]'
 brain model install semantic
@@ -491,6 +495,10 @@ brain model benchmark precision
 brain model autotune precision --latency-budget-ms 3000
 brain edition set precision
 ```
+
+On native Windows amd64 the `precision` alias resolves
+`precision-pack-windows-v1.0.0`, pinned by descriptor SHA-256
+`524ac460c07b55891029b1de54120c47664969cdc985df713c19957657150d59`.
 
 The Precision golden suite is public/synthetic only. It compares the official
 Qwen Transformers reranker and the local Q6_K runtime for order, bounded score

@@ -80,6 +80,10 @@ the complete checksummed asset set, and only then publishes it as immutable. It
 never appends Windows assets to an already-published Darwin pack release. After
 publication, verify the release assets on a clean Windows 11 x64 host and only
 then pin the exact Windows descriptor SHA-256 in a later reviewed Core change.
+The v1.0 catalog pins the resulting `semantic-pack-windows-v1.0.0` descriptor
+SHA-256 `69ca378fc2a00f01b23ae047ab46a7137c1b952d3c07a478350aaf2e2c6e2a30`
+and `precision-pack-windows-v1.0.0` descriptor SHA-256
+`524ac460c07b55891029b1de54120c47664969cdc985df713c19957657150d59`.
 Never copy the Darwin descriptor into the Windows catalog.
 
 No release workflow claims target-machine latency, M3 Pro memory usage, or

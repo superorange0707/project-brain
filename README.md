@@ -85,6 +85,11 @@ GitHub Release descriptor (SHA-256
 and remains entirely offline once installed. It is not bundled into Core or
 Homebrew.
 
+On native Windows amd64 the same `semantic` alias resolves to the independently
+built and verified [Windows Semantic pack v1.0.0](https://github.com/superorange0707/project-brain/releases/tag/semantic-pack-windows-v1.0.0),
+whose descriptor SHA-256 is
+`69ca378fc2a00f01b23ae047ab46a7137c1b952d3c07a478350aaf2e2c6e2a30`.
+
 An official pack enters a Core catalog only after its exact descriptor, release
 parts, reconstructed model, provenance, and clean temporary installation have
 all been verified. `brain model install semantic` then verifies that descriptor,
@@ -97,6 +102,10 @@ Transformers reference. Its immutable descriptor SHA-256 is
 `9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`.
 It is never bundled into Core or Homebrew; after this Core catalog release,
 `brain model install precision` resolves only that pinned release.
+On native Windows amd64 the alias resolves to the verified
+[Windows Precision pack v1.0.0](https://github.com/superorange0707/project-brain/releases/tag/precision-pack-windows-v1.0.0),
+descriptor SHA-256
+`524ac460c07b55891029b1de54120c47664969cdc985df713c19957657150d59`.
 
 See [offline model-pack operations](docs/MODEL_PACKS.md) for the audited pack
 format, official-Qwen conversion provenance, local conformance, controlled

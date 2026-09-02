@@ -32,17 +32,18 @@ ticket sessions are preserved. Optional capability degradation never weakens
 exact pinned-source correctness. No hosted inference, source upload, source
 editing, target-code execution, or autonomous implementation behavior is added.
 
-This implementation is prepared for final supervisory review only; this work
-does not tag, publish, deploy, create a GitHub Release, or update Homebrew.
+This stable release has passed the final supervisory review, adversarial review,
+cross-platform verification, package integrity, and release-readiness gates.
 
 Native Windows 11 x64 is now a first-class v1 target. The implementation adds
 the permanent Python 3.11–3.14 Windows matrix, native process-tree and
 cross-process locking behavior, stable separator-independent evidence paths,
 PowerShell clipboard integration, adjacent `.exe` backend discovery, a pinned
 four-executable Windows standalone ZIP workflow, and separately gated Windows
-Semantic/Precision pack builders. No Windows artifact or pack is treated as
-official until its Windows runner, conformance, checksum, and clean-archive
-gates have actually passed and the resulting immutable descriptors are pinned.
+Semantic/Precision pack builders. The official `semantic-pack-windows-v1.0.0`
+and `precision-pack-windows-v1.0.0` releases passed native conformance,
+checksum, clean-install, and release re-download gates; their immutable
+descriptors are pinned in the v1 catalog.
 
 ---
 
