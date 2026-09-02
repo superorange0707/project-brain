@@ -1552,9 +1552,9 @@ String docs = """
         with self.assertRaisesRegex(BrainError, "checkpoint artifact is corrupt"):
             create_context(self.settings, "CHECKPOINT-CORRUPT", request)
         fake = "# FAKE UNPINNED EVIDENCE\n"
-        artifact.write_text(fake, encoding="utf-8")
+        artifact.write_bytes(fake.encode("utf-8"))
         handoff = Path(failed["progressive_checkpoint"]["handoff_artifact"])
-        handoff.write_text(fake, encoding="utf-8")
+        handoff.write_bytes(fake.encode("utf-8"))
         fake_hash = "sha256:" + hashlib.sha256(fake.encode("utf-8")).hexdigest()
         failed["progressive_checkpoint"]["content_hash"] = fake_hash
         for item in failed["context_lineage"]:

@@ -42,6 +42,38 @@ from brain.platforms import (
 from brain.sync import _export_snapshot
 
 
+def _wait_for_pid(path: Path, timeout: float = 10.0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            value = path.read_text(encoding="ascii").strip()
+            if value:
+                return int(value)
+        except (FileNotFoundError, ValueError):
+            pass
+        time.sleep(0.05)
+    raise AssertionError(f"process did not publish a PID to {path}")
+
+
+def _process_is_active(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+    import ctypes
+
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        return bool(ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
 class _FakeMsvcrt:
     LK_NBLCK = 1
     LK_UNLCK = 2
@@ -223,16 +255,11 @@ class WindowsCompatibilityTest(unittest.TestCase):
             elapsed = time.monotonic() - started
             self.assertTrue(result.output_truncated)
             self.assertLess(elapsed, 3.0)
-            descendant = int(pid_file.read_text(encoding="utf-8"))
+            descendant = _wait_for_pid(pid_file)
             deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                try:
-                    os.kill(descendant, 0)
-                except OSError:
-                    break
+            while _process_is_active(descendant) and time.monotonic() < deadline:
                 time.sleep(0.02)
-            else:
-                self.fail("bounded process descendant remained alive after its leader exited")
+            self.assertFalse(_process_is_active(descendant), "bounded process descendant remained alive after its leader exited")
 
     def test_managed_tree_cleanup_retries_read_only_snapshot_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -632,12 +659,17 @@ class WindowsCompatibilityTest(unittest.TestCase):
     def test_windows_shell_free_python_process_handles_spaces_and_unicode(self) -> None:
         with tempfile.TemporaryDirectory(prefix="Project Brain 原生 ") as temporary:
             script = Path(temporary) / "echo args.py"
-            script.write_text("import sys; print(sys.argv[1])", encoding="utf-8")
-            result = subprocess.run(
-                [os.sys.executable, str(script), "带 空格"], text=True, capture_output=True, check=False, shell=False,
+            output = Path(temporary) / "结果.txt"
+            script.write_text(
+                "import pathlib, sys; pathlib.Path(sys.argv[2]).write_text(sys.argv[1], encoding='utf-8')",
+                encoding="utf-8",
             )
-            self.assertEqual(0, result.returncode)
-            self.assertEqual("带 空格", result.stdout.strip())
+            result = subprocess.run(
+                [os.sys.executable, str(script), "带 空格", str(output)],
+                text=True, capture_output=True, check=False, shell=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("带 空格", output.read_text(encoding="utf-8"))
 
     @unittest.skipUnless(os.name == "nt", "native Windows process-tree behavior requires Windows")
     def test_windows_process_tree_reaps_a_real_child_process(self) -> None:
@@ -659,29 +691,13 @@ class WindowsCompatibilityTest(unittest.TestCase):
                 **process_group_kwargs(windows=True),
             )
             try:
-                deadline = time.monotonic() + 10
-                while not child_pid.is_file() and time.monotonic() < deadline:
-                    time.sleep(0.05)
-                self.assertTrue(child_pid.is_file())
-                child = int(child_pid.read_text(encoding="ascii"))
+                child = _wait_for_pid(child_pid)
                 terminate_process_tree(process, graceful_timeout=0.1)
 
-                import ctypes
-
-                def active(pid: int) -> bool:
-                    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-                    if not handle:
-                        return False
-                    try:
-                        code = ctypes.c_ulong()
-                        return bool(ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
-                    finally:
-                        ctypes.windll.kernel32.CloseHandle(handle)
-
                 deadline = time.monotonic() + 5
-                while active(child) and time.monotonic() < deadline:
+                while _process_is_active(child) and time.monotonic() < deadline:
                     time.sleep(0.05)
-                self.assertFalse(active(child))
+                self.assertFalse(_process_is_active(child))
             finally:
                 if process.poll() is None:
                     terminate_process_tree(process, graceful_timeout=0)

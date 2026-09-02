@@ -38,6 +38,7 @@ from .relations import generate_relationship_map
 from .sync import SyncResult, parse_branch_overrides, sync_repositories
 from .graph import GraphIndexResult, index_graph
 from .experience import build_experience_index, evaluate_sessions, render_similar_cases, similar_cases
+from .platforms import logical_path
 
 
 MAX_CLI_INPUT_BYTES = 4 * 1024 * 1024
@@ -378,7 +379,7 @@ def _init(args: argparse.Namespace) -> int:
             counter += 1
         names.add(name)
         try:
-            configured_path = str(path.relative_to(root))
+            configured_path = logical_path(path.relative_to(root))
         except ValueError:
             configured_path = str(path)
         rows.extend([

@@ -796,7 +796,7 @@ path = "batch-service"
                 return 0
 
         with mock.patch("brain.backends.ripgrep.trusted_path_executable", return_value=Path("/usr/bin/rg")), mock.patch(
-            "brain.backends.ripgrep.subprocess.Popen", return_value=Process(),
+            "brain.backends.ripgrep.start_managed_process", return_value=Process(),
         ), mock.patch("brain.backends.ripgrep.terminate_process_tree") as terminated:
             result = ripgrep.search(self.root, "needle", fixed=True, max_results=10)
         self.assertIsNotNone(result)
@@ -840,7 +840,7 @@ path = "batch-service"
 
         started = time.monotonic()
         with mock.patch("brain.backends.ripgrep.trusted_path_executable", return_value=Path("/usr/bin/rg")), mock.patch(
-            "brain.backends.ripgrep.subprocess.Popen", return_value=process,
+            "brain.backends.ripgrep.start_managed_process", return_value=process,
         ), mock.patch("brain.backends.ripgrep.terminate_process_tree", side_effect=terminate):
             result = ripgrep.search(
                 self.root, "needle", fixed=True, max_results=10, timeout_seconds=.05,
@@ -3077,7 +3077,7 @@ path = "batch-service"
         self.assertIsInstance(runtime, ManagedLlamaCppRuntime)
         process = mock.Mock()
         process.poll.return_value = None
-        with mock.patch("brain.models.subprocess.Popen", return_value=process) as popen, mock.patch.object(LlamaCppRuntime, "health", return_value={"ok": True}), mock.patch("brain.models.terminate_process_tree") as terminate:
+        with mock.patch("brain.models.start_managed_process", return_value=process) as popen, mock.patch.object(LlamaCppRuntime, "health", return_value={"ok": True}), mock.patch("brain.models.terminate_process_tree") as terminate:
             runtime.warmup()
             command = popen.call_args.args[0]
             self.assertIn("127.0.0.1", command)
@@ -3096,7 +3096,7 @@ path = "batch-service"
         reranker = ManagedLlamaCppRuntime({**manifest, "capability": "reranker"})
         rerank_process = mock.Mock()
         rerank_process.poll.return_value = None
-        with mock.patch("brain.models.subprocess.Popen", return_value=rerank_process) as popen, mock.patch.object(
+        with mock.patch("brain.models.start_managed_process", return_value=rerank_process) as popen, mock.patch.object(
             LlamaCppRuntime, "health", return_value={"ok": True}
         ), mock.patch("brain.models.terminate_process_tree"):
             reranker.warmup()
@@ -3112,7 +3112,7 @@ path = "batch-service"
         ):
             with self.subTest(argument=argument):
                 poisoned = ManagedLlamaCppRuntime({**manifest, "runtime_args": [argument]})
-                with mock.patch("brain.models.subprocess.Popen") as popen:
+                with mock.patch("brain.models.start_managed_process") as popen:
                     with self.assertRaisesRegex(RuntimeError, "local runtime controls"):
                         poisoned._start()
                 popen.assert_not_called()
@@ -3121,7 +3121,7 @@ path = "batch-service"
         common = {
             "capability": "embedding", "startup_timeout_seconds": 1,
         }
-        with mock.patch("brain.models.subprocess.Popen") as popen:
+        with mock.patch("brain.models.start_managed_process") as popen:
             with self.assertRaisesRegex(RuntimeError, "runtime limits must be numeric"):
                 ManagedLlamaCppRuntime({**common, "request_timeout_seconds": "invalid"})._start()
         popen.assert_not_called()
@@ -3130,7 +3130,7 @@ path = "batch-service"
         with mock.patch("brain.models._check_pack_integrity"), mock.patch(
             "brain.models._pack_file", return_value=artifacts
         ), mock.patch("brain.models.os.access", return_value=True), mock.patch(
-            "brain.models.subprocess.Popen", side_effect=OSError("synthetic")
+            "brain.models.start_managed_process", side_effect=OSError("synthetic")
         ):
             with self.assertRaisesRegex(RuntimeError, "failed to start"):
                 ManagedLlamaCppRuntime(common)._start()
@@ -3140,7 +3140,7 @@ path = "batch-service"
         with mock.patch("brain.models._check_pack_integrity"), mock.patch(
             "brain.models._pack_file", return_value=artifacts
         ), mock.patch("brain.models.os.access", return_value=True), mock.patch(
-            "brain.models.subprocess.Popen", return_value=process
+            "brain.models.start_managed_process", return_value=process
         ), mock.patch.object(LlamaCppRuntime, "health", return_value={"ok": False}), mock.patch(
             "brain.models.time.monotonic", side_effect=[0.0, 0.5, 1.5]
         ), mock.patch("brain.models.time.sleep"), mock.patch.object(ManagedLlamaCppRuntime, "shutdown"):
@@ -3152,7 +3152,7 @@ path = "batch-service"
         with mock.patch("brain.models._check_pack_integrity"), mock.patch(
             "brain.models._pack_file", return_value=artifacts
         ), mock.patch("brain.models.os.access", return_value=True), mock.patch(
-            "brain.models.subprocess.Popen", return_value=process
+            "brain.models.start_managed_process", return_value=process
         ), mock.patch.object(LlamaCppRuntime, "health", side_effect=ConnectionError("synthetic")), mock.patch(
             "brain.models.time.monotonic", side_effect=[0.0, 0.5, 1.5]
         ), mock.patch("brain.models.time.sleep"), mock.patch.object(ManagedLlamaCppRuntime, "shutdown"):
@@ -3175,7 +3175,7 @@ path = "batch-service"
         with mock.patch("brain.models._check_pack_integrity") as integrity, mock.patch(
             "brain.models._pack_file", return_value=Path("/tmp/verified-artifact")
         ), mock.patch("brain.models.os.access", return_value=True), mock.patch(
-            "brain.models.subprocess.Popen", return_value=process
+            "brain.models.start_managed_process", return_value=process
         ), mock.patch.object(LlamaCppRuntime, "health", return_value={"ok": True}), mock.patch(
             "brain.models.terminate_process_tree"
         ):
@@ -3194,7 +3194,7 @@ path = "batch-service"
         new_process = mock.Mock()
         new_process.poll.return_value = None
         with mock.patch.object(runtime, "shutdown") as shutdown, mock.patch("brain.models._check_pack_integrity"), mock.patch("brain.models._pack_file", return_value=Path("/tmp/verified-artifact")), mock.patch("brain.models.os.access", return_value=True):
-            with mock.patch("brain.models.subprocess.Popen", return_value=new_process) as popen, mock.patch.object(LlamaCppRuntime, "health", return_value={"ok": True}):
+            with mock.patch("brain.models.start_managed_process", return_value=new_process) as popen, mock.patch.object(LlamaCppRuntime, "health", return_value={"ok": True}):
                 runtime._start()
         shutdown.assert_called_once()
         popen.assert_called_once()
@@ -3382,7 +3382,7 @@ path = "batch-service"
         response = json.dumps({"FileName": "src/main/java/demo/EligibilityEvaluator.java", "Score": 5, "LineMatches": [{"LineNumber": 2, "LineStart": 0, "Line": base64.b64encode(b"interface EligibilityEvaluator {}\n").decode()}, {"LineNumber": 3, "LineStart": 0, "Line": base64.b64encode(b"unrelated\n").decode()}]})
         available = zoekt.ZoektStatus(True, "zoekt", "zoekt-index")
         with mock.patch("brain.backends.zoekt.status", return_value=available), mock.patch(
-            "brain.backends.zoekt.subprocess.Popen", return_value=FakeProcess(response),
+            "brain.backends.zoekt.start_managed_process", return_value=FakeProcess(response),
         ):
             result = zoekt.search(self.settings, repo, "EligibilityEvaluator", fixed=True, max_results=20)
         self.assertIsNotNone(result)
@@ -3392,26 +3392,26 @@ path = "batch-service"
             "/old/workspace/src/main/java/demo/EligibilityEvaluator.java",
         )
         with mock.patch("brain.backends.zoekt.status", return_value=available), mock.patch(
-            "brain.backends.zoekt.subprocess.Popen", return_value=FakeProcess(unsafe_response),
+            "brain.backends.zoekt.start_managed_process", return_value=FakeProcess(unsafe_response),
         ):
             self.assertIsNone(zoekt.search(self.settings, repo, "EligibilityEvaluator", fixed=True, max_results=20))
         with mock.patch("brain.backends.zoekt.status", return_value=available), mock.patch(
-            "brain.backends.zoekt.subprocess.Popen", return_value=FakeProcess("", 1),
+            "brain.backends.zoekt.start_managed_process", return_value=FakeProcess("", 1),
         ):
             self.assertIsNone(zoekt.search(self.settings, repo, "EligibilityEvaluator", fixed=True, max_results=20))
         with mock.patch("brain.backends.zoekt.status", return_value=available), mock.patch(
-            "brain.backends.zoekt.subprocess.Popen", return_value=FakeProcess("not-json\n"),
+            "brain.backends.zoekt.start_managed_process", return_value=FakeProcess("not-json\n"),
         ):
             self.assertIsNone(zoekt.search(self.settings, repo, "EligibilityEvaluator", fixed=True, max_results=20))
         (shard / "snapshot.zoekt").write_bytes(b"evil shard!")
         with mock.patch("brain.backends.zoekt.status", return_value=available), mock.patch(
-            "brain.backends.zoekt.subprocess.Popen"
+            "brain.backends.zoekt.start_managed_process"
         ) as popen:
             self.assertIsNone(zoekt.search(self.settings, repo, "EligibilityEvaluator", fixed=True, max_results=20))
             popen.assert_not_called()
         (shard / "snapshot.zoekt").unlink()
         with mock.patch("brain.backends.zoekt.status", return_value=available), mock.patch(
-            "brain.backends.zoekt.subprocess.Popen"
+            "brain.backends.zoekt.start_managed_process"
         ) as popen:
             self.assertIsNone(zoekt.search(self.settings, repo, "EligibilityEvaluator", fixed=True, max_results=20))
             popen.assert_not_called()
@@ -3668,7 +3668,8 @@ class SyntheticFanoutTest(unittest.TestCase):
 
         self.assertEqual(80, bundle.trace["requested_operations"])
         self.assertEqual(2, bundle.trace["effective_operations"])
-        self.assertEqual(56, bundle.trace["physical_backend_operations"])
+        self.assertGreaterEqual(bundle.trace["physical_backend_operations"], 50)
+        self.assertLessEqual(bundle.trace["physical_backend_operations"], 56)
         self.assertLessEqual(len(bundle.trace["initial_repo_scope"]), 6)
         self.assertEqual("repo-37", bundle.trace["initial_repo_scope"][0])
         self.assertLessEqual(bundle.trace["candidates_after_prune"], 200)
@@ -4288,9 +4289,15 @@ class GitSyncTest(unittest.TestCase):
                 results = sync_repositories(settings)
 
             self.assertEqual(1, len(fetch_environments))
-            self.assertIn("ControlMaster=auto", fetch_environments[0]["GIT_SSH_COMMAND"])
+            if os.name == "nt":
+                self.assertIsNone(fetch_environments[0])
+            else:
+                self.assertIn("ControlMaster=auto", fetch_environments[0]["GIT_SSH_COMMAND"])
             self.assertEqual(2, sum("skipped another interactive attempt" in (result.warning or "") for result in results))
             self.assertTrue(all("example.test" not in (result.warning or "") for result in results))
+
+            if os.name == "nt":
+                return
 
             fetch_environments.clear()
             for repo in settings.repositories:

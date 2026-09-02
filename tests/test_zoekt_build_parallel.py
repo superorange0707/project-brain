@@ -135,9 +135,7 @@ class ZoektBuildTests(unittest.TestCase):
             process = Process()
             available = zoekt.ZoektStatus(True, "zoekt", "zoekt-index")
             with mock.patch("brain.backends.zoekt.status", return_value=available), mock.patch(
-                "brain.platforms.process_group_kwargs", return_value={"start_new_session": True},
-            ), mock.patch(
-                "brain.backends.zoekt.subprocess.Popen", return_value=process,
+                "brain.backends.zoekt.start_managed_process", return_value=process,
             ) as spawned, mock.patch(
                 "brain.backends.zoekt.terminate_process_tree",
                 side_effect=lambda child, **_kwargs: child.terminate(),
@@ -149,7 +147,7 @@ class ZoektBuildTests(unittest.TestCase):
             self.assertEqual(1, len(result[0]))
             self.assertTrue(process.terminated)
             self.assertLessEqual(process.stdout.calls, 9)
-            self.assertTrue(spawned.call_args.kwargs["start_new_session"])
+            spawned.assert_called_once()
             terminated.assert_called_once_with(process, graceful_timeout=1)
 
     def test_pinned_manifest_hash_rejects_same_snapshot_shard_replacement(self) -> None:
