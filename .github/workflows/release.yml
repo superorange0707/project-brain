@@ -63,7 +63,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          # The immutable Darwin packs were built and conformance-tested on
+          # this native runner family; their Mach-O deployment targets are not
+          # executable on the older macos-14 image.
+          - os: macos-15
             platform: darwin-arm64
           - os: windows-latest
             platform: windows-amd64
