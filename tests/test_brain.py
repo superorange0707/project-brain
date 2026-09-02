@@ -78,7 +78,7 @@ from brain.catalog import connect as catalog_connect
 from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
 from brain.models import EMBEDDING_BATCH_PARITY_TOLERANCE, RERANKER_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
-from brain.models import _open_model_download, _reranker_parity_indices, autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, managed_runtime_loopback_status, model_download_ssl_context, runtime_for_pack, validate_manifest, verify_pack
+from brain.models import _open_model_download, _rerank_batched, _reranker_parity_indices, _reranker_tuning, autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, managed_runtime_loopback_status, model_download_ssl_context, runtime_for_pack, validate_manifest, verify_pack
 from brain.semantic import ATLAS_CARD_VERSION, CARD_VERSION, CHUNK_SCHEMA_VERSION, Chunk, SEMANTIC_CARD_CODE_CHARS, SEMANTIC_EMBEDDING_INPUT_VERSION, SEMANTIC_SHARD_MANIFEST_VERSION, _bounded_embedding_batches, _excluded, _injected_pack_identity, _shard_sha256, build_semantic_index, chunk_source, search_semantic
 from brain.ops import dashboard_status, freshness, gc, model_operation, model_status, refresh_brain
 from brain.platforms import native_command, platform_id
@@ -2134,7 +2134,11 @@ path = "batch-service"
         pools = [case(f"candidate-pool-{size}", ["verified code implementation", *[f"unrelated {index}" for index in range(1, size)]]) for size in (10, 20, 40, 80)]
         suite_path = pack / "conformance.json"
         suite_path.write_text(json.dumps({
-            "requirements": {"long_input_min_chars": 4096, "reranker_candidate_pools": [10, 20, 40, 80]},
+            "requirements": {
+                "long_input_min_chars": 4096,
+                "reranker_candidate_pools": [10, 20, 40, 80],
+                "reranker_physical_batch_size": 10,
+            },
             "reranker": [case("long-public-input", [long_document, "unrelated note"], truncate=4096)],
             "reranker_candidate_pools": pools,
         }), encoding="utf-8")
@@ -2145,6 +2149,7 @@ path = "batch-service"
             "runtime_name": "llama.cpp", "runtime_revision": "pinned", "minimum_brain_version": "0.6.3",
             "runtime_compatibility": dict(zip(("os", "architecture"), platform_id().split("-", 1), strict=True)),
             "runtime_binary": "llama-server", "model_file": "model.gguf", "embedding_dimension": 0,
+            "reranker_batch_size": 10, "reranker_candidate_pool": 20,
             "weight_format": "GGUF", "quantization": "Q6_K", "weight_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
             "tokenizer_file": "tokenizer.json", "tokenizer_sha256": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "pooling": "rank", "normalization": "none",
             "query_instruction_version": "qwen3-reranker-v1", "document_card_version": "1", "chunk_schema_version": "1", "converter_revision": "llama.cpp@pinned",
@@ -2159,7 +2164,7 @@ path = "batch-service"
         self.assertTrue(verified["conformance"]["passed"])
         self.assertEqual(1e-3, RERANKER_BATCH_PARITY_TOLERANCE)
         self.assertEqual(5, len(verified["conformance"]["cases"]))
-        self.assertEqual(19, rerank.call_count)
+        self.assertEqual(30, rerank.call_count)
 
     def test_reranker_batch_single_parity_sampling_is_bounded_and_canonical(self) -> None:
         self.assertEqual(list(range(10)), _reranker_parity_indices(None, count=10, expected_top=0, case=1))
@@ -2167,6 +2172,15 @@ path = "batch-service"
         self.assertEqual([0, 4, 5, 9], _reranker_parity_indices([0, 4, 5, 9], count=10, expected_top=4, case=1))
         with self.assertRaisesRegex(ValueError, "batch_single_parity_indices"):
             _reranker_parity_indices([0, 9], count=10, expected_top=0, case=1)
+
+    def test_reranker_pack_defaults_bound_physical_batches_before_autotuning(self) -> None:
+        runtime = DeterministicRuntime()
+        manifest = {"reranker_batch_size": 10, "reranker_candidate_pool": 20}
+        self.assertEqual((10, 20), _reranker_tuning(self.settings, "windows-reranker", manifest))
+        documents = [f"document {index}" for index in range(25)]
+        with mock.patch.object(runtime, "rerank", wraps=runtime.rerank) as rerank:
+            self.assertEqual(25, len(_rerank_batched(runtime, "query", documents, 10)))
+        self.assertEqual([10, 10, 5], [len(call.args[1]) for call in rerank.call_args_list])
 
     def test_remote_pack_install_requires_pinned_approved_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "not approved"):
@@ -4513,6 +4527,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         builder = (root / "scripts/build_precision_pack.py").read_text(encoding="utf-8")
         self.assertIn('RERANK_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"', builder)
         self.assertIn('"reranker_candidate_pools": [10, 20, 40, 80]', builder)
+        self.assertIn('"reranker_physical_batch_size": RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE', builder)
         self.assertIn("RERANKER_BATCH_PARITY_TOLERANCE = 1e-3", builder)
         self.assertIn('"batch_single_max_delta": parity', builder)
         self.assertIn('"batch_single_parity_indices": _parity_indices', builder)

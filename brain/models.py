@@ -450,17 +450,41 @@ def embedding_batch_size(settings: Settings, pack_id: str, default: int = DEFAUL
         return default
 
 
-def _reranker_tuning(settings: Settings, pack_id: str) -> tuple[int, int]:
+def _reranker_tuning(settings: Settings, pack_id: str, manifest: dict[str, Any] | None = None) -> tuple[int, int]:
     recommendations = _model_tuning(settings, pack_id).get("recommendations", {})
+    manifest = manifest or {}
     try:
-        batch_size = max(1, min(int(recommendations.get("reranker_batch_size", DEFAULT_RERANK_POOL)), MAX_RERANK_POOL))
+        default_batch = max(1, min(int(manifest.get("reranker_batch_size", DEFAULT_RERANK_POOL)), MAX_RERANK_POOL))
     except (TypeError, ValueError):
-        batch_size = DEFAULT_RERANK_POOL
+        default_batch = DEFAULT_RERANK_POOL
     try:
-        candidate_pool = max(1, min(int(recommendations.get("reranker_candidate_pool", DEFAULT_RERANK_POOL)), MAX_RERANK_POOL))
+        default_pool = max(1, min(int(manifest.get("reranker_candidate_pool", DEFAULT_RERANK_POOL)), MAX_RERANK_POOL))
     except (TypeError, ValueError):
-        candidate_pool = DEFAULT_RERANK_POOL
+        default_pool = DEFAULT_RERANK_POOL
+    try:
+        batch_size = max(1, min(int(recommendations.get("reranker_batch_size", default_batch)), MAX_RERANK_POOL))
+    except (TypeError, ValueError):
+        batch_size = default_batch
+    try:
+        candidate_pool = max(1, min(int(recommendations.get("reranker_candidate_pool", default_pool)), MAX_RERANK_POOL))
+    except (TypeError, ValueError):
+        candidate_pool = default_pool
     return batch_size, candidate_pool
+
+
+def _rerank_batched(
+    runtime: ModelRuntime,
+    query: str,
+    documents: list[str],
+    batch_size: int,
+    instruction: str = "",
+) -> list[float]:
+    size = max(1, min(int(batch_size), MAX_RERANK_POOL))
+    return [
+        score
+        for start in range(0, len(documents), size)
+        for score in runtime.rerank(query, documents[start:start + size], instruction)
+    ]
 
 
 def _safe_pack_id(value: str) -> str:
@@ -527,6 +551,13 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("model pack manifest is missing: " + ", ".join(missing))
     if manifest["capability"] not in {"embedding", "reranker", "test"}:
         raise ValueError("model pack capability must be embedding, reranker, or test")
+    if manifest["capability"] == "reranker":
+        for field in ("reranker_batch_size", "reranker_candidate_pool"):
+            value = manifest.get(field)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_RERANK_POOL
+            ):
+                raise ValueError(f"{field} must be between 1 and {MAX_RERANK_POOL}")
     _safe_pack_id(str(manifest["pack_id"]))
     if str(manifest["runtime_name"]) not in {"llama.cpp", "deterministic-test"}:
         raise ValueError("runtime_name must be a pinned local runtime")
@@ -770,6 +801,7 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
         raise ValueError("production golden_suite requires requirements.long_input_min_chars")
     candidate_pool_sizes: list[int] = []
     candidate_pool_cases: list[dict[str, Any]] = []
+    reranker_physical_batch_size: int | None = None
     if capability == "reranker" and strict:
         raw_sizes = requirements.get("reranker_candidate_pools")
         if not isinstance(raw_sizes, list) or not raw_sizes:
@@ -794,6 +826,14 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
         if set(by_size) != set(candidate_pool_sizes):
             raise ValueError("production reranker candidate-pool cases do not match required pool sizes")
         candidate_pool_cases = [by_size[size] for size in candidate_pool_sizes]
+        raw_batch_size = requirements.get("reranker_physical_batch_size")
+        if raw_batch_size is not None and (
+            isinstance(raw_batch_size, bool)
+            or not isinstance(raw_batch_size, int)
+            or not 2 <= raw_batch_size <= MAX_RERANK_POOL
+        ):
+            raise ValueError("production reranker golden_suite has invalid requirements.reranker_physical_batch_size")
+        reranker_physical_batch_size = raw_batch_size
     observed_input_chars = 0
     ranking_exercised = False
     runtime = runtime_for_pack(manifest)
@@ -857,7 +897,10 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
                 if truncate_to_chars is not None and (not isinstance(truncate_to_chars, int) or truncate_to_chars < 1):
                     raise ValueError(f"golden_suite reranker case {number} has invalid truncate_to_chars")
                 runtime_documents = [document[:truncate_to_chars] for document in documents] if truncate_to_chars is not None else documents
-                scores = runtime.rerank(query, runtime_documents)
+                scores = _rerank_batched(
+                    runtime, query, runtime_documents,
+                    reranker_physical_batch_size or len(runtime_documents),
+                )
                 if len(scores) != len(documents) or any(not math.isfinite(float(score)) for score in scores):
                     raise ValueError(f"reranker conformance failed at case {number}")
                 parity_indices = _reranker_parity_indices(
@@ -1687,6 +1730,7 @@ def rerank_candidates(
         trace.add_stage("model_lane_wait_ms", (time.perf_counter() - lane_started) * 1000)
     owns_runtime = runtime is None
     pack_id = ""
+    manifest: dict[str, Any] | None = None
     try:
         if runtime is None:
             manifest = active_pack(settings, "reranker")
@@ -1697,7 +1741,7 @@ def rerank_candidates(
             runtime = runtime_for_pack(manifest)
             if trace is not None:
                 trace.add_stage("reranker_runtime_start_ms", (time.perf_counter() - runtime_started) * 1000)
-        batch_size, recommended_pool = _reranker_tuning(settings, pack_id) if pack_id else (DEFAULT_RERANK_POOL, DEFAULT_RERANK_POOL)
+        batch_size, recommended_pool = _reranker_tuning(settings, pack_id, manifest) if pack_id else (DEFAULT_RERANK_POOL, DEFAULT_RERANK_POOL)
         limit = max(1, min(limit, recommended_pool, MAX_RERANK_POOL))
         protected = ["requested" in str(hit.kind).lower() or "definition" in str(hit.kind).lower() for hit in hits]
         positions: list[int] = []
@@ -1718,11 +1762,7 @@ def rerank_candidates(
         # a pack becomes usable.  Splitting a calibrated shortlist is therefore
         # a memory bound, not a change to its relevance semantics.
         inference_started = time.perf_counter()
-        scores = [
-            score
-            for start in range(0, len(documents), batch_size)
-            for score in runtime.rerank(query, documents[start:start + batch_size])
-        ]
+        scores = _rerank_batched(runtime, query, documents, batch_size)
         if trace is not None:
             trace.add_stage("reranker_inference_ms", (time.perf_counter() - inference_started) * 1000)
         if len(scores) != len(positions) or any(not math.isfinite(float(score)) for score in scores):
@@ -1817,9 +1857,20 @@ def benchmark_pack(settings: Settings, pack_id: str, *, samples: int = DEFAULT_B
             }
             filename = "MODEL_BAKEOFF_REPORT.md"
         else:
-            scores = runtime.rerank("verified code evidence", ["verified code evidence", "unrelated deployment note"])
+            batch_size, _ = _reranker_tuning(settings, pack_id, manifest)
+            scores = _rerank_batched(
+                runtime, "verified code evidence",
+                ["verified code evidence", "unrelated deployment note"], batch_size,
+            )
             pools = {
-                str(size): _measure(lambda count=size: runtime.rerank("Why did eligibility stop recalculating after a jurisdiction change?", _synthetic_cards(count)), samples)
+                str(size): _measure(
+                    lambda count=size: _rerank_batched(
+                        runtime,
+                        "Why did eligibility stop recalculating after a jurisdiction change?",
+                        _synthetic_cards(count), batch_size,
+                    ),
+                    samples,
+                )
                 for size in (10, 20, 40, 80)
             }
             report = {

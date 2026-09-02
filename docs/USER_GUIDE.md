@@ -497,7 +497,10 @@ Qwen Transformers reranker and the local Q6_K runtime for order, bounded score
 delta, batch/single parity within a `0.001` absolute native-runtime tolerance,
 using deterministic top/midpoint/endpoint samples, multilingual/code cases,
 long truncation, and full-batch/reference checks for 10/20/40/80 candidate
-pools. It makes no M3 Pro or private-corpus performance claim.
+pools using physical requests of at most 10 documents. It makes no M3 Pro or
+private-corpus performance claim. Portable Windows packs start conservatively
+at 10 documents per physical request and a 20-candidate shortlist until local
+autotuning records a machine-specific recommendation.
 
 The reference-vector arrays must have the declared dimension; real pack vectors
 use the selected embedding dimension. A

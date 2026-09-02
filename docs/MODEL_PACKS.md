@@ -178,13 +178,18 @@ reference and local runtime have the same input contract. It records official
 reference scores, requires the same ranking order from Q6_K within a bounded
 probability delta, and checks batch/single parity with an absolute tolerance of
 `0.001` for native floating-point reduction differences. Every candidate is
-checked in the bounded batch against the official reference; batch/single
-parity uses deterministic top, midpoint, and endpoint samples so 80-item pools
-do not require 80 redundant model passes. The suite covers positive and
-negative pairs, multilingual and code-oriented pairs, long/truncated input,
-finite non-empty scores, and 10/20/40/80 candidate pools.
+checked in deterministic physical batches of at most 10 against the official
+reference; batch/single parity uses deterministic top, midpoint, and endpoint
+samples so 80-item pools do not require 80 redundant model passes. The suite
+covers positive and negative pairs, multilingual and code-oriented pairs,
+long/truncated input, finite non-empty scores, and 10/20/40/80 candidate pools.
 
 `brain model verify PACK` checks declared files then runs the suite through the exact local runtime. `brain model benchmark PACK` adds public synthetic embedding batch throughput or 10/20/40/80 candidate-pool latency. Neither is a private-repository Recall/MRR claim. `brain model autotune PACK` stores the result and conservative batch/pool recommendation only under private Brain state; it does not publish model or source data.
+
+Portable Windows Precision packs declare conservative pre-autotune defaults of
+10 documents per physical request and a 20-candidate shortlist. Verification,
+benchmarking, and production reranking share that physical bound; local
+autotuning may lower or raise it within the global 80-candidate ceiling.
 
 ## Controlled installation
 

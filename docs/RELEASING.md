@@ -110,8 +110,9 @@ local Q6_K runtime. It checks ranking order, bounded score delta, multilingual
 and code pairs, long/truncated input, finite scores, batch/single parity within
 the shared `0.001` absolute native-runtime tolerance on deterministic top,
 midpoint, and endpoint samples, and full-batch/reference checks for 10/20/40/80
-candidate pools. It then performs a clean temporary local-pack installation,
-verification, and public synthetic benchmark. The release asset
+candidate pools using bounded physical requests of at most 10 documents. It
+then performs a clean temporary local-pack installation, verification, and
+public synthetic benchmark. The release asset
 descriptor is only added to the Core catalog in a later Core tag after a fresh
 downloaded-release installation verifies the descriptor, parts, assembled GGUF,
 provenance, and runtime conformance.

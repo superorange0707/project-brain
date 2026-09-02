@@ -40,6 +40,7 @@ RERANK_INSTRUCTION = "Given a web search query, retrieve relevant passages that 
 RERANK_INPUT_CONTRACT_VERSION = "qwen3-reranker-web-search-v1"
 RERANK_CONTEXT_TOKENS = 4096
 RERANK_PHYSICAL_BATCH_TOKENS = RERANK_CONTEXT_TOKENS
+RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE = 10
 # Native llama.cpp backends differ slightly in floating-point reduction order
 # (Windows CPU measured 0.00037145). This bounded absolute tolerance remains
 # independent of exact ranking and official-reference score checks.
@@ -231,7 +232,14 @@ def _golden_case(case: dict[str, object], reference_scores: dict[str, list[float
 
 def _assert_case(endpoint: str, key: str, case: dict[str, object]) -> float:
     documents = runtime_documents(case)
-    scores = _post(endpoint, key, str(case["query"]), documents)
+    scores = [
+        score
+        for start in range(0, len(documents), RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE)
+        for score in _post(
+            endpoint, key, str(case["query"]),
+            documents[start:start + RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE],
+        )
+    ]
     expected_top = int(case["expected_top_index"])
     parity_indices = [int(index) for index in case["batch_single_parity_indices"]]
     individual = {
@@ -299,7 +307,11 @@ def conformance(runtime: Path, model: Path, reference: Path, output: Path) -> No
                 "runtime": "pinned local llama.cpp server",
                 "public_synthetic_only": True,
             },
-            "requirements": {"long_input_min_chars": 4096, "reranker_candidate_pools": [10, 20, 40, 80]},
+            "requirements": {
+                "long_input_min_chars": 4096,
+                "reranker_candidate_pools": [10, 20, 40, 80],
+                "reranker_physical_batch_size": RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE,
+            },
             "reranker": standard,
             "reranker_candidate_pools": pools,
         }
@@ -439,6 +451,9 @@ def main() -> int:
         "runtime_binary": RUNTIME_FILE,
         "model_file": MODEL_FILE,
         "runtime_args": ["--ctx-size", str(RERANK_CONTEXT_TOKENS), "-ub", str(RERANK_PHYSICAL_BATCH_TOKENS)],
+        "request_timeout_seconds": 120 if runtime_os == "windows" else 30,
+        "reranker_batch_size": 10 if runtime_os == "windows" else 40,
+        "reranker_candidate_pool": 20 if runtime_os == "windows" else 40,
         "pooling": "rank",
         "normalization": "none",
         "query_instruction": RERANK_INSTRUCTION,
