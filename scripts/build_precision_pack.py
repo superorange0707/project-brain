@@ -144,15 +144,20 @@ def candidate_pool_cases() -> list[dict[str, object]]:
     return cases
 
 
-def _post(endpoint: str, key: str, query: str, documents: list[str]) -> list[float]:
+def _post(endpoint: str, key: str, query: str, documents: list[str], *, label: str) -> list[float]:
     request = Request(
         endpoint + "/rerank",
         data=json.dumps({"query": query, "documents": documents}).encode("utf-8"),
         method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
     )
-    with urlopen(request, timeout=RERANK_REQUEST_TIMEOUT_SECONDS) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=RERANK_REQUEST_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except TimeoutError as error:
+        raise RuntimeError(
+            f"rerank request {label} timed out after {RERANK_REQUEST_TIMEOUT_SECONDS} seconds"
+        ) from error
     rows = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         raise RuntimeError("llama.cpp did not return a rerank response")
@@ -233,18 +238,24 @@ def _golden_case(case: dict[str, object], reference_scores: dict[str, list[float
 
 def _assert_case(endpoint: str, key: str, case: dict[str, object]) -> float:
     documents = runtime_documents(case)
+    case_id = str(case["id"])
+    print(f"running Precision conformance case {case_id}", flush=True)
     scores = [
         score
         for start in range(0, len(documents), RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE)
         for score in _post(
             endpoint, key, str(case["query"]),
             documents[start:start + RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE],
+            label=f"{case_id}:batch:{start}",
         )
     ]
     expected_top = int(case["expected_top_index"])
     parity_indices = [int(index) for index in case["batch_single_parity_indices"]]
     individual = {
-        index: _post(endpoint, key, str(case["query"]), [documents[index]])[0]
+        index: _post(
+            endpoint, key, str(case["query"]), [documents[index]],
+            label=f"{case_id}:single:{index}",
+        )[0]
         for index in parity_indices
     }
     reference = [float(score) for score in case["reference_scores"]]
@@ -322,6 +333,8 @@ def conformance(runtime: Path, model: Path, reference: Path, output: Path) -> No
         terminate_process_tree(process, graceful_timeout=10)
         if succeeded:
             log.unlink(missing_ok=True)
+        elif log.exists():
+            print(log.read_text(encoding="utf-8", errors="replace")[-6000:], file=sys.stderr)
 
 
 def deterministic_tar(source: Path, names: list[str], target: Path) -> None:
