@@ -177,7 +177,7 @@ query, retrieve relevant passages that answer the query`, so the official
 reference and local runtime have the same input contract. It records official
 reference scores, requires the same ranking order from Q6_K within a bounded
 probability delta, and checks batch/single parity with an absolute tolerance of
-`0.001` for native floating-point reduction differences. Every candidate is
+`0.002` for native floating-point reduction differences. Every candidate is
 checked in deterministic physical batches of at most 10 against the official
 reference; batch/single parity uses deterministic top, midpoint, and endpoint
 samples so 80-item pools do not require 80 redundant model passes. The suite

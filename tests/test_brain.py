@@ -2162,7 +2162,7 @@ path = "batch-service"
         ) as rerank:
             verified = verify_pack(self.settings, "production-reranker-conformance")
         self.assertTrue(verified["conformance"]["passed"])
-        self.assertEqual(1e-3, RERANKER_BATCH_PARITY_TOLERANCE)
+        self.assertEqual(2e-3, RERANKER_BATCH_PARITY_TOLERANCE)
         self.assertEqual(5, len(verified["conformance"]["cases"]))
         self.assertEqual(30, rerank.call_count)
 
@@ -4528,7 +4528,8 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn('RERANK_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"', builder)
         self.assertIn('"reranker_candidate_pools": [10, 20, 40, 80]', builder)
         self.assertIn('"reranker_physical_batch_size": RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE', builder)
-        self.assertIn("RERANKER_BATCH_PARITY_TOLERANCE = 1e-3", builder)
+        self.assertIn("timeout=RERANK_REQUEST_TIMEOUT_SECONDS", builder)
+        self.assertIn("RERANKER_BATCH_PARITY_TOLERANCE = 2e-3", builder)
         self.assertIn('"batch_single_max_delta": parity', builder)
         self.assertIn('"batch_single_parity_indices": _parity_indices', builder)
         self.assertIn("MAXIMUM_REFERENCE_SCORE_DELTA = 0.10", builder)

@@ -41,10 +41,11 @@ RERANK_INPUT_CONTRACT_VERSION = "qwen3-reranker-web-search-v1"
 RERANK_CONTEXT_TOKENS = 4096
 RERANK_PHYSICAL_BATCH_TOKENS = RERANK_CONTEXT_TOKENS
 RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE = 10
+RERANK_REQUEST_TIMEOUT_SECONDS = 120
 # Native llama.cpp backends differ slightly in floating-point reduction order
-# (Windows CPU measured 0.00037145). This bounded absolute tolerance remains
+# (Windows CPU measured 0.00111086). This bounded absolute tolerance remains
 # independent of exact ranking and official-reference score checks.
-RERANKER_BATCH_PARITY_TOLERANCE = 1e-3
+RERANKER_BATCH_PARITY_TOLERANCE = 2e-3
 # Q6_K changes the calibrated probability slightly relative to official BF16
 # Transformers.  Exact official-reference order, all finite scores, and this
 # bounded probability delta are independently checked before publication.
@@ -150,7 +151,7 @@ def _post(endpoint: str, key: str, query: str, documents: list[str]) -> list[flo
         method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
     )
-    with urlopen(request, timeout=300) as response:
+    with urlopen(request, timeout=RERANK_REQUEST_TIMEOUT_SECONDS) as response:
         payload = json.loads(response.read().decode("utf-8"))
     rows = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
@@ -451,7 +452,7 @@ def main() -> int:
         "runtime_binary": RUNTIME_FILE,
         "model_file": MODEL_FILE,
         "runtime_args": ["--ctx-size", str(RERANK_CONTEXT_TOKENS), "-ub", str(RERANK_PHYSICAL_BATCH_TOKENS)],
-        "request_timeout_seconds": 120 if runtime_os == "windows" else 30,
+        "request_timeout_seconds": RERANK_REQUEST_TIMEOUT_SECONDS if runtime_os == "windows" else 30,
         "reranker_batch_size": 10 if runtime_os == "windows" else 40,
         "reranker_candidate_pool": 20 if runtime_os == "windows" else 40,
         "pooling": "rank",

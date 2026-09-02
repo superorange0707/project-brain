@@ -494,7 +494,7 @@ brain edition set precision
 
 The Precision golden suite is public/synthetic only. It compares the official
 Qwen Transformers reranker and the local Q6_K runtime for order, bounded score
-delta, batch/single parity within a `0.001` absolute native-runtime tolerance,
+delta, batch/single parity within a `0.002` absolute native-runtime tolerance,
 using deterministic top/midpoint/endpoint samples, multilingual/code cases,
 long truncation, and full-batch/reference checks for 10/20/40/80 candidate
 pools using physical requests of at most 10 documents. It makes no M3 Pro or
