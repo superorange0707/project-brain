@@ -736,6 +736,19 @@ def _reference_scores(value: object, *, count: int, case: int) -> list[float]:
     return scores
 
 
+def _reranker_parity_indices(value: object, *, count: int, expected_top: int, case: int) -> list[int]:
+    """Select bounded, deterministic batch/single probes for large pools."""
+    if value is None:  # Preserve conformance behavior for already-published packs.
+        return list(range(count))
+    if not isinstance(value, list) or not value or any(type(index) is not int for index in value):
+        raise ValueError(f"golden_suite reranker case {case} has invalid batch_single_parity_indices")
+    indices = [int(index) for index in value]
+    expected = sorted({0, count // 2, count - 1, expected_top})
+    if indices != expected:
+        raise ValueError(f"golden_suite reranker case {case} has invalid batch_single_parity_indices")
+    return indices
+
+
 def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
     loaded = _model_suite(manifest)
     if loaded is None:
@@ -845,7 +858,13 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
                     raise ValueError(f"golden_suite reranker case {number} has invalid truncate_to_chars")
                 runtime_documents = [document[:truncate_to_chars] for document in documents] if truncate_to_chars is not None else documents
                 scores = runtime.rerank(query, runtime_documents)
-                single_scores = [runtime.rerank(query, [document])[0] for document in runtime_documents]
+                if len(scores) != len(documents) or any(not math.isfinite(float(score)) for score in scores):
+                    raise ValueError(f"reranker conformance failed at case {number}")
+                parity_indices = _reranker_parity_indices(
+                    case.get("batch_single_parity_indices"),
+                    count=len(documents), expected_top=expected_top, case=number,
+                )
+                single_scores = [runtime.rerank(query, [runtime_documents[index]])[0] for index in parity_indices]
                 order = sorted(range(len(scores)), key=lambda index: (-float(scores[index]), index))
                 references = case.get("reference_scores")
                 if strict and references is None:
@@ -863,7 +882,8 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
                     reference_order = sorted(range(len(reference_scores)), key=lambda index: (-reference_scores[index], index))
                     if reference_order[0] != expected_top:
                         raise ValueError(f"reranker official-reference top-result conformance failed at case {number}")
-                if len(scores) != len(documents) or not _same_vectors([[float(score)] for score in scores], [[float(score)] for score in single_scores], tolerance=RERANKER_BATCH_PARITY_TOLERANCE) or any(not math.isfinite(float(score)) for score in scores) or order[0] != expected_top:
+                parity_scores = [scores[index] for index in parity_indices]
+                if not _same_vectors([[float(score)] for score in parity_scores], [[float(score)] for score in single_scores], tolerance=RERANKER_BATCH_PARITY_TOLERANCE) or order[0] != expected_top:
                     raise ValueError(f"reranker conformance failed at case {number}")
                 ranking_exercised = ranking_exercised or len(documents) > 1
                 observed_input_chars = max(observed_input_chars, len(query), *(len(document) for document in documents))

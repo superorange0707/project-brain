@@ -172,6 +172,11 @@ def _order(scores: list[float]) -> list[int]:
     return sorted(range(len(scores)), key=lambda index: (-scores[index], index))
 
 
+def _parity_indices(count: int, expected_top: int) -> list[int]:
+    """Bound single-item parity calls while sampling rank and pool extremes."""
+    return sorted({0, count // 2, count - 1, expected_top})
+
+
 def _reference_cases(reference: Path) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
     try:
         raw = json.loads(reference.read_text(encoding="utf-8"))
@@ -217,6 +222,7 @@ def _golden_case(case: dict[str, object], reference_scores: dict[str, list[float
         "expected_order": expected,
         "reference_scores": scores,
         "maximum_score_delta": MAXIMUM_REFERENCE_SCORE_DELTA,
+        "batch_single_parity_indices": _parity_indices(len(documents), int(case["expected_top_index"])),
     }
     if "truncate_to_chars" in case:
         result["truncate_to_chars"] = int(case["truncate_to_chars"])
@@ -226,13 +232,17 @@ def _golden_case(case: dict[str, object], reference_scores: dict[str, list[float
 def _assert_case(endpoint: str, key: str, case: dict[str, object]) -> float:
     documents = runtime_documents(case)
     scores = _post(endpoint, key, str(case["query"]), documents)
-    individual = [_post(endpoint, key, str(case["query"]), [document])[0] for document in documents]
     expected_top = int(case["expected_top_index"])
+    parity_indices = [int(index) for index in case["batch_single_parity_indices"]]
+    individual = {
+        index: _post(endpoint, key, str(case["query"]), [documents[index]])[0]
+        for index in parity_indices
+    }
     reference = [float(score) for score in case["reference_scores"]]
     maximum_delta = float(case["maximum_score_delta"])
     if _order(scores)[0] != expected_top:
         raise RuntimeError(f"local Q6_K did not rank the labelled positive first for {case['id']}")
-    parity_deltas = [abs(left - right) for left, right in zip(scores, individual, strict=True)]
+    parity_deltas = [abs(scores[index] - individual[index]) for index in parity_indices]
     if any(abs(left - right) > maximum_delta for left, right in zip(scores, reference, strict=True)):
         raise RuntimeError(f"local Q6_K score delta exceeds official-reference threshold for {case['id']}")
     return max(parity_deltas)

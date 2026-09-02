@@ -78,7 +78,7 @@ from brain.catalog import connect as catalog_connect
 from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
 from brain.models import EMBEDDING_BATCH_PARITY_TOLERANCE, RERANKER_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
-from brain.models import _open_model_download, autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, managed_runtime_loopback_status, model_download_ssl_context, runtime_for_pack, validate_manifest, verify_pack
+from brain.models import _open_model_download, _reranker_parity_indices, autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, managed_runtime_loopback_status, model_download_ssl_context, runtime_for_pack, validate_manifest, verify_pack
 from brain.semantic import ATLAS_CARD_VERSION, CARD_VERSION, CHUNK_SCHEMA_VERSION, Chunk, SEMANTIC_CARD_CODE_CHARS, SEMANTIC_EMBEDDING_INPUT_VERSION, SEMANTIC_SHARD_MANIFEST_VERSION, _bounded_embedding_batches, _excluded, _injected_pack_identity, _shard_sha256, build_semantic_index, chunk_source, search_semantic
 from brain.ops import dashboard_status, freshness, gc, model_operation, model_status, refresh_brain
 from brain.platforms import native_command, platform_id
@@ -2125,6 +2125,7 @@ path = "batch-service"
                 "id": case_id, "query": query, "documents": documents,
                 "expected_order": sorted(range(len(documents)), key=lambda index: (-scores[index], index)),
                 "reference_scores": scores, "maximum_score_delta": 0.0,
+                "batch_single_parity_indices": sorted({0, len(documents) // 2, len(documents) - 1}),
             }
             if truncate:
                 payload["truncate_to_chars"] = truncate
@@ -2151,11 +2152,21 @@ path = "batch-service"
             "artifacts": {"llama-server": hashlib.sha256(binary.read_bytes()).hexdigest(), "model.gguf": hashlib.sha256(model.read_bytes()).hexdigest(), "tokenizer.json": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "conformance.json": digest},
         }), encoding="utf-8")
         install_pack(self.settings, pack)
-        with mock.patch("brain.models.runtime_for_pack", return_value=runtime):
+        with mock.patch("brain.models.runtime_for_pack", return_value=runtime), mock.patch.object(
+            runtime, "rerank", wraps=runtime.rerank,
+        ) as rerank:
             verified = verify_pack(self.settings, "production-reranker-conformance")
         self.assertTrue(verified["conformance"]["passed"])
         self.assertEqual(1e-3, RERANKER_BATCH_PARITY_TOLERANCE)
         self.assertEqual(5, len(verified["conformance"]["cases"]))
+        self.assertEqual(19, rerank.call_count)
+
+    def test_reranker_batch_single_parity_sampling_is_bounded_and_canonical(self) -> None:
+        self.assertEqual(list(range(10)), _reranker_parity_indices(None, count=10, expected_top=0, case=1))
+        self.assertEqual([0, 5, 9], _reranker_parity_indices([0, 5, 9], count=10, expected_top=0, case=1))
+        self.assertEqual([0, 4, 5, 9], _reranker_parity_indices([0, 4, 5, 9], count=10, expected_top=4, case=1))
+        with self.assertRaisesRegex(ValueError, "batch_single_parity_indices"):
+            _reranker_parity_indices([0, 9], count=10, expected_top=0, case=1)
 
     def test_remote_pack_install_requires_pinned_approved_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "not approved"):
@@ -4504,6 +4515,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn('"reranker_candidate_pools": [10, 20, 40, 80]', builder)
         self.assertIn("RERANKER_BATCH_PARITY_TOLERANCE = 1e-3", builder)
         self.assertIn('"batch_single_max_delta": parity', builder)
+        self.assertIn('"batch_single_parity_indices": _parity_indices', builder)
         self.assertIn("MAXIMUM_REFERENCE_SCORE_DELTA = 0.10", builder)
         self.assertIn("RERANK_PHYSICAL_BATCH_TOKENS = RERANK_CONTEXT_TOKENS", builder)
         self.assertIn('"-ub", str(RERANK_PHYSICAL_BATCH_TOKENS)', builder)
