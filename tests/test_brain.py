@@ -4503,6 +4503,7 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn('RERANK_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"', builder)
         self.assertIn('"reranker_candidate_pools": [10, 20, 40, 80]', builder)
         self.assertIn("RERANKER_BATCH_PARITY_TOLERANCE = 1e-3", builder)
+        self.assertIn('"batch_single_max_delta": parity', builder)
         self.assertIn("MAXIMUM_REFERENCE_SCORE_DELTA = 0.10", builder)
         self.assertIn("RERANK_PHYSICAL_BATCH_TOKENS = RERANK_CONTEXT_TOKENS", builder)
         self.assertIn('"-ub", str(RERANK_PHYSICAL_BATCH_TOKENS)', builder)

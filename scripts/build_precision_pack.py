@@ -223,7 +223,7 @@ def _golden_case(case: dict[str, object], reference_scores: dict[str, list[float
     return result
 
 
-def _assert_case(endpoint: str, key: str, case: dict[str, object]) -> None:
+def _assert_case(endpoint: str, key: str, case: dict[str, object]) -> float:
     documents = runtime_documents(case)
     scores = _post(endpoint, key, str(case["query"]), documents)
     individual = [_post(endpoint, key, str(case["query"]), [document])[0] for document in documents]
@@ -233,13 +233,9 @@ def _assert_case(endpoint: str, key: str, case: dict[str, object]) -> None:
     if _order(scores)[0] != expected_top:
         raise RuntimeError(f"local Q6_K did not rank the labelled positive first for {case['id']}")
     parity_deltas = [abs(left - right) for left, right in zip(scores, individual, strict=True)]
-    if any(delta > RERANKER_BATCH_PARITY_TOLERANCE for delta in parity_deltas):
-        raise RuntimeError(
-            f"local Q6_K batch/single rerank parity failed for {case['id']}: "
-            f"max_delta={max(parity_deltas):.9g}, batch={scores}, single={individual}"
-        )
     if any(abs(left - right) > maximum_delta for left, right in zip(scores, reference, strict=True)):
         raise RuntimeError(f"local Q6_K score delta exceeds official-reference threshold for {case['id']}")
+    return max(parity_deltas)
 
 
 def conformance(runtime: Path, model: Path, reference: Path, output: Path) -> None:
@@ -272,8 +268,21 @@ def conformance(runtime: Path, model: Path, reference: Path, output: Path) -> No
                 time.sleep(0.1)
         else:
             raise RuntimeError("llama.cpp did not become healthy during Precision pack conformance")
-        for case in [*standard, *pools]:
-            _assert_case(endpoint, key, case)
+        parity = {
+            str(case["id"]): _assert_case(endpoint, key, case)
+            for case in [*standard, *pools]
+        }
+        print(json.dumps({"batch_single_max_delta": parity}, sort_keys=True))
+        violations = {
+            case_id: delta
+            for case_id, delta in parity.items()
+            if delta > RERANKER_BATCH_PARITY_TOLERANCE
+        }
+        if violations:
+            raise RuntimeError(
+                "local Q6_K batch/single rerank parity failed: "
+                + json.dumps(violations, sort_keys=True)
+            )
         suite = {
             "producer": {
                 "reference": "official Qwen/Qwen3-Reranker-4B Transformers implementation",
