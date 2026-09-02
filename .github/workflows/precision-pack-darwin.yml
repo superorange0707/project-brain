@@ -20,7 +20,7 @@ jobs:
   build:
     name: Darwin arm64 Precision runtime compatibility pack
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v7
         with:

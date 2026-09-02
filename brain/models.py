@@ -68,6 +68,9 @@ DEFAULT_MODEL_LATENCY_BUDGET_MS = 3_000
 DEFAULT_RUNTIME_MAX_REQUESTS = 64
 DEFAULT_RUNTIME_REQUEST_TIMEOUT_SECONDS = 120.0
 DEFAULT_RUNTIME_STARTUP_TIMEOUT_SECONDS = 120.0
+# Full pack conformance may intentionally exercise inputs larger than online
+# retrieval cards. Keep that bounded allowance out of normal query runtimes.
+MAX_MODEL_VERIFICATION_REQUEST_TIMEOUT_SECONDS = 900.0
 SUPPORTED_NATIVE_PLATFORMS = {
     "darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-amd64",
 }
@@ -313,8 +316,9 @@ def _check_pack_integrity(manifest: dict[str, Any]) -> None:
 class ManagedLlamaCppRuntime:
     """A short-lived, pack-owned local llama.cpp server with no network route."""
 
-    def __init__(self, manifest: dict[str, Any]):
+    def __init__(self, manifest: dict[str, Any], *, verification: bool = False):
         self.manifest = manifest
+        self.verification = verification
         self.process: subprocess.Popen[bytes] | None = None
         self.client: LlamaCppRuntime | None = None
         self.request_count = 0
@@ -322,7 +326,8 @@ class ManagedLlamaCppRuntime:
     def _start(self) -> LlamaCppRuntime:
         try:
             max_requests = max(1, int(self.manifest.get("max_requests_per_runtime") or DEFAULT_RUNTIME_MAX_REQUESTS))
-            request_timeout_seconds = min(300.0, max(5.0, float(
+            timeout_ceiling = MAX_MODEL_VERIFICATION_REQUEST_TIMEOUT_SECONDS if self.verification else 300.0
+            request_timeout_seconds = min(timeout_ceiling, max(5.0, float(
                 self.manifest.get("request_timeout_seconds") or DEFAULT_RUNTIME_REQUEST_TIMEOUT_SECONDS
             )))
             startup_timeout_seconds = min(120.0, max(1.0, float(
@@ -601,6 +606,16 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
                 isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_RERANK_POOL
             ):
                 raise ValueError(f"{field} must be between 1 and {MAX_RERANK_POOL}")
+    verification_timeout = manifest.get("verification_request_timeout_seconds")
+    if verification_timeout is not None and (
+        isinstance(verification_timeout, bool)
+        or not isinstance(verification_timeout, (int, float))
+        or not 5 <= verification_timeout <= MAX_MODEL_VERIFICATION_REQUEST_TIMEOUT_SECONDS
+    ):
+        raise ValueError(
+            "verification_request_timeout_seconds must be between 5 and "
+            f"{int(MAX_MODEL_VERIFICATION_REQUEST_TIMEOUT_SECONDS)}"
+        )
     _safe_pack_id(str(manifest["pack_id"]))
     if str(manifest["runtime_name"]) not in {"llama.cpp", "deterministic-test"}:
         raise ValueError("runtime_name must be a pinned local runtime")
@@ -879,7 +894,13 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
         reranker_physical_batch_size = raw_batch_size
     observed_input_chars = 0
     ranking_exercised = False
-    runtime = runtime_for_pack(manifest)
+    verification_manifest = manifest
+    if manifest.get("verification_request_timeout_seconds") is not None:
+        verification_manifest = {
+            **manifest,
+            "request_timeout_seconds": manifest["verification_request_timeout_seconds"],
+        }
+    runtime = runtime_for_pack(verification_manifest, verification=True)
     passed: list[str] = []
     try:
         runtime.warmup()
@@ -1746,7 +1767,7 @@ def verify_pack(settings: Settings, pack_id: str) -> dict[str, Any]:
     return manifest
 
 
-def runtime_for_pack(manifest: dict[str, Any]) -> ModelRuntime:
+def runtime_for_pack(manifest: dict[str, Any], *, verification: bool = False) -> ModelRuntime:
     if manifest.get("runtime_name") == "deterministic-test":
         return DeterministicRuntime(int(manifest.get("embedding_dimension") or 64))
     if manifest.get("runtime_name") == "llama.cpp":
@@ -1758,7 +1779,7 @@ def runtime_for_pack(manifest: dict[str, Any]) -> ModelRuntime:
             if key_name and (not key_name.isidentifier() or not key_name.isupper()):
                 raise RuntimeError("runtime_api_key_env must be an uppercase environment-variable name")
             return LlamaCppRuntime(str(manifest["runtime_url"]), api_key=os.environ.get(key_name) if key_name else None)
-        return ManagedLlamaCppRuntime(manifest)
+        return ManagedLlamaCppRuntime(manifest, verification=verification)
     raise RuntimeError("unsupported local model runtime")
 
 

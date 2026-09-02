@@ -2150,6 +2150,7 @@ path = "batch-service"
             "runtime_compatibility": dict(zip(("os", "architecture"), platform_id().split("-", 1), strict=True)),
             "runtime_binary": "llama-server", "model_file": "model.gguf", "embedding_dimension": 0,
             "reranker_batch_size": 10, "reranker_candidate_pool": 20,
+            "verification_request_timeout_seconds": 900,
             "weight_format": "GGUF", "quantization": "Q6_K", "weight_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
             "tokenizer_file": "tokenizer.json", "tokenizer_sha256": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "pooling": "rank", "normalization": "none",
             "query_instruction_version": "qwen3-reranker-v1", "document_card_version": "1", "chunk_schema_version": "1", "converter_revision": "llama.cpp@pinned",
@@ -2157,7 +2158,7 @@ path = "batch-service"
             "artifacts": {"llama-server": hashlib.sha256(binary.read_bytes()).hexdigest(), "model.gguf": hashlib.sha256(model.read_bytes()).hexdigest(), "tokenizer.json": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "conformance.json": digest},
         }), encoding="utf-8")
         install_pack(self.settings, pack)
-        with mock.patch("brain.models.runtime_for_pack", return_value=runtime), mock.patch.object(
+        with mock.patch("brain.models.runtime_for_pack", return_value=runtime) as runtime_factory, mock.patch.object(
             runtime, "rerank", wraps=runtime.rerank,
         ) as rerank:
             verified = verify_pack(self.settings, "production-reranker-conformance")
@@ -2165,6 +2166,8 @@ path = "batch-service"
         self.assertEqual(2e-3, RERANKER_BATCH_PARITY_TOLERANCE)
         self.assertEqual(5, len(verified["conformance"]["cases"]))
         self.assertEqual(30, rerank.call_count)
+        self.assertEqual(900, runtime_factory.call_args.args[0]["request_timeout_seconds"])
+        self.assertTrue(runtime_factory.call_args.kwargs["verification"])
 
     def test_reranker_batch_single_parity_sampling_is_bounded_and_canonical(self) -> None:
         self.assertEqual(list(range(10)), _reranker_parity_indices(None, count=10, expected_top=0, case=1))
@@ -3098,6 +3101,8 @@ path = "batch-service"
             "test_only": True,
         }
         validate_manifest(manifest)
+        with self.assertRaisesRegex(ValueError, "verification_request_timeout_seconds"):
+            validate_manifest({**manifest, "verification_request_timeout_seconds": 901})
         runtime = runtime_for_pack(manifest)
         self.assertIsInstance(runtime, ManagedLlamaCppRuntime)
         process = mock.Mock()
@@ -4564,9 +4569,10 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn('RERANK_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"', builder)
         self.assertIn('"reranker_candidate_pools": [10, 20, 40, 80]', builder)
         self.assertIn('"reranker_physical_batch_size": RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE', builder)
-        self.assertIn("timeout=RERANK_REQUEST_TIMEOUT_SECONDS", builder)
+        self.assertIn("timeout=RERANK_CONFORMANCE_REQUEST_TIMEOUT_SECONDS", builder)
         self.assertIn("running Precision conformance case", builder)
-        self.assertIn("timed out after {RERANK_REQUEST_TIMEOUT_SECONDS} seconds", builder)
+        self.assertIn("timed out after {RERANK_CONFORMANCE_REQUEST_TIMEOUT_SECONDS} seconds", builder)
+        self.assertIn('"verification_request_timeout_seconds": RERANK_CONFORMANCE_REQUEST_TIMEOUT_SECONDS', builder)
         self.assertIn("log.read_text(encoding=\"utf-8\", errors=\"replace\")[-6000:]", builder)
         self.assertIn("RERANKER_BATCH_PARITY_TOLERANCE = 2e-3", builder)
         self.assertIn('"batch_single_max_delta": parity', builder)
@@ -4594,9 +4600,11 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("gh release create", workflow)
         self.assertIn("gh release download", workflow)
         self.assertIn("shasum -a 256 --check SHA256SUMS.txt", workflow)
+        self.assertIn("timeout-minutes: 300", workflow)
 
     def test_standalone_release_builds_source_pinned_zoekt(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("timeout-minutes: 180", workflow)
         self.assertIn('python-version: ["3.11", "3.12", "3.13", "3.14"]', workflow)
         self.assertIn(
             "needs: [compatibility, windows-compatibility, v1-release-readiness, build, standalone, standalone-windows, cross-platform-parity]",

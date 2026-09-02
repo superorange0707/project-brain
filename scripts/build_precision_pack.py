@@ -41,7 +41,9 @@ RERANK_INPUT_CONTRACT_VERSION = "qwen3-reranker-web-search-v1"
 RERANK_CONTEXT_TOKENS = 4096
 RERANK_PHYSICAL_BATCH_TOKENS = RERANK_CONTEXT_TOKENS
 RERANK_CONFORMANCE_DOCUMENT_BATCH_SIZE = 10
-RERANK_REQUEST_TIMEOUT_SECONDS = 120
+# GitHub's virtual Apple Silicon runner has no production Metal acceleration;
+# this applies only to complete pack conformance, never online Brain queries.
+RERANK_CONFORMANCE_REQUEST_TIMEOUT_SECONDS = 900
 # Native llama.cpp backends differ slightly in floating-point reduction order
 # (Windows CPU measured 0.00111086). This bounded absolute tolerance remains
 # independent of exact ranking and official-reference score checks.
@@ -152,11 +154,11 @@ def _post(endpoint: str, key: str, query: str, documents: list[str], *, label: s
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
     )
     try:
-        with urlopen(request, timeout=RERANK_REQUEST_TIMEOUT_SECONDS) as response:
+        with urlopen(request, timeout=RERANK_CONFORMANCE_REQUEST_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except TimeoutError as error:
         raise RuntimeError(
-            f"rerank request {label} timed out after {RERANK_REQUEST_TIMEOUT_SECONDS} seconds"
+            f"rerank request {label} timed out after {RERANK_CONFORMANCE_REQUEST_TIMEOUT_SECONDS} seconds"
         ) from error
     rows = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
@@ -465,7 +467,8 @@ def main() -> int:
         "runtime_binary": RUNTIME_FILE,
         "model_file": MODEL_FILE,
         "runtime_args": ["--ctx-size", str(RERANK_CONTEXT_TOKENS), "-ub", str(RERANK_PHYSICAL_BATCH_TOKENS)],
-        "request_timeout_seconds": RERANK_REQUEST_TIMEOUT_SECONDS if runtime_os == "windows" else 30,
+        "request_timeout_seconds": 120 if runtime_os == "windows" else 30,
+        "verification_request_timeout_seconds": RERANK_CONFORMANCE_REQUEST_TIMEOUT_SECONDS,
         "reranker_batch_size": 10 if runtime_os == "windows" else 40,
         "reranker_candidate_pool": 20 if runtime_os == "windows" else 40,
         "pooling": "rank",
