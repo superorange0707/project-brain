@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,6 +11,7 @@ permissions:
 jobs:
   compatibility:
     name: Python ${{ matrix.python-version }}
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -33,6 +35,7 @@ jobs:
 
   windows-compatibility:
     name: Native Windows Python ${{ matrix.python-version }}
+    if: github.event_name == 'push'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -85,7 +88,7 @@ jobs:
           from brain.models import OFFICIAL_PACKS, install_official_pack, platform_id, verify_pack
           from brain.ops import refresh_brain
           from brain.semantic import search_semantic
-          if os.environ["GITHUB_REF_NAME"].startswith("v1."):
+          if os.environ["GITHUB_REF_NAME"].startswith("v1.") or os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch":
               expected_platform = "${{ matrix.platform }}"
               if platform_id() != expected_platform:
                   raise SystemExit(f"native model-pack runner mismatch: {platform_id()} != {expected_platform}")
@@ -142,6 +145,7 @@ jobs:
 
   build:
     name: Build distributions
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -163,6 +167,7 @@ jobs:
 
   standalone:
     name: Standalone ${{ matrix.platform }}
+    if: github.event_name == 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -269,6 +274,7 @@ jobs:
 
   standalone-windows:
     name: Standalone Windows amd64
+    if: github.event_name == 'push'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7

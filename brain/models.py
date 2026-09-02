@@ -891,8 +891,22 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
                 instruction = str(case.get("instruction") or manifest.get("document_instruction") or "")
                 batch = runtime.embed(runtime_texts, instruction=instruction, dimension=dimension)
                 individual = [runtime.embed([text], instruction=instruction, dimension=dimension)[0] for text in runtime_texts]
-                if (not _same_vectors(batch, individual, tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE) or any(len(vector) != dimension or any(not math.isfinite(value) for value in vector) for vector in batch)):
+                if (
+                    len(batch) != len(runtime_texts)
+                    or len(individual) != len(runtime_texts)
+                    or any(len(vector) != dimension or any(not math.isfinite(value) for value in vector) for vector in [*batch, *individual])
+                ):
                     raise ValueError(f"embedding conformance failed at case {number}")
+                if not _same_vectors(batch, individual, tolerance=EMBEDDING_BATCH_PARITY_TOLERANCE):
+                    maximum_delta = max(
+                        abs(left - right)
+                        for batch_vector, individual_vector in zip(batch, individual, strict=True)
+                        for left, right in zip(batch_vector, individual_vector, strict=True)
+                    )
+                    raise ValueError(
+                        f"embedding conformance failed at case {number}: maximum batch/single delta "
+                        f"{maximum_delta:.9g} exceeds {EMBEDDING_BATCH_PARITY_TOLERANCE:.9g}"
+                    )
                 if case.get("normalized") and any(abs(math.sqrt(sum(value * value for value in vector)) - 1.0) > 1e-3 for vector in batch):
                     raise ValueError(f"embedding normalization conformance failed at case {number}")
                 references = case.get("reference_vectors")
