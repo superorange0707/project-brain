@@ -13,7 +13,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Callable
 
 from ..platforms import (
@@ -417,6 +417,12 @@ def _relative_result_path(repo: Repository, value: str) -> str | None:
     except (OSError, ValueError):
         return None
     normalized = logical_path(value)
+    if (
+        normalized.startswith("/")
+        or PureWindowsPath(value).drive
+        or ".." in PurePosixPath(normalized).parts
+    ):
+        return None
     prefix = logical_path(repo.scan_path.name).rstrip("/") + "/"
     return normalized[len(prefix):] if normalized.startswith(prefix) else normalized
 
