@@ -449,6 +449,35 @@ class AtlasV09Tests(unittest.TestCase):
         self.assertEqual("unavailable", bundle.trace["semantic_status"])
         self.assertTrue(any("Semantic" in warning for warning in bundle.warnings))
 
+    def test_expired_optional_stages_still_hydrate_one_exact_source(self) -> None:
+        from brain.retrieval.models import QueryPlan
+
+        request = {
+            "version": 1, "objective": "EligibilityService", "searches": [],
+            "paths": [], "symbols": [], "files": [], "history": [], "expand": [],
+        }
+        plan = QueryPlan(request["objective"], (), timeout_ms=1, requested_operations=0)
+
+        def slow_route(*args, **kwargs):
+            time.sleep(.01)
+            return {
+                "schema": "test", "repos": ["service"], "modules": [], "entities": [],
+                "candidates": [{
+                    "repo": "service", "path": "src/service.py", "line": 1,
+                    "kind": "entity", "score": 100, "found_by": ["Atlas hierarchical router"],
+                }],
+                "graph_edges": [], "cache_hit": False,
+            }
+
+        with (
+            mock.patch("brain.retrieval.compile_request", return_value=plan),
+            mock.patch("brain.atlas.route", side_effect=slow_route),
+        ):
+            bundle = retrieve_context(self.settings, request)
+        self.assertEqual("time_budget", bundle.trace["stop_reason"])
+        self.assertEqual(["src/service.py"], [item.path for item in bundle.evidence])
+        self.assertIsNotNone(bundle.metrics["time_to_first_verified_evidence_ms"])
+
     def test_incremental_refresh_records_rename_delete_and_add_together(self) -> None:
         repository = self.root / "service"
         (repository / "config.yml").rename(repository / "renamed-config.yml")

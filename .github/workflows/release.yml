@@ -59,6 +59,7 @@ jobs:
 
   v1-release-readiness:
     name: Stable v1 model-pack catalog readiness
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -83,7 +84,7 @@ jobs:
       - name: Exercise the exact native Semantic and Precision serving lifecycle
         shell: python
         run: |
-          import os, tempfile
+          import json, os, tempfile
           from pathlib import Path
           from brain.catalog import current_generation_ref
           from brain.core import load_settings, retrieve_context
@@ -112,10 +113,18 @@ jobs:
               )
               settings = load_settings(config)
               for alias in ("semantic", "precision"):
-                  installed = install_official_pack(settings, alias)
-                  report = verify_pack(settings, str(installed["pack_id"]))
+                  print(f"Installing and verifying official {alias} pack", flush=True)
+                  try:
+                      installed = install_official_pack(settings, alias)
+                      report = verify_pack(settings, str(installed["pack_id"]))
+                  except Exception as error:
+                      raise SystemExit(
+                          f"stable v1 release blocked: {alias} pack lifecycle failed: "
+                          f"{type(error).__name__}: {error}"
+                      ) from error
                   if not report.get("verified") or not report.get("conformance"):
                       raise SystemExit(f"stable v1 release blocked: {alias} did not pass installed conformance")
+                  print(f"Official {alias} pack passed installed conformance", flush=True)
               marker = "ProjectBrainNativeSemanticMarker"
               (repository / "RuntimeAnchor.java").write_text(
                   "final class RuntimeAnchor { String marker = '" + marker + "'; }\n",
@@ -142,9 +151,22 @@ jobs:
               bundle = retrieve_context(settings, request)
               found_by = {source for item in bundle.evidence for source in item.found_by}
               if bundle.trace.get("semantic_status") != "ready" or "local semantic index" not in found_by:
-                  raise SystemExit("stable v1 release blocked: Precision did not use aligned Semantic recall")
+                  raise SystemExit(
+                      "stable v1 release blocked: Precision did not use aligned Semantic recall: "
+                      + json.dumps({
+                          "semantic_status": bundle.trace.get("semantic_status"),
+                          "found_by": sorted(found_by), "warnings": bundle.warnings,
+                          "metrics": bundle.metrics,
+                      }, sort_keys=True)
+                  )
               if not bundle.evidence or "local reranker" not in found_by or not bundle.metrics.get("rerank_input_count"):
-                  raise SystemExit("stable v1 release blocked: Precision reranker did not serve the bounded candidate set")
+                  raise SystemExit(
+                      "stable v1 release blocked: Precision reranker did not serve the bounded candidate set: "
+                      + json.dumps({
+                          "evidence": len(bundle.evidence), "found_by": sorted(found_by),
+                          "warnings": bundle.warnings, "metrics": bundle.metrics,
+                      }, sort_keys=True)
+                  )
 
   build:
     name: Build distributions

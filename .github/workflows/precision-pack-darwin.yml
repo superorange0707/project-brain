@@ -1,0 +1,207 @@
+name: Rebuild portable Darwin Precision runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: New precision-pack-v* release tag used in descriptor URLs
+        required: true
+        type: string
+      publish:
+        description: Create, verify, and publish the immutable runtime-compatible pack
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Darwin arm64 Precision runtime compatibility pack
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Validate target release identity
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^precision-pack-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "release_tag must be precision-pack-vX.Y.Z" >&2; exit 1; }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          if [[ '${{ inputs.publish }}' == 'true' ]]; then
+            test "$SOURCE_REF" = "refs/heads/$DEFAULT_BRANCH"
+            if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+              echo "release tag already exists; immutable pack releases cannot be appended" >&2
+              exit 1
+            fi
+            if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --silent >/dev/null 2>&1; then
+              echo "release tag already exists; pack provenance must start at the reviewed builder commit" >&2
+              exit 1
+            fi
+          fi
+      - name: Restore the exact released Q6_K model and public references
+        env:
+          BASE_DESCRIPTOR_SHA256: 9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7
+          BASE_DESCRIPTOR_URL: https://github.com/superorange0707/project-brain/releases/download/precision-pack-v1.0.2/qwen3-reranker-4b-q6k-darwin-arm64-descriptor.json
+        run: |
+          mkdir -p upstream/base-metadata
+          curl --fail --location --retry 3 --output upstream/descriptor.json "$BASE_DESCRIPTOR_URL"
+          test "$(shasum -a 256 upstream/descriptor.json | awk '{print $1}')" = "$BASE_DESCRIPTOR_SHA256"
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          from urllib.request import urlopen
+
+          root = Path("upstream")
+          descriptor = json.loads((root / "descriptor.json").read_text(encoding="utf-8"))
+
+          def download(item, target):
+              expected_size = int(item["size"])
+              if expected_size < 1:
+                  raise SystemExit("invalid pinned artifact size")
+              digest = hashlib.sha256()
+              with urlopen(item["url"], timeout=300) as response, target.open("wb") as output:
+                  while chunk := response.read(1024 * 1024):
+                      output.write(chunk)
+                      digest.update(chunk)
+              if target.stat().st_size != expected_size or digest.hexdigest() != item["sha256"]:
+                  raise SystemExit(f"pinned artifact mismatch: {target}")
+
+          download(descriptor["metadata"], root / "metadata.tar.gz")
+          model = root / descriptor["model"]["file"]
+          model_digest = hashlib.sha256()
+          with model.open("wb") as output:
+              for number, part in enumerate(descriptor["model"]["parts"]):
+                  target = root / f"model.part-{number:02d}"
+                  download(part, target)
+                  with target.open("rb") as source:
+                      while chunk := source.read(1024 * 1024):
+                          output.write(chunk)
+                          model_digest.update(chunk)
+                  target.unlink()
+          if model_digest.hexdigest() != descriptor["model"]["sha256"]:
+              raise SystemExit("assembled model checksum mismatch")
+          PY
+          tar -xzf upstream/metadata.tar.gz -C upstream/base-metadata
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("upstream/base-metadata")
+          suite = json.loads((root / "conformance.json").read_text(encoding="utf-8"))
+          reference = {
+              "instruction": "Given a web search query, retrieve relevant passages that answer the query",
+              "reranker": [{"id": row["id"], "scores": row["reference_scores"]} for row in suite["reranker"]],
+              "candidate_pools": [{"id": row["id"], "scores": row["reference_scores"]} for row in suite["reranker_candidate_pools"]],
+          }
+          Path("upstream/official-reference.json").write_text(
+              json.dumps(reference, separators=(",", ":")), encoding="utf-8"
+          )
+          PY
+      - name: Build pinned macOS 15 compatible llama.cpp runtime
+        env:
+          LLAMA_CPP_REVISION: d775b8967a46d8beb110d444aa3b8938179e0dd8
+          MACOSX_DEPLOYMENT_TARGET: "15.0"
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp.git upstream/llama.cpp
+          git -C upstream/llama.cpp checkout --detach "$LLAMA_CPP_REVISION"
+          test "$(git -C upstream/llama.cpp rev-parse HEAD)" = "$LLAMA_CPP_REVISION"
+          cmake -S upstream/llama.cpp -B upstream/llama.cpp/build \
+            -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
+          cmake --build upstream/llama.cpp/build --target llama-server --parallel 3
+          test -x upstream/llama.cpp/build/bin/llama-server
+          file upstream/llama.cpp/build/bin/llama-server | rg 'arm64'
+          ! otool -L upstream/llama.cpp/build/bin/llama-server | rg '(@rpath|/opt/homebrew|/usr/local)'
+          test "$(vtool -show-build upstream/llama.cpp/build/bin/llama-server | awk '/minos/{print $2; exit}')" = "15.0"
+      - name: Build and clean-install verify the compatibility pack
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          QWEN_REVISION: ff536d3f82cc9ef977ea312094eb103d8446116a
+          MODEL_SHA256: 2fd4a7bbb61400e65bb3849f8d367759232be2206e1bb467b2b3d7ff42e79aeb
+          LLAMA_CPP_REVISION: d775b8967a46d8beb110d444aa3b8938179e0dd8
+          BUILDER_REVISION: ${{ github.sha }}
+        run: |
+          python scripts/build_precision_pack.py \
+            --platform darwin-arm64 \
+            --model upstream/model.gguf \
+            --model-sha256 "$MODEL_SHA256" \
+            --tokenizer upstream/base-metadata/tokenizer.json \
+            --runtime upstream/llama.cpp/build/bin/llama-server \
+            --runtime-license upstream/llama.cpp/LICENSE \
+            --license upstream/base-metadata/LICENSE \
+            --source-provenance upstream/base-metadata/UPSTREAM_SHA256SUMS.txt \
+            --reference upstream/official-reference.json \
+            --output precision-pack-darwin-dist \
+            --release-tag "$RELEASE_TAG" \
+            --upstream-revision "$QWEN_REVISION" \
+            --tokenizer-revision "$QWEN_REVISION" \
+            --runtime-revision "$LLAMA_CPP_REVISION" \
+            --builder-revision "$BUILDER_REVISION" \
+            --minimum-brain-version 1.0.0
+          (cd precision-pack-darwin-dist && shasum -a 256 --check SHA256SUMS.txt)
+          temporary="$(mktemp -d)"
+          mkdir "$temporary/repository"
+          printf '%s\n' '[project]' 'state_dir = "state"' 'generated_dir = "generated"' '' '[storage]' 'max_state_gb = 0' 'minimum_free_disk_gb = 0' '' '[[repositories]]' 'name = "public-fixture"' 'path = "repository"' > "$temporary/brain.toml"
+          PYTHONPATH=. python -m brain.cli -c "$temporary/brain.toml" model install precision-pack-darwin-dist/qwen3-reranker-4b-q6k-darwin-arm64
+          PYTHONPATH=. python -m brain.cli -c "$temporary/brain.toml" model verify qwen3-reranker-4b-q6k-darwin-arm64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: precision-pack-darwin-arm64
+          path: |
+            precision-pack-darwin-dist/*-metadata.tar.gz
+            precision-pack-darwin-dist/*.part-*
+            precision-pack-darwin-dist/*-descriptor.json
+            precision-pack-darwin-dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  publish:
+    name: Publish authorized Darwin Precision compatibility pack
+    if: ${{ inputs.publish }}
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 30
+    environment: model-pack-publish
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: precision-pack-darwin-arm64
+          path: precision-pack-darwin-dist
+      - name: Publish only after checksum and clean-install verification
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          (cd precision-pack-darwin-dist && shasum -a 256 --check SHA256SUMS.txt)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --silent >/dev/null 2>&1; then
+            echo "release or tag appeared after validation; refusing publication" >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" --draft --target "$SOURCE_SHA" \
+            --title "Project Brain Precision Pack $RELEASE_TAG" \
+            --notes "Darwin arm64 Precision runtime compatibility release. Reuses the exact verified v1.0.2 Q6_K model and public references with a macOS 15 deployment target."
+          test "$(gh release view "$RELEASE_TAG" --json tagName --jq .tagName)" = "$RELEASE_TAG"
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = "true"
+          gh release upload "$RELEASE_TAG" precision-pack-darwin-dist/*
+          mkdir release-verification
+          gh release download "$RELEASE_TAG" --dir release-verification
+          (cd release-verification && shasum -a 256 --check SHA256SUMS.txt)
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq .object.type)" = "commit"
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq .object.sha)" = "$SOURCE_SHA"
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false

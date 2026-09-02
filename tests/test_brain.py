@@ -4553,6 +4553,9 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("Q6_K", workflow)
         self.assertIn("qwen3_reranker_reference.py", workflow)
         self.assertIn("build_precision_pack.py", workflow)
+        self.assertIn('MACOSX_DEPLOYMENT_TARGET: "15.0"', workflow)
+        self.assertIn('-DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"', workflow)
+        self.assertIn("vtool -show-build", workflow)
         self.assertIn("model install precision-pack-dist/qwen3-reranker-4b-q6k-darwin-arm64", workflow)
         self.assertIn("model verify qwen3-reranker-4b-q6k-darwin-arm64", workflow)
         self.assertNotIn("release.yml", workflow)
@@ -4571,6 +4574,21 @@ class ReleaseSafetyTest(unittest.TestCase):
         reference = (root / "scripts/qwen3_reranker_reference.py").read_text(encoding="utf-8")
         self.assertIn("official Qwen", reference)
         self.assertIn("RERANK_CONTEXT_TOKENS", reference)
+
+    def test_darwin_precision_runtime_repack_reuses_pinned_model_and_targets_macos_15(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/precision-pack-darwin.yml").read_text(encoding="utf-8")
+        self.assertIn("precision-pack-vX.Y.Z", workflow)
+        self.assertIn("9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7", workflow)
+        self.assertIn("2fd4a7bbb61400e65bb3849f8d367759232be2206e1bb467b2b3d7ff42e79aeb", workflow)
+        self.assertIn('MACOSX_DEPLOYMENT_TARGET: "15.0"', workflow)
+        self.assertIn('-DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"', workflow)
+        self.assertIn("vtool -show-build", workflow)
+        self.assertIn("build_precision_pack.py", workflow)
+        self.assertIn("model verify qwen3-reranker-4b-q6k-darwin-arm64", workflow)
+        self.assertIn("gh release create", workflow)
+        self.assertIn("gh release download", workflow)
+        self.assertIn("shasum -a 256 --check SHA256SUMS.txt", workflow)
 
     def test_standalone_release_builds_source_pinned_zoekt(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text(encoding="utf-8")

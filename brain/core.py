@@ -2527,7 +2527,10 @@ def retrieve_context(
         source_budget = max(10_000, settings.hard_context_chars - 40_000)
         source_chars = sum(len(item.content) for item in bundle.evidence)
         for index, hit in enumerate(selected):
-            if time_budget_exhausted():
+            # An optional model call can cross the soft query deadline after it
+            # starts.  Preserve exact-source authority by hydrating the first
+            # surviving source candidate before stopping later reads.
+            if time_budget_exhausted() and first_verified_evidence_ms is not None:
                 omitted.extend(selected[index:])
                 break
             try:
