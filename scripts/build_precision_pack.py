@@ -229,8 +229,12 @@ def _assert_case(endpoint: str, key: str, case: dict[str, object]) -> None:
     maximum_delta = float(case["maximum_score_delta"])
     if _order(scores)[0] != expected_top:
         raise RuntimeError(f"local Q6_K did not rank the labelled positive first for {case['id']}")
-    if any(abs(left - right) > RERANKER_BATCH_PARITY_TOLERANCE for left, right in zip(scores, individual, strict=True)):
-        raise RuntimeError(f"local Q6_K batch/single rerank parity failed for {case['id']}")
+    parity_deltas = [abs(left - right) for left, right in zip(scores, individual, strict=True)]
+    if any(delta > RERANKER_BATCH_PARITY_TOLERANCE for delta in parity_deltas):
+        raise RuntimeError(
+            f"local Q6_K batch/single rerank parity failed for {case['id']}: "
+            f"max_delta={max(parity_deltas):.9g}, batch={scores}, single={individual}"
+        )
     if any(abs(left - right) > maximum_delta for left, right in zip(scores, reference, strict=True)):
         raise RuntimeError(f"local Q6_K score delta exceeds official-reference threshold for {case['id']}")
 
