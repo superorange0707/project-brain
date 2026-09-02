@@ -66,6 +66,8 @@ DEFAULT_EMBEDDING_BATCH_SIZE = 16
 DEFAULT_BENCHMARK_SAMPLES = 3
 DEFAULT_MODEL_LATENCY_BUDGET_MS = 3_000
 DEFAULT_RUNTIME_MAX_REQUESTS = 64
+DEFAULT_RUNTIME_REQUEST_TIMEOUT_SECONDS = 120.0
+DEFAULT_RUNTIME_STARTUP_TIMEOUT_SECONDS = 120.0
 SUPPORTED_NATIVE_PLATFORMS = {
     "darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64", "windows-amd64",
 }
@@ -319,8 +321,12 @@ class ManagedLlamaCppRuntime:
     def _start(self) -> LlamaCppRuntime:
         try:
             max_requests = max(1, int(self.manifest.get("max_requests_per_runtime") or DEFAULT_RUNTIME_MAX_REQUESTS))
-            request_timeout_seconds = min(300.0, max(5.0, float(self.manifest.get("request_timeout_seconds") or 30.0)))
-            startup_timeout_seconds = min(120.0, max(1.0, float(self.manifest.get("startup_timeout_seconds") or 30.0)))
+            request_timeout_seconds = min(300.0, max(5.0, float(
+                self.manifest.get("request_timeout_seconds") or DEFAULT_RUNTIME_REQUEST_TIMEOUT_SECONDS
+            )))
+            startup_timeout_seconds = min(120.0, max(1.0, float(
+                self.manifest.get("startup_timeout_seconds") or DEFAULT_RUNTIME_STARTUP_TIMEOUT_SECONDS
+            )))
         except (TypeError, ValueError) as error:
             raise RuntimeError("model pack runtime limits must be numeric") from error
         if self.client is not None and self.process is not None and self.process.poll() is None and self.request_count < max_requests:

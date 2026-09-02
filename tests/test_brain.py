@@ -77,7 +77,7 @@ from brain.catalog import current_generation
 from brain.catalog import connect as catalog_connect
 from brain.editions import current_edition, set_edition
 from brain.editions import capabilities
-from brain.models import EMBEDDING_BATCH_PARITY_TOLERANCE, RERANKER_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
+from brain.models import DEFAULT_RUNTIME_REQUEST_TIMEOUT_SECONDS, DEFAULT_RUNTIME_STARTUP_TIMEOUT_SECONDS, EMBEDDING_BATCH_PARITY_TOLERANCE, RERANKER_BATCH_PARITY_TOLERANCE, DeterministicRuntime, LlamaCppRuntime, ManagedLlamaCppRuntime, OFFICIAL_PACKS, _same_vectors, rerank_candidates
 from brain.models import _open_model_download, _rerank_batched, _reranker_parity_indices, _reranker_tuning, autotune_pack, benchmark_pack, install_pack, install_pack_url, install_release_descriptor, managed_runtime_loopback_status, model_download_ssl_context, runtime_for_pack, validate_manifest, verify_pack
 from brain.semantic import ATLAS_CARD_VERSION, CARD_VERSION, CHUNK_SCHEMA_VERSION, Chunk, SEMANTIC_CARD_CODE_CHARS, SEMANTIC_EMBEDDING_INPUT_VERSION, SEMANTIC_SHARD_MANIFEST_VERSION, _bounded_embedding_batches, _excluded, _injected_pack_identity, _shard_sha256, build_semantic_index, chunk_source, search_semantic
 from brain.ops import dashboard_status, freshness, gc, model_operation, model_status, refresh_brain
@@ -3163,6 +3163,8 @@ path = "batch-service"
                 popen.assert_not_called()
 
     def test_managed_runtime_startup_diagnostics_distinguish_start_health_and_transport_failures(self) -> None:
+        self.assertEqual(120.0, DEFAULT_RUNTIME_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual(120.0, DEFAULT_RUNTIME_STARTUP_TIMEOUT_SECONDS)
         common = {
             "capability": "embedding", "startup_timeout_seconds": 1,
         }
