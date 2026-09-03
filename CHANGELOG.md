@@ -2,6 +2,16 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.6] - 2026-09-03
+
+### Fixed
+
+- Gave the native Windows cross-process shared-lock regression a bounded
+  30-second startup window and retained child-process diagnostics when startup
+  fails on a heavily loaded runner.
+- Preserved production locking, runtime behavior, schemas, Atlas/Semantic
+  identity, model packs, workspace state, caches, and ticket sessions unchanged.
+
 ## [1.0.5] - 2026-09-03
 
 ### Fixed
@@ -560,6 +570,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.6]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.6
 [1.0.5]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.5
 [1.0.4]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.4
 [1.0.3]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.3

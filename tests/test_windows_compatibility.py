@@ -784,16 +784,27 @@ class WindowsCompatibilityTest(unittest.TestCase):
                 subprocess.Popen(
                     [os.sys.executable, str(script), str(config), str(signal)],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
                     **process_group_kwargs(windows=True),
                 )
                 for signal in signals
             ]
             try:
-                deadline = time.monotonic() + 10
+                deadline = time.monotonic() + 30
                 while not all(signal.is_file() for signal in signals) and time.monotonic() < deadline:
+                    if any(reader.poll() is not None for reader in readers):
+                        break
                     time.sleep(0.05)
-                self.assertTrue(all(signal.is_file() for signal in signals))
+                diagnostics = [
+                    {
+                        "ready": signal.is_file(),
+                        "returncode": reader.poll(),
+                        "stderr": reader.stderr.read() if reader.poll() is not None and reader.stderr else "",
+                    }
+                    for reader, signal in zip(readers, signals, strict=True)
+                ]
+                self.assertTrue(all(signal.is_file() for signal in signals), diagnostics)
                 settings = load_settings(config)
                 with self.assertRaises(locks.WorkspaceOperationBusy):
                     with locks.workspace_operation(settings):
@@ -802,6 +813,8 @@ class WindowsCompatibilityTest(unittest.TestCase):
                 for reader in readers:
                     if reader.poll() is None:
                         terminate_process_tree(reader, graceful_timeout=0)
+                    if reader.stderr is not None:
+                        reader.stderr.close()
 
 
 if __name__ == "__main__":

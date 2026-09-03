@@ -1,4 +1,4 @@
-# Project Brain v1.0.5 — Investigation Runtime
+# Project Brain v1.0.6 — Investigation Runtime
 
 Project Brain v1.0 turns the v0.9 Workspace Intelligence Atlas into a bounded,
 generation-pinned investigation runtime while preserving exact source as the
@@ -35,7 +35,7 @@ editing, target-code execution, or autonomous implementation behavior is added.
 This stable release has passed the final supervisory review, adversarial review,
 cross-platform verification, package integrity, and release-readiness gates.
 
-The v1.0.5 release also preserves exact compatibility with the previously
+The v1.0.6 release also preserves exact compatibility with the previously
 published Darwin model-pack capability arguments, bounds native batch/single
 floating-point drift without weakening independent reference or ranking gates,
 and verifies the Windows standalone through a Unicode, spaced, long-path Git
@@ -65,7 +65,7 @@ PowerShell installer. It requires neither Python nor WSL; Git for Windows is
 recommended only for Git-backed refresh. The portable wheel remains available
 for supported Python 3.11–3.14 environments.
 
-The v1.0.5 release workflow keeps the Windows repository root within Git for
+The v1.0.6 release workflow keeps the Windows repository root within Git for
 Windows' working-directory limit while placing the fixture source beneath a
 real greater-than-260-character nested path. This preserves the intended native
 long-path test without confusing a test-harness path limit with a product
@@ -88,6 +88,11 @@ redirected-output file as pending output and continues its bounded token wait.
 This corrects release validation timing only; the UI already flushes its startup
 token, and no runtime, protocol, schema, generation, cache, or workspace
 behavior changes.
+
+The native Windows cross-process shared-lock test now allows a bounded
+30-second child-process startup window and reports child return codes and
+standard error on failure. This hardens the release gate under loaded hosted
+runners without changing production locking behavior.
 
 ---
 
