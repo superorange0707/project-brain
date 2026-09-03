@@ -452,6 +452,10 @@ def _java_file_intelligence(
     facts: list[dict[str, Any]] = []
     source = _mask_java_comments(content)
     code_only = _mask_java_comments(content, strings=True)
+    # Masking preserves offsets by replacing comments with whitespace.  Regexes
+    # do not need to rescan a large trailing comment after it has been masked,
+    # while the untrimmed views remain authoritative for offset checks.
+    search_source = source.rstrip()
     structurally_exact = Path(path).suffix.lower() != ".groovy"
     scoped_entities = sorted(
         (
@@ -542,19 +546,19 @@ def _java_file_intelligence(
                 provenance={"direction": direction, "framework": framework, **(provenance or {})},
             )
 
-    for match in re.finditer(r"(?m)^[ \t]*package\s+([A-Za-z_$][\w$.]*)\s*;", source):
+    for match in re.finditer(r"(?m)^[ \t]*package\s+([A-Za-z_$][\w$.]*)\s*;", search_source):
         add_anchor("package", match.group(1), match.start())
-    for match in re.finditer(r"(?m)\b(?:class|interface|record|enum)\s+([A-Za-z_$][\w$]*)", source):
+    for match in re.finditer(r"(?m)\b(?:class|interface|record|enum)\s+([A-Za-z_$][\w$]*)", search_source):
         add_anchor("symbol", match.group(1), match.start())
         if match.group(1).endswith(("Event", "Message", "Command")):
             add_fact("event", match.group(1), match.start(), "definition", .95)
     for match in re.finditer(
         r"@(Service|Component|Repository|Configuration)\b(?:\([^)]*\))?[\s\S]{0,300}?"
         r"\b(?:class|interface)\s+([A-Za-z_$][\w$]*)",
-        source,
+        search_source,
     ):
         add_fact("spring_component", match.group(2), match.start(), "definition", .98)
-    for match in re.finditer(r"(?m)\bstatic\s+final\s+\w+(?:<[^;=]+>)?\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+)", source):
+    for match in re.finditer(r"(?m)\bstatic\s+final\s+\w+(?:<[^;=]+>)?\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+)", search_source):
         name, value = match.group(1), match.group(2)
         add_anchor("constant", name, match.start(), .95)
         quoted = _quoted_values(value)
@@ -562,7 +566,7 @@ def _java_file_intelligence(
             add_fact("topic", quoted[0], match.start(), "definition", .9, "spring-kafka")
 
     class_declarations = [
-        match for match in re.finditer(r"\b(?:class|interface|record|enum)\s+[A-Za-z_$][\w$]*", source)
+        match for match in re.finditer(r"\b(?:class|interface|record|enum)\s+[A-Za-z_$][\w$]*", search_source)
         if code_only[match.start():match.start() + 1].strip()
     ]
 
@@ -589,7 +593,7 @@ def _java_file_intelligence(
 
     class_mappings: dict[int, str] = {}
     class_mapping_starts: set[int] = set()
-    for mapping in re.finditer(r"@RequestMapping\s*\(([^)]*)\)", source):
+    for mapping in re.finditer(r"@RequestMapping\s*\(([^)]*)\)", search_source):
         if not code_only[mapping.start():mapping.start() + 1].strip():
             continue
         class_position = annotated_class(mapping.end())
@@ -599,7 +603,7 @@ def _java_file_intelligence(
         class_mappings[class_position] = values[0] if values else ""
         class_mapping_starts.add(mapping.start())
     feign_classes: dict[int, str | None] = {}
-    for match in re.finditer(r"@FeignClient\s*\(([^)]*)\)", source):
+    for match in re.finditer(r"@FeignClient\s*\(([^)]*)\)", search_source):
         if not code_only[match.start():match.start() + 1].strip():
             continue
         class_position = annotated_class(match.end())
@@ -613,7 +617,7 @@ def _java_file_intelligence(
     endpoint_pattern = re.compile(
         r"@(GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\s*(?:\(([^)]*)\))?"
     )
-    for match in endpoint_pattern.finditer(source):
+    for match in endpoint_pattern.finditer(search_source):
         # A class-level RequestMapping is a prefix, not an endpoint on its own.
         if match.start() in class_mapping_starts:
             continue
@@ -631,17 +635,17 @@ def _java_file_intelligence(
                      "spring-feign" if is_feign else "spring-mvc", method_annotation=True,
                      provenance={"target_service": feign_classes.get(class_position)} if is_feign else None)
 
-    for match in re.finditer(r"@FeignClient\s*\(([^)]*)\)", source):
+    for match in re.finditer(r"@FeignClient\s*\(([^)]*)\)", search_source):
         body = match.group(1)
         named = re.findall(r"(?:name|value|url)\s*=\s*[\"']([^\"']+)[\"']", body)
         for value in (named or _quoted_values(body))[:4]:
             kind = "endpoint" if value.startswith(("http://", "https://", "/", "${")) else "service"
             add_fact(kind, value, match.start(), "outbound", .95, "spring-feign")
 
-    for match in re.finditer(r"@KafkaListener\s*\(([^)]*)\)", source):
+    for match in re.finditer(r"@KafkaListener\s*\(([^)]*)\)", search_source):
         for value in _annotation_values(match.group(1), {"topics", "topicPattern"})[:8]:
             add_fact("topic", value, match.start(), "inbound", .95, "spring-kafka", method_annotation=True)
-    for match in re.finditer(r"\b(?:kafkaTemplate|KafkaTemplate)\s*\.\s*send\s*\(([^,\n)]+)", source):
+    for match in re.finditer(r"\b(?:kafkaTemplate|KafkaTemplate)\s*\.\s*send\s*\(([^,\n)]+)", search_source):
         values = _quoted_values(match.group(1))
         if values:
             add_fact("topic", values[0], match.start(), "outbound", 1.0, "spring-kafka")
@@ -650,27 +654,27 @@ def _java_file_intelligence(
             if re.fullmatch(r"[A-Za-z_$][\w$.]*", token):
                 add_fact("topic", token, match.start(), "outbound", .7, "spring-kafka")
 
-    for match in re.finditer(r"@Value\s*\(\s*[\"']\$\{([^}:]+)", source):
+    for match in re.finditer(r"@Value\s*\(\s*[\"']\$\{([^}:]+)", search_source):
         add_fact("config_key", match.group(1), match.start(), "read", 1.0, method_annotation=True)
-    for match in re.finditer(r"@ConfigurationProperties\s*\(([^)]*)\)", source):
+    for match in re.finditer(r"@ConfigurationProperties\s*\(([^)]*)\)", search_source):
         values = _quoted_values(match.group(1))
         if values:
             add_fact("config_key", values[0], match.start(), "prefix", .95)
-    for match in re.finditer(r"@Cache(?:able|Evict|Put)\s*\(([^)]*)\)", source):
+    for match in re.finditer(r"@Cache(?:able|Evict|Put)\s*\(([^)]*)\)", search_source):
         for value in _annotation_values(match.group(1), {"value", "cacheNames"})[:4]:
             add_fact("cache", value, match.start(), "read_or_write", .9, "spring-cache", method_annotation=True)
 
-    for match in re.finditer(r"@Table\s*\(([^)]*)\)", source):
+    for match in re.finditer(r"@Table\s*\(([^)]*)\)", search_source):
         body = match.group(1)
         for field, value in re.findall(r"(name|schema)\s*=\s*[\"']([^\"']+)[\"']", body):
             add_fact("table" if field == "name" else "schema", value, match.start(), "persistence", 1.0, "jpa")
-    for match in re.finditer(r"\b([A-Za-z_$][\w$]*)Repository\s+extends\s+(?:Jpa|Crud|PagingAndSorting)Repository\s*<\s*([A-Za-z_$][\w$]*)", source):
+    for match in re.finditer(r"\b([A-Za-z_$][\w$]*)Repository\s+extends\s+(?:Jpa|Crud|PagingAndSorting)Repository\s*<\s*([A-Za-z_$][\w$]*)", search_source):
         add_fact("persistence_entity", match.group(2), match.start(), "repository", 1.0, "spring-data-jpa")
 
     if is_test_path(path):
-        for match in re.finditer(r"\b(?:MockMvc|Mockito|WebTestClient|TestRestTemplate|assertThat|verify)\b", source):
+        for match in re.finditer(r"\b(?:MockMvc|Mockito|WebTestClient|TestRestTemplate|assertThat|verify)\b", search_source):
             add_fact("test_reference", match.group(0), match.start(), "test", .9, "spring-test")
-        for match in re.finditer(r"\b(?:get|post|put|delete|patch)\s*\(\s*[\"']([^\"']+)[\"']", source):
+        for match in re.finditer(r"\b(?:get|post|put|delete|patch)\s*\(\s*[\"']([^\"']+)[\"']", search_source):
             add_fact("endpoint", match.group(1), match.start(), "test", .9, "spring-test")
 
     return anchors, facts

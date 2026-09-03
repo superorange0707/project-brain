@@ -260,6 +260,8 @@ def _java_entities(
 ) -> list[dict[str, Any]]:
     """Extract bounded Java class/method scopes for handler and call ownership."""
     line_count = max(1, structural.count("\n") + 1)
+    structural_search = structural.rstrip()
+    code_search = code_only.rstrip()
 
     def line(position: int) -> int:
         return structural.count("\n", 0, position) + 1
@@ -278,7 +280,7 @@ def _java_entities(
         return len(code_only) - 1
 
     classes: list[tuple[int, int, dict[str, Any]]] = []
-    for match in re.finditer(r"\b(class|interface|record|enum)\s+([A-Za-z_$][\w$]*)", structural):
+    for match in re.finditer(r"\b(class|interface|record|enum)\s+([A-Za-z_$][\w$]*)", structural_search):
         if not code_only[match.start():match.start() + 1].strip():
             continue
         opening = code_only.find("{", match.end(), min(len(code_only), match.end() + 1_000))
@@ -304,7 +306,7 @@ def _java_entities(
         r"([A-Za-z_$][\w$]*)[ \t]*\([^;{}\n]*\)[ \t]*(?:throws[^{\n]+)?\{"
     )
     controls = {"if", "for", "while", "switch", "catch", "try", "synchronized", "return", "new"}
-    for match in method_pattern.finditer(code_only):
+    for match in method_pattern.finditer(code_search):
         name = match.group(1)
         if name in controls:
             continue
@@ -425,7 +427,7 @@ def _file_intelligence(repo: str, path: str, blob: str, content: str) -> tuple[d
     )
     remaining_entities = MAX_ATLAS_ENTITIES_PER_FILE - len(definitions)
     definitions.extend(_special_entities(
-        repo, path, blob, module["module_id"], structural_content, deadline, remaining_entities,
+        repo, path, blob, module["module_id"], structural_content.rstrip(), deadline, remaining_entities,
     ))
     endpoint_edges: list[dict[str, Any]] = []
     if suffix == ".java":
@@ -516,7 +518,8 @@ def _file_intelligence(repo: str, path: str, blob: str, content: str) -> tuple[d
     ]
     for edge_type, pattern, confidence in patterns:
         pattern_content = code_only_content if edge_type == "CALLS" else structural_content
-        for match in pattern.finditer(pattern_content):
+        search_content = pattern_content.rstrip()
+        for match in pattern.finditer(search_content):
             name = next((group for group in match.groups() if group), "")
             if not name or name in {"if", "for", "while", "switch", "return", "class", "def", "function"}:
                 continue
@@ -528,8 +531,8 @@ def _file_intelligence(repo: str, path: str, blob: str, content: str) -> tuple[d
                 default=file_entity,
             )
             receiver: str | None = None
-            if edge_type == "CALLS" and match.start() > 0 and pattern_content[match.start() - 1] == ".":
-                receiver_match = re.search(r"([A-Za-z_$][\w$]*)\.$", pattern_content[:match.start()])
+            if edge_type == "CALLS" and match.start() > 0 and search_content[match.start() - 1] == ".":
+                receiver_match = re.search(r"([A-Za-z_$][\w$]*)\.$", search_content[:match.start()])
                 receiver = receiver_match.group(1) if receiver_match else ""
             dispatch_scope = str(
                 owner.get("parent_entity_id")

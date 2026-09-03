@@ -716,6 +716,14 @@ class B {
         with self.assertRaisesRegex(AtlasCapacityError, "derived-row budget"):
             _file_intelligence("customer-api", "src/generated.py", "blob", source)
 
+    def test_masked_java_tail_does_not_change_atlas_identity(self) -> None:
+        source = '@RestController class A { @GetMapping("/a") String a(){ return "a"; } }'
+        baseline = _file_intelligence("customer-api", "src/A.java", "blob", source)
+        padded = _file_intelligence(
+            "customer-api", "src/A.java", "blob", source + " /*" + ("x" * 900_000) + "*/",
+        )
+        self.assertEqual(baseline, padded)
+
     def test_stack_frame_declaring_class_must_own_the_method_line(self) -> None:
         source = """package demo;
 class CustomerController {

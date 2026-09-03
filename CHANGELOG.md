@@ -2,6 +2,21 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.3] - 2026-09-03
+
+### Fixed
+
+- Kept the native Windows release fixture's Git working directory below the
+  platform boundary while exercising a real greater-than-260-character source
+  path inside the repository. This preserves the intended long-path release
+  gate without mistaking a test-harness working-directory limit for a product
+  failure.
+- Avoided repeatedly scanning comment-masked trailing whitespace during Java
+  Atlas and Spring-intelligence extraction. Exact offsets, identities, the
+  two-second per-file budget, and the one-megabyte input bound are unchanged.
+- Preserved v1.0.2 runtime, schema, generation, cache, model-pack, workspace,
+  and ticket-session behavior unchanged.
+
 ## [1.0.2] - 2026-09-03
 
 ### Fixed
@@ -526,6 +541,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.3]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.3
 [1.0.2]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.2
 [1.0.1]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.1
 [1.0.0]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.0
