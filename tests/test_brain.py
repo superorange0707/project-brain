@@ -3154,6 +3154,7 @@ path = "batch-service"
             command = popen.call_args.args[0]
             self.assertEqual(1, command.count("--reranking"))
             self.assertNotIn("--rerank", command)
+            self.assertNotIn("--embedding", command)
             self.assertEqual(1, command.count("--pooling"))
             self.assertEqual("rank", command[command.index("--pooling") + 1])
             reranker.shutdown()
@@ -3221,6 +3222,20 @@ path = "batch-service"
             self.assertEqual([[1.0, 0.0]], runtime.embed(["public synthetic card"], dimension=2))
         self.assertEqual(2, start.call_count)
         shutdown.assert_called_once()
+
+        verifier = ManagedLlamaCppRuntime({}, verification=True)
+        verifier_client = mock.Mock()
+        verifier_client.rerank.side_effect = [
+            ConnectionResetError("first transient failure"),
+            ConnectionResetError("second transient failure"),
+            [1.0],
+        ]
+        with mock.patch.object(verifier, "_start", return_value=verifier_client) as start, mock.patch.object(
+            verifier, "shutdown",
+        ) as shutdown:
+            self.assertEqual([1.0], verifier.rerank("public query", ["public document"]))
+        self.assertEqual(3, start.call_count)
+        self.assertEqual(2, shutdown.call_count)
 
     def test_managed_runtime_hashes_pack_once_at_the_actual_start_boundary(self) -> None:
         manifest = {"runtime_name": "llama.cpp", "capability": "embedding"}

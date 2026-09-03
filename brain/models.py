@@ -358,7 +358,9 @@ class ManagedLlamaCppRuntime:
         if capability == "embedding":
             command.extend(["--embedding", "--pooling", "last"])
         else:
-            command.extend(["--embedding", "--pooling", "rank", "--reranking"])
+            # llama.cpp's pinned --reranking flag enables embedding mode and
+            # rank pooling itself; match the command used to build the pack.
+            command.extend(["--reranking", "--pooling", "rank"])
         runtime_args = self.manifest.get("runtime_args") or []
         if not isinstance(runtime_args, list) or not all(isinstance(value, str) and value for value in runtime_args):
             raise RuntimeError("model pack runtime_args must be a list of non-empty strings")
@@ -430,26 +432,28 @@ class ManagedLlamaCppRuntime:
         raise RuntimeError("pack-owned llama.cpp runtime start timed out before a health check")
 
     def embed(self, texts: list[str], instruction: str = "", dimension: int | None = None) -> list[list[float]]:
-        for attempt in range(2):
+        attempts = 3 if self.verification else 2
+        for attempt in range(attempts):
             try:
                 value = self._start().embed(texts, instruction, dimension)
                 self.request_count += 1
                 return value
             except OSError:
                 self.shutdown()
-                if attempt:
+                if attempt == attempts - 1:
                     raise
         raise AssertionError("unreachable")
 
     def rerank(self, query: str, documents: list[str], instruction: str = "") -> list[float]:
-        for attempt in range(2):
+        attempts = 3 if self.verification else 2
+        for attempt in range(attempts):
             try:
                 value = self._start().rerank(query, documents, instruction)
                 self.request_count += 1
                 return value
             except OSError:
                 self.shutdown()
-                if attempt:
+                if attempt == attempts - 1:
                     raise
         raise AssertionError("unreachable")
 
@@ -911,6 +915,7 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
         runtime.warmup()
         all_cases = list(cases) + candidate_pool_cases if capability == "reranker" else cases
         for number, case in enumerate(all_cases, start=1):
+            print(f"running {capability} conformance case {number}/{len(all_cases)}", flush=True)
             if not isinstance(case, dict):
                 raise ValueError(f"golden_suite case {number} must be an object")
             if capability in {"embedding", "test"}:
