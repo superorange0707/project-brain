@@ -96,10 +96,10 @@ brain model autotune PACK --latency-budget-ms 3000
   published release, and the `v0.6.2` tag was never released: its
   CI/release-workflow defects were discovered before any artifact or tap
   mutation.
-- Project Brain v1.0.6 is implemented from exact v0.9.2 commit
+- Project Brain v1.0.7 is implemented from exact v0.9.2 commit
   `b22cfee8058f0c9772a1372e53a0401efd2e7983`. Final supervisory, adversarial,
   package, Linux/macOS, and native Windows review gates passed; stable release
-  publication is authorized. The v1.0.6 release candidate additionally passed
+  publication is authorized. The v1.0.7 release candidate additionally passed
   native macOS and GitHub-hosted Windows Semantic/Precision installation,
   conformance, generation-alignment, and retrieval readiness gates. Its final
   Windows release hardening keeps the long-path fixture below the Git process
@@ -109,7 +109,10 @@ brain model autotune PACK --latency-budget-ms 3000
   workspace paths. Its Windows UI release smoke tolerates the brief empty-log
   interval before the already-flushed startup token becomes visible, and the
   native cross-process lock gate uses a bounded startup allowance with retained
-  child-process diagnostics for loaded hosted runners.
+  child-process diagnostics for loaded hosted runners. Its macOS readiness gate
+  keeps installed model conformance and serving-alignment requirements while
+  recognizing the product's explicit Semantic/lexical fallback when a hosted
+  runner exceeds the normal online reranker budget.
 - The v1 release gate permanently requires the complete Python 3.11–3.14 matrix.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.

@@ -2,6 +2,18 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.7] - 2026-09-03
+
+### Fixed
+
+- Kept macOS stable-release qualification strict on installed model-pack
+  conformance, Semantic generation alignment, native Semantic recall, bounded
+  reranker invocation, and explicit fallback, while no longer treating a slow
+  hosted runner's normal online-timeout fallback as a correctness failure.
+- Preserved production model timeouts, fallback behavior, Atlas/Semantic
+  identities, model packs, caches, workspace state, and ticket sessions
+  unchanged.
+
 ## [1.0.6] - 2026-09-03
 
 ### Fixed
@@ -570,6 +582,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.7]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.7
 [1.0.6]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.6
 [1.0.5]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.5
 [1.0.4]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.4
