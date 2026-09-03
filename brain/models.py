@@ -894,11 +894,16 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
         reranker_physical_batch_size = raw_batch_size
     observed_input_chars = 0
     ranking_exercised = False
+    verification_timeout = manifest.get("verification_request_timeout_seconds")
+    if strict and manifest.get("runtime_name") == "llama.cpp" and verification_timeout is None:
+        # Published packs that predate the separate verification budget must
+        # not inherit the much shorter online request timeout on slow CI hosts.
+        verification_timeout = MAX_MODEL_VERIFICATION_REQUEST_TIMEOUT_SECONDS
     verification_manifest = manifest
-    if manifest.get("verification_request_timeout_seconds") is not None:
+    if verification_timeout is not None:
         verification_manifest = {
             **manifest,
-            "request_timeout_seconds": manifest["verification_request_timeout_seconds"],
+            "request_timeout_seconds": verification_timeout,
         }
     runtime = runtime_for_pack(verification_manifest, verification=True)
     passed: list[str] = []

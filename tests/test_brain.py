@@ -2832,9 +2832,11 @@ path = "batch-service"
             "artifacts": {"llama-server": hashlib.sha256(binary.read_bytes()).hexdigest(), "model.gguf": hashlib.sha256(model.read_bytes()).hexdigest(), "tokenizer.json": hashlib.sha256(tokenizer.read_bytes()).hexdigest(), "conformance.json": digest},
         }), encoding="utf-8")
         install_pack(self.settings, pack)
-        with mock.patch("brain.models.runtime_for_pack", return_value=runtime):
+        with mock.patch("brain.models.runtime_for_pack", return_value=runtime) as runtime_factory:
             verified = verify_pack(self.settings, "production-conformance")
         self.assertTrue(verified["conformance"]["passed"])
+        self.assertEqual(900, runtime_factory.call_args.args[0]["request_timeout_seconds"])
+        self.assertTrue(runtime_factory.call_args.kwargs["verification"])
         installed = self.settings.state_dir / "models" / "production-conformance" / "installed.json"
         incompatible = json.loads(installed.read_text(encoding="utf-8"))
         incompatible["chunk_schema_version"] = "obsolete"
