@@ -40,7 +40,7 @@ ATLAS_SCHEMA_VERSION = "3"
 EXTRACTOR_VERSION = "atlas-structural-v3"
 ATLAS_CARD_TERM_SCHEMA_VERSION = "atlas-card-terms-v1"
 ATLAS_CHANGE_TERM_SCHEMA_VERSION = "atlas-change-terms-v1"
-ROUTER_SCHEMA_VERSION = "atlas-router-v4"
+ROUTER_SCHEMA_VERSION = "atlas-router-v5"
 MAX_CARD_ROUTING_TERMS = 128
 MAX_CHANGE_ROUTING_TERMS = 64
 MAX_ROUTING_QUERY_TERMS = 64
@@ -1784,6 +1784,7 @@ def _valid_cached_route(connection: sqlite3.Connection, generation: int, value: 
             or not line_matches
             or not score_matches
             or str(item.get("kind")) != str(row["kind"])
+            or str(item.get("text") or "") != _entity_routing_text(row)
             or not isinstance(item.get("found_by"), list)
             or not all(isinstance(value, str) for value in item.get("found_by") or [])
         ):
@@ -1821,6 +1822,15 @@ def _valid_cached_route(connection: sqlite3.Connection, generation: int, value: 
         ):
             return False, operations
     return True, operations
+
+
+def _entity_routing_text(entity: dict[str, Any]) -> str:
+    """Bounded generation-validated identity text for candidate ranking."""
+    return " ".join(dict.fromkeys(
+        str(entity.get(key) or "").strip()
+        for key in ("qualified_name", "simple_name", "signature")
+        if str(entity.get(key) or "").strip()
+    ))[:1_200]
 
 
 def _valid_term_index(
@@ -1883,6 +1893,7 @@ def _overlay_prefetch_candidates(
                 "entity_id": str(entity_id), "repo": str(entity["repo"]),
                 "module_id": str(entity["module_id"] or ""), "path": str(entity["path"]),
                 "line": int(entity["line_start"]), "kind": str(entity["kind"]), "score": 1.0,
+                "text": _entity_routing_text(entity),
                 "found_by": ["generation-validated ticket prefetch"],
             })
     entities = sorted(
@@ -2175,7 +2186,8 @@ def route(
             connection, generation.generation, (str(item["entity_id"]) for item in scored),
         )
         scored = [
-            item for item in scored
+            {**item, "text": _entity_routing_text(candidate_entities[str(item["entity_id"])])}
+            for item in scored
             if str(item["entity_id"]) in candidate_entities
             and str(item["repo"]) == str(candidate_entities[str(item["entity_id"])]["repo"])
             and str(item["module_id"] or "") == str(candidate_entities[str(item["entity_id"])]["module_id"] or "")
@@ -2230,6 +2242,7 @@ def route(
                 scored.append({
                     "entity_id": str(target_id), "repo": str(repo), "module_id": str(module_id), "path": str(path),
                     "line": int(line), "kind": str(kind), "score": seed_scores.get(str(source_id), 0) * .35 + float(confidence) * 10,
+                    "text": _entity_routing_text(target),
                     "found_by": [f"Atlas {edge_type} edge"],
                 })
         merged: dict[tuple[str, str, int], dict[str, Any]] = {}

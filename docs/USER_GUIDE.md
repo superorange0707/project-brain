@@ -59,9 +59,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.7 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.8 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.7
+.\scripts\install-project-brain.ps1 -Version 1.0.8
 brain.exe --version
 ```
 
@@ -81,14 +81,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.7-windows-amd64.zip` and the published
+Download `project-brain-v1.0.8-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.7-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.7-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.8-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.8-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -111,7 +111,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.7"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.8"
 ```
 
 Upgrade later with:
@@ -123,7 +123,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.7"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.8"
 ```
 
 ### From a source checkout
@@ -773,11 +773,10 @@ The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
 sent into Brain, while `ABC-1234-context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
-After upgrading to v1.0.7, rerun `brain agent-kit m365`, replace Agent Builder
-Instructions and `PROJECT_KNOWLEDGE.md`, and optionally refresh Suggested
-Prompts and `INVESTIGATION_PROTOCOL.md`. `AGENT_KIT.json` records Brain 1.0.7,
-Agent Kit v4, and Investigation Protocol v5. Existing Agents need not be rebuilt;
-use a new conversation to validate v5 multi-wave and delta lineage.
+The v1.0.8 performance patch does not change Agent Kit v4 or Investigation
+Protocol v5, so an existing M365 Agent does not need to be regenerated. If you
+choose to rerun `brain agent-kit m365`, `AGENT_KIT.json` records Brain 1.0.8;
+replace the generated files only when you want that metadata refresh.
 
 ```bash
 brain agent-kit m365 --json

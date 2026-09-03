@@ -416,7 +416,7 @@
   <script>
     "use strict";
     var token = new URLSearchParams(location.search).get("token") || "";
-    var state = { status: null, preview: null, ticket: "", deliveries: {} };
+    var state = { status: null, preview: null, ticket: "", deliveries: {}, refreshJobId: null };
     var titles = { overview: "Project overview", brain: "Brain operations", models: "Local model packs", ticket: "Start a ticket", request: "Continue with AI", review: "Review implementation", agent: "M365 Agent setup", advanced: "Advanced operations" };
 
     function esc(value) {
@@ -487,6 +487,10 @@
       var elapsedMs = progress.elapsed_ms || 0;
       if ((job.status === "pending" || job.status === "running") && job.started_at_ms) elapsedMs = Math.max(elapsedMs, Date.now() - job.started_at_ms);
       rows.push("Elapsed " + elapsed(elapsedMs));
+      if (total && done > 0 && done < total && elapsedMs > 0) {
+        var cardsPerSecond = done / (elapsedMs / 1000);
+        rows.push("Rate " + cardsPerSecond.toFixed(cardsPerSecond < 10 ? 1 : 0) + " cards/s · estimated remaining " + elapsed((total - done) * 1000 / cardsPerSecond));
+      }
       document.getElementById("refresh-counts").innerHTML = rows.map(function (row) { return "<span>" + esc(row) + "</span>"; }).join("");
       var error = document.getElementById("refresh-progress-error");
       if (job.status === "failed") error.innerHTML = '<div class="error">' + esc(job.error || "Refresh failed. Check local configuration, then try again.") + "</div>";
@@ -509,6 +513,25 @@
       setJob(current);
       if (current.status !== "succeeded") throw new Error(current.error || "Local operation failed");
       return current.result || {};
+    }
+    function resumeActiveRefresh(data) {
+      var job = (data.jobs || []).find(function (item) {
+        return item.name === "refresh" && (item.status === "pending" || item.status === "running");
+      });
+      if (!job || state.refreshJobId === job.id) return;
+      state.refreshJobId = job.id;
+      setView("brain");
+      var buttons = [document.getElementById("sync-button"), document.getElementById("brain-refresh")];
+      buttons.forEach(function (button) { busy(button, true, "Refreshing…"); });
+      waitForJob(job).then(function (result) {
+        state.status = result.status || state.status;
+        showToast(result.semantic && result.semantic.status === "failed" ?
+          "Core refresh completed; Semantic needs attention" : "Brain refresh completed");
+      }).catch(report).finally(function () {
+        state.refreshJobId = null;
+        buttons.forEach(function (button) { busy(button, false); });
+        loadStatus().catch(report);
+      });
     }
     async function runModelJob(action, pack, button) {
       busy(button, true, action.replace(/^./, function (value) { return value.toUpperCase(); }) + "…");
@@ -952,7 +975,10 @@
     if (!token) {
       document.getElementById("project-name").textContent = "Missing local session token. Reopen the URL printed by brain ui.";
     } else {
-      loadStatus().then(function () { if (state.ticket) openSession().catch(report); }).catch(report);
+      loadStatus().then(function (data) {
+        resumeActiveRefresh(data);
+        if (state.ticket) openSession().catch(report);
+      }).catch(report);
     }
   </script>
 </body>

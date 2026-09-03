@@ -33,7 +33,7 @@ in control and apply the resulting solution in your normal IDE.
 
 ## Install
 
-The current stable release is **v1.0.7**. Every standalone download contains
+The current stable release is **v1.0.8**. Every standalone download contains
 `brain`, `codebase-memory-mcp`, `zoekt`, and `zoekt-index`. Model weights are
 never bundled.
 
@@ -61,9 +61,9 @@ On managed machines that allow `git clone` but block direct `.ps1` downloads,
 get the installer from the tagged repository and run it directly:
 
 ```powershell
-git clone --depth 1 --branch v1.0.7 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.8 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.7
+.\scripts\install-project-brain.ps1 -Version 1.0.8
 ```
 
 Specifying `-Version` skips the GitHub API lookup. The installer downloads only
@@ -78,7 +78,7 @@ workspace. The clone is not needed after installation.
 
 If company policy also blocks PowerShell script execution, use the portable ZIP:
 
-**[Download `project-brain-v1.0.7-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.7/project-brain-v1.0.7-windows-amd64.zip)**
+**[Download `project-brain-v1.0.8-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.8/project-brain-v1.0.8-windows-amd64.zip)**
 
 Download the ZIP in a browser and extract its complete contents into
 `%LOCALAPPDATA%\ProjectBrain\bin` (or another folder you control) so the four
@@ -96,14 +96,14 @@ Windows is recommended when `brain refresh` needs to fetch remote refs and
 create immutable Git snapshots.
 
 Verify the download against
-[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.7/SHA256SUMS.txt):
+[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.8/SHA256SUMS.txt):
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.7-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\project-brain-v1.0.8-windows-amd64.zip -Algorithm SHA256
 ```
 
 On unrestricted machines, the same installer is also available directly from
-the [v1.0.7 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.7).
+the [v1.0.8 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.8).
 
 ### Linux — verified user-level installer
 
@@ -121,18 +121,18 @@ and installs the four executables in `~/.local/bin`.
 Python 3.11–3.14 is supported:
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.7"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.8"
 ```
 
 Or install the release wheel directly:
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.7/project_brain_context-1.0.7-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.8/project_brain_context-1.0.8-py3-none-any.whl
 ```
 
 All macOS, Linux, Windows, wheel, sdist, installer, checksum, and provenance
 artifacts are available on the
-**[v1.0.7 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.7)**.
+**[v1.0.8 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.8)**.
 
 ## Quick start
 

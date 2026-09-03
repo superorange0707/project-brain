@@ -2195,7 +2195,7 @@ def retrieve_context(
         first_verified_evidence_ms: float | None = None
         candidates.extend(
             SearchHit(
-                str(item["repo"]), str(item["path"]), int(item["line"]), "",
+                str(item["repo"]), str(item["path"]), int(item["line"]), str(item.get("text") or ""),
                 f"Atlas {item.get('kind') or 'entity'} candidate", round(float(item.get("score") or 0), 3),
                 list(item.get("found_by") or ["Atlas hierarchical router"]),
             )
@@ -2281,7 +2281,8 @@ def retrieve_context(
                         )
                     candidates.extend(
                         SearchHit(
-                            str(item["repo"]), str(item["path"]), int(item["line"]), "", "semantic candidate",
+                            str(item["repo"]), str(item["path"]), int(item["line"]),
+                            str(item.get("symbol") or item.get("target_id") or ""), "semantic candidate",
                             round(50 + float(item.get("score") or 0) * 50, 3), ["local semantic index"],
                         )
                         for item in semantic
@@ -2499,7 +2500,6 @@ def retrieve_context(
             if current_edition(settings) == "precision" and not time_budget_exhausted():
                 from .models import rerank_candidates
 
-                trace.rerank_input_count = len(candidates)
                 requested = [name for name in ("searches", "paths", "symbols", "files", "history") if request.get(name)]
                 rerank_query = bundle.objective + ("\nRequested evidence: " + ", ".join(requested) if requested else "")
                 candidates = rerank_candidates(settings, rerank_query, candidates, trace=trace)
@@ -2509,7 +2509,7 @@ def retrieve_context(
         trace.add_stage("rerank_ms", (time.perf_counter() - rerank_started) * 1000)
 
         selection_started = time.perf_counter()
-        selected, omitted = select_candidates(settings, candidates)
+        selected, omitted = select_candidates(settings, candidates, already_fused=True)
         omitted.extend(early_omitted)
         trace.add_stage("selection_ms", (time.perf_counter() - selection_started) * 1000)
 

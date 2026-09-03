@@ -3018,6 +3018,19 @@ path = "batch-service"
         self.assertEqual(50, reranked[2].score)
         self.assertIn("local reranker", reranked[1].found_by)
         self.assertIn("reranker_inference_ms", trace.stage_ms)
+        self.assertEqual(1, trace.rerank_input_count)
+
+    def test_candidate_selection_does_not_apply_fusion_features_twice(self) -> None:
+        from brain.query import prune_candidates, select_candidates
+
+        candidates, _ = prune_candidates(
+            self.settings,
+            [SearchHit("trading-service", "src/Eligibility.java", 10, "Eligibility", "definition", 100, ["symbol"])],
+            10,
+        )
+        fused_score = candidates[0].score
+        selected, _ = select_candidates(self.settings, candidates, already_fused=True)
+        self.assertEqual(fused_score, selected[0].score)
 
     def test_model_lane_serializes_concurrent_reranking(self) -> None:
         active = 0
@@ -3269,6 +3282,41 @@ path = "batch-service"
                 runtime._start()
         shutdown.assert_called_once()
         popen.assert_called_once()
+
+    def test_operation_scoped_runtime_stays_resident_without_overriding_a_pack_limit(self) -> None:
+        resident = ManagedLlamaCppRuntime(
+            {"capability": "embedding"}, default_max_requests=100_001,
+        )
+        resident.client = mock.Mock()
+        resident.process = mock.Mock()
+        resident.process.poll.return_value = None
+        resident.request_count = 64
+        with mock.patch.object(resident, "shutdown") as shutdown, mock.patch(
+            "brain.models._check_pack_integrity",
+        ) as integrity:
+            self.assertIs(resident.client, resident._start())
+        shutdown.assert_not_called()
+        integrity.assert_not_called()
+
+        explicit = runtime_for_pack(
+            {
+                "runtime_name": "llama.cpp", "capability": "embedding",
+                "max_requests_per_runtime": 2,
+            },
+            default_max_requests=100_001,
+        )
+        self.assertIsInstance(explicit, ManagedLlamaCppRuntime)
+        self.assertEqual(100_001, explicit.default_max_requests)
+        explicit.client = mock.Mock()
+        explicit.process = mock.Mock()
+        explicit.process.poll.return_value = None
+        explicit.request_count = 2
+        with mock.patch.object(explicit, "shutdown") as shutdown, mock.patch(
+            "brain.models._check_pack_integrity", side_effect=RuntimeError("stop after restart"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stop after restart"):
+                explicit._start()
+        shutdown.assert_called_once()
 
     def test_production_llama_manifest_cannot_omit_owned_runtime_artifacts(self) -> None:
         manifest = {

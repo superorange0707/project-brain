@@ -122,6 +122,7 @@ class AtlasV09Tests(unittest.TestCase):
         self.assertLessEqual(first["cards_considered"], card_count)
         self.assertTrue(second["cache_hit"])
         self.assertTrue(any(item["path"] == "src/service.py" for item in second["entities"]))
+        self.assertTrue(any("EligibilityService" in item["text"] for item in second["entities"]))
         from brain import atlas as atlas_module
 
         atlas_module._ROUTE_CACHE_SEALS.clear()

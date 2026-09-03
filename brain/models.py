@@ -317,16 +317,25 @@ def _check_pack_integrity(manifest: dict[str, Any]) -> None:
 class ManagedLlamaCppRuntime:
     """A short-lived, pack-owned local llama.cpp server with no network route."""
 
-    def __init__(self, manifest: dict[str, Any], *, verification: bool = False):
+    def __init__(
+        self,
+        manifest: dict[str, Any],
+        *,
+        verification: bool = False,
+        default_max_requests: int = DEFAULT_RUNTIME_MAX_REQUESTS,
+    ):
         self.manifest = manifest
         self.verification = verification
+        self.default_max_requests = max(1, int(default_max_requests))
         self.process: subprocess.Popen[bytes] | None = None
         self.client: LlamaCppRuntime | None = None
         self.request_count = 0
 
     def _start(self) -> LlamaCppRuntime:
         try:
-            max_requests = max(1, int(self.manifest.get("max_requests_per_runtime") or DEFAULT_RUNTIME_MAX_REQUESTS))
+            max_requests = max(1, int(
+                self.manifest.get("max_requests_per_runtime") or self.default_max_requests
+            ))
             timeout_ceiling = MAX_MODEL_VERIFICATION_REQUEST_TIMEOUT_SECONDS if self.verification else 300.0
             request_timeout_seconds = min(timeout_ceiling, max(5.0, float(
                 self.manifest.get("request_timeout_seconds") or DEFAULT_RUNTIME_REQUEST_TIMEOUT_SECONDS
@@ -1782,7 +1791,12 @@ def verify_pack(settings: Settings, pack_id: str) -> dict[str, Any]:
     return manifest
 
 
-def runtime_for_pack(manifest: dict[str, Any], *, verification: bool = False) -> ModelRuntime:
+def runtime_for_pack(
+    manifest: dict[str, Any],
+    *,
+    verification: bool = False,
+    default_max_requests: int = DEFAULT_RUNTIME_MAX_REQUESTS,
+) -> ModelRuntime:
     if manifest.get("runtime_name") == "deterministic-test":
         return DeterministicRuntime(int(manifest.get("embedding_dimension") or 64))
     if manifest.get("runtime_name") == "llama.cpp":
@@ -1794,7 +1808,11 @@ def runtime_for_pack(manifest: dict[str, Any], *, verification: bool = False) ->
             if key_name and (not key_name.isidentifier() or not key_name.isupper()):
                 raise RuntimeError("runtime_api_key_env must be an uppercase environment-variable name")
             return LlamaCppRuntime(str(manifest["runtime_url"]), api_key=os.environ.get(key_name) if key_name else None)
-        return ManagedLlamaCppRuntime(manifest, verification=verification)
+        return ManagedLlamaCppRuntime(
+            manifest,
+            verification=verification,
+            default_max_requests=default_max_requests,
+        )
     raise RuntimeError("unsupported local model runtime")
 
 
@@ -1849,6 +1867,8 @@ def rerank_candidates(
             snippet = str(hit.text).strip().replace("\x00", " ")[:1_200]
             extension = Path(str(hit.path)).suffix.lower().lstrip(".") or "text"
             documents.append(f"Repository: {hit.repo}\nPath: {hit.path}\nLanguage: {extension}\nKind: {hit.kind}\nSnippet: {snippet}")
+        if trace is not None:
+            trace.rerank_input_count = len(positions)
         if not documents:
             return hits
         # Production conformance compares a batch with one-document calls before

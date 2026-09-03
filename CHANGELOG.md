@@ -2,6 +2,31 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.8] - 2026-09-03
+
+### Improved
+
+- Kept the verified embedding runtime resident for one bounded Semantic refresh
+  instead of reloading it after every 64 requests, while preserving explicit
+  pack limits, disconnect recovery, final integrity validation, and guaranteed
+  shutdown.
+- Reduced bulk embedding-cache work from per-batch capacity scans and commits
+  to one tracked capacity measurement, bounded commit checkpoints, and
+  amortized LRU eviction headroom.
+- Passed generation-validated Atlas entity identity and Semantic symbol text to
+  the Precision reranker, and removed a duplicate candidate-fusion pass that
+  could apply lexical features twice.
+- Restored an active refresh display after a UI page reload and added measured
+  cards-per-second and estimated-remaining-time feedback.
+
+### Compatibility
+
+- Preserved Atlas and Semantic generation identity, card/embedding schemas,
+  shard formats, exact-source authority, model packs, embedding cache,
+  workspace configuration, and ticket sessions. Existing indexes do not need
+  to be rebuilt solely for this upgrade; only the small generation-scoped route
+  cache is refreshed on first use for its added candidate-text contract.
+
 ## [1.0.7] - 2026-09-03
 
 ### Fixed
@@ -582,6 +607,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.8]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.8
 [1.0.7]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.7
 [1.0.6]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.6
 [1.0.5]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.5

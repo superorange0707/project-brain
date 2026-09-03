@@ -68,9 +68,17 @@ def prune_candidates(settings: Settings, hits: list[SearchHit], limit: int) -> t
     return kept, [item for item in ranked if (item.repo, item.path, item.line) not in kept_keys]
 
 
-def select_candidates(settings: Settings, hits: list[SearchHit]) -> tuple[list[SearchHit], list[SearchHit]]:
+def select_candidates(
+    settings: Settings,
+    hits: list[SearchHit],
+    *,
+    already_fused: bool = False,
+) -> tuple[list[SearchHit], list[SearchHit]]:
     """Merge nearby hits, then enforce global/file/repository hydration diversity."""
-    ranked = _candidate_regions(settings, hits)
+    ranked = (
+        sorted(hits, key=lambda item: (-item.score, item.repo, item.path, item.line))
+        if already_fused else _candidate_regions(settings, hits)
+    )
     considered, omitted = ranked[: settings.candidate_limit], ranked[settings.candidate_limit :]
     selected: list[SearchHit] = []
     repo_counts: dict[str, int] = {}

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable
 from urllib.error import URLError
 
 from .models import (
+    _check_pack_integrity,
     active_pack,
     embedding_batch_size,
     embedding_request_bytes,
@@ -58,6 +59,9 @@ SEMANTIC_SHARD_MANIFEST_VERSION = "2"
 MAX_SEMANTIC_STATE_BYTES = 64 * 1024 * 1024
 MAX_EMBEDDING_CACHE_ROWS = 100_000
 MAX_EMBEDDING_CACHE_BYTES = 512 * 1024 * 1024
+SEMANTIC_CACHE_COMMIT_BATCHES = 16
+SEMANTIC_CACHE_EVICTION_HEADROOM_ROWS = 4_096
+SEMANTIC_CACHE_EVICTION_HEADROOM_BYTES = 32 * 1024 * 1024
 MIN_SEMANTIC_SHARD_RESERVATION_BYTES = 64 * 1024 * 1024
 MAX_SEMANTIC_SHARD_OVERHEAD_BYTES = 8 * 1024 * 1024
 MAX_SEMANTIC_CHUNKS_PER_FILE = 4_096
@@ -98,17 +102,23 @@ class SemanticEmbeddingError(RuntimeError):
 
 
 def _reserve_embedding_cache(
-    connection: sqlite3.Connection, entries: list[tuple[str, str]],
-) -> None:
+    connection: sqlite3.Connection,
+    entries: list[tuple[str, str]],
+    *,
+    usage: tuple[int, int] | None = None,
+) -> tuple[int, int]:
     """Prune before insertion so the cache never crosses row/byte capacity."""
     incoming = {key: payload for key, payload in entries}
     incoming_bytes = sum(len(payload.encode("utf-8")) for payload in incoming.values())
     if len(incoming) > MAX_EMBEDDING_CACHE_ROWS or incoming_bytes > MAX_EMBEDDING_CACHE_BYTES:
         raise SemanticEmbeddingError("embedding cache entry batch exceeds its managed capacity")
-    usage = connection.execute(
-        "SELECT COUNT(*),COALESCE(SUM(length(CAST(vector_json AS BLOB))),0) FROM embedding_cache"
-    ).fetchone()
-    current_rows, current_bytes = int(usage[0]), int(usage[1])
+    if usage is None:
+        measured = connection.execute(
+            "SELECT COUNT(*),COALESCE(SUM(length(CAST(vector_json AS BLOB))),0) FROM embedding_cache"
+        ).fetchone()
+        current_rows, current_bytes = int(measured[0]), int(measured[1])
+    else:
+        current_rows, current_bytes = usage
     replaced_rows = 0
     replaced_bytes = 0
     keys = sorted(incoming)
@@ -126,6 +136,13 @@ def _reserve_embedding_cache(
     target_bytes = current_bytes - replaced_bytes + incoming_bytes
     removals: list[str] = []
     if target_rows > MAX_EMBEDDING_CACHE_ROWS or target_bytes > MAX_EMBEDDING_CACHE_BYTES:
+        # A tracked bulk build prunes bounded headroom instead of sorting the
+        # complete LRU set again for every small embedding batch.
+        row_target = MAX_EMBEDDING_CACHE_ROWS
+        byte_target = MAX_EMBEDDING_CACHE_BYTES
+        if usage is not None:
+            row_target = max(len(incoming), row_target - SEMANTIC_CACHE_EVICTION_HEADROOM_ROWS)
+            byte_target = max(incoming_bytes, byte_target - SEMANTIC_CACHE_EVICTION_HEADROOM_BYTES)
         for key, size in connection.execute(
             "SELECT cache_key,length(CAST(vector_json AS BLOB)) FROM embedding_cache "
             "ORDER BY last_used_at,cache_key"
@@ -135,11 +152,12 @@ def _reserve_embedding_cache(
             removals.append(str(key))
             target_rows -= 1
             target_bytes -= int(size)
-            if target_rows <= MAX_EMBEDDING_CACHE_ROWS and target_bytes <= MAX_EMBEDDING_CACHE_BYTES:
+            if target_rows <= row_target and target_bytes <= byte_target:
                 break
     if target_rows > MAX_EMBEDDING_CACHE_ROWS or target_bytes > MAX_EMBEDDING_CACHE_BYTES:
         raise SemanticEmbeddingError("embedding cache cannot satisfy its managed capacity")
     connection.executemany("DELETE FROM embedding_cache WHERE cache_key=?", ((key,) for key in removals))
+    return target_rows, target_bytes
 
 
 SemanticProgress = Callable[[dict[str, object]], None]
@@ -404,6 +422,7 @@ def _cache_vectors(
             })
 
     connection = connect(settings)
+    uncommitted_successes = 0
     try:
         from datetime import UTC, datetime
 
@@ -441,6 +460,7 @@ def _cache_vectors(
             connection.executemany("UPDATE embedding_cache SET last_used_at=? WHERE cache_key=?", touched)
         if invalid:
             connection.executemany("DELETE FROM embedding_cache WHERE cache_key=?", invalid)
+        cache_usage = _reserve_embedding_cache(connection, [])
         report(remaining=len(missing))
         if missing:
             if write_capacity is None:
@@ -482,8 +502,9 @@ def _cache_vectors(
                     payload_bytes = sum(len(payload.encode("utf-8")) for _, _, payload in payloads)
                     if payload_bytes > write_capacity[0]:
                         raise SemanticEmbeddingError("embedding cache exceeds the remaining managed write capacity")
-                    _reserve_embedding_cache(
+                    cache_usage = _reserve_embedding_cache(
                         connection, [(keys[index], payload) for index, _, payload in payloads],
+                        usage=cache_usage,
                     )
                     for index, normalized, payload in payloads:
                         vectors[index] = normalized
@@ -493,14 +514,22 @@ def _cache_vectors(
                         )
                     completed += len(current)
                     completed_batches += 1
+                    uncommitted_successes += len(current)
                     # Successful sub-batches survive a later transport failure;
                     # vector cache entries are content-addressed and are not a
                     # semantic-index publication.
-                    connection.commit()
+                    if completed_batches % SEMANTIC_CACHE_COMMIT_BATCHES == 0:
+                        connection.commit()
+                        uncommitted_successes = 0
                     write_capacity[0] -= payload_bytes
                     report(remaining=len(missing) - completed)
-            _reserve_embedding_cache(connection, [])
+            cache_usage = _reserve_embedding_cache(connection, [], usage=cache_usage)
             connection.commit()
+            uncommitted_successes = 0
+    except Exception:
+        if uncommitted_successes:
+            connection.commit()
+        raise
     finally:
         connection.close()
     return [vector for vector in vectors if vector is not None]
@@ -993,7 +1022,13 @@ def build_semantic_index(
     if embed is None and manifest is None:
         raise RuntimeError("Semantic indexing requires a verified local embedding pack")
     if embed is None:
-        runtime = runtime_for_pack(manifest)
+        # A bulk refresh already owns the workspace/model lanes and shuts the
+        # runtime down on exit. Keep the verified model resident for this one
+        # bounded operation instead of rehashing and reloading it every 64
+        # requests. An explicit pack-owned limit still takes precedence.
+        runtime = runtime_for_pack(
+            manifest, default_max_requests=MAX_SEMANTIC_CHUNKS_TOTAL + 1,
+        )
         pack_id = str(manifest["pack_id"])
         dimension = int(manifest.get("embedding_dimension") or 0)
         if dimension <= 0:
@@ -1309,6 +1344,11 @@ def build_semantic_index(
             "shards": state_shards,
             "entries": all_mock_entries,
         }
+        # The operation-resident runtime verifies before its first request.
+        # Recheck once at the publication boundary so a pack mutation during a
+        # long build cannot publish vectors under the old compatibility ID.
+        if runtime is not None and getattr(runtime, "manifest", None) is manifest:
+            _check_pack_integrity(manifest)
         projected_state_bytes = len((json.dumps(state, indent=2) + "\n").encode("utf-8"))
         if projected_state_bytes > semantic_cache_capacity[0]:
             raise SemanticEmbeddingError("Semantic state exceeds the remaining managed write capacity")

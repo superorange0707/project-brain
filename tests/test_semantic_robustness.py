@@ -21,6 +21,7 @@ from brain.core import load_settings, snapshot_indexes
 from brain.editions import capabilities
 from brain.models import LlamaCppRuntime, ManagedLlamaCppRuntime, embedding_request_bytes
 from brain.semantic import (
+    MAX_SEMANTIC_CHUNKS_TOTAL,
     SEMANTIC_MAX_CARD_INPUT_BYTES,
     SEMANTIC_MAX_REQUEST_BODY_BYTES,
     Chunk,
@@ -325,6 +326,27 @@ class SemanticRobustnessTest(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_bulk_embedding_cache_uses_one_capacity_scan_and_bounded_commits(self) -> None:
+        from brain.catalog import connect
+
+        connection = connect(self.settings)
+        statements: list[str] = []
+        connection.set_trace_callback(statements.append)
+        with (
+            mock.patch("brain.catalog.connect", return_value=connection),
+            mock.patch("brain.ops.remaining_write_capacity", return_value=1024 * 1024 * 1024),
+        ):
+            vectors = _cache_vectors(
+                self.settings, "bulk-cache-pack", self._chunks(40), dimension=2,
+                embed=self._vectors, batch_size=1,
+            )
+
+        self.assertEqual(40, len(vectors))
+        self.assertEqual(1, sum(
+            "SELECT COUNT(*),COALESCE(SUM" in statement for statement in statements
+        ))
+        self.assertEqual(3, sum(statement == "COMMIT" for statement in statements))
+
     def test_semantic_shard_capacity_is_reserved_before_native_save(self) -> None:
         saved: list[str] = []
 
@@ -376,6 +398,62 @@ class SemanticRobustnessTest(unittest.TestCase):
             build_semantic_index(self.settings)
         self.assertEqual([], saved)
         self.assertFalse(list((self.settings.state_dir / "semantic-shards").glob("*.usearch")))
+
+    def test_bulk_semantic_build_keeps_runtime_resident_and_revalidates_before_publish(self) -> None:
+        class Runtime:
+            def __init__(self, manifest: dict[str, object]) -> None:
+                self.manifest = manifest
+
+            @staticmethod
+            def embed(cards: list[str], *, instruction: str = "", dimension: int = 0) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in cards]
+
+            @staticmethod
+            def shutdown() -> None:
+                return None
+
+        class Index:
+            def __init__(self, **_: object) -> None:
+                pass
+
+            @staticmethod
+            def add(keys: object, values: object) -> None:
+                return None
+
+            @staticmethod
+            def save(path: str) -> None:
+                Path(path).write_bytes(b"native shard")
+
+        class Numpy:
+            uint64 = "uint64"
+            float32 = "float32"
+
+            @staticmethod
+            def arange(value: int, dtype: object = None) -> list[int]:
+                return list(range(value))
+
+            @staticmethod
+            def asarray(value: object, dtype: object = None) -> object:
+                return value
+
+        manifest: dict[str, object] = {
+            "pack_id": "resident-pack", "embedding_dimension": 2, "test_only": True,
+            "pack_compatibility_identity": "sha256:" + "3" * 64,
+        }
+        runtime = Runtime(manifest)
+        with (
+            mock.patch("brain.semantic.active_pack", return_value=manifest),
+            mock.patch("brain.semantic.runtime_for_pack", return_value=runtime) as runtime_factory,
+            mock.patch("brain.semantic._usearch", return_value=(Index, Numpy)),
+            mock.patch("brain.semantic._check_pack_integrity") as integrity,
+        ):
+            result = build_semantic_index(self.settings)
+
+        self.assertGreater(result["chunks"], 0)
+        runtime_factory.assert_called_once_with(
+            manifest, default_max_requests=MAX_SEMANTIC_CHUNKS_TOTAL + 1,
+        )
+        integrity.assert_called_once_with(manifest)
 
     def test_semantic_chunk_limit_fails_before_embedding_or_shard_write(self) -> None:
         calls: list[list[str]] = []

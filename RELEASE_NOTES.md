@@ -1,4 +1,4 @@
-# Project Brain v1.0.7 — Investigation Runtime
+# Project Brain v1.0.8 — Faster Semantic Refresh and Better Precision Ranking
 
 Project Brain v1 turns the Workspace Intelligence Atlas into a bounded,
 generation-pinned investigation runtime. It gives ChatGPT, Claude, M365
@@ -7,6 +7,15 @@ granting them permission to edit or execute your code.
 
 ## Highlights
 
+- Semantic refresh keeps the verified local embedding runtime resident for the
+  complete bounded build instead of repeatedly reloading the same model.
+- Embedding-cache capacity checks, commits, and LRU pruning are amortized across
+  batches while successful content-addressed checkpoints remain recoverable.
+- Precision reranking now receives generation-validated Atlas entity identity
+  and Semantic symbol text, and candidate fusion features are applied exactly
+  once.
+- Refresh progress survives a browser page reload and reports measured
+  cards-per-second with an estimated remaining time.
 - Native macOS, Linux, and Windows 11 x64 standalone releases.
 - Runtime anchors for symbols, stack frames, endpoints, events, configuration,
   persistence, packages, and file hints.
@@ -24,11 +33,11 @@ granting them permission to edit or execute your code.
 
 Open **Assets** below to download the package for your platform:
 
-- `project-brain-v1.0.7-macos-arm64.tar.gz`
-- `project-brain-v1.0.7-macos-amd64.tar.gz`
-- `project-brain-v1.0.7-linux-arm64.tar.gz`
-- `project-brain-v1.0.7-linux-amd64.tar.gz`
-- `project-brain-v1.0.7-windows-amd64.zip`
+- `project-brain-v1.0.8-macos-arm64.tar.gz`
+- `project-brain-v1.0.8-macos-amd64.tar.gz`
+- `project-brain-v1.0.8-linux-arm64.tar.gz`
+- `project-brain-v1.0.8-linux-amd64.tar.gz`
+- `project-brain-v1.0.8-windows-amd64.zip`
 - Python wheel and source distribution
 - verified macOS/Linux and Windows installers
 - `SHA256SUMS.txt`
@@ -41,9 +50,9 @@ On managed Windows machines that allow `git clone` but block direct `.ps1`
 downloads, obtain the tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.7 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.8 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.7
+.\scripts\install-project-brain.ps1 -Version 1.0.8
 ```
 
 The explicit version skips the GitHub API lookup; the installer downloads and
@@ -54,8 +63,9 @@ PowerShell scripts themselves, use the portable ZIP instead.
 
 The v1 migration is additive and transactional. Existing `brain.toml`, source
 snapshots, Atlas/Semantic generations, embedding cache, model packs, and ticket
-sessions are preserved. No Atlas migration or model/cache reset is required for
-the v1.0.7 patch.
+sessions are preserved. No Atlas/Semantic rebuild, schema migration, model
+reinstall, or cache reset is required solely for the v1.0.8 patch. The internal
+generation-scoped route cache is safely recomputed on first use.
 
 Exact pinned source remains the final evidence authority. Project Brain adds no
 hosted inference, cloud source upload, source editing, target-code execution, or
@@ -63,7 +73,7 @@ autonomous implementation behavior.
 
 See the [README](https://github.com/superorange0707/project-brain#install)
 for installation instructions and the
-[changelog](https://github.com/superorange0707/project-brain/blob/v1.0.7/CHANGELOG.md)
+[changelog](https://github.com/superorange0707/project-brain/blob/v1.0.8/CHANGELOG.md)
 for the complete version-by-version record.
 
 ---
