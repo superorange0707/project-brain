@@ -69,14 +69,14 @@ user `PATH`. No WSL or Python runtime is required.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.1-windows-amd64.zip` and the published
+Download `project-brain-v1.0.2-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.1-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.1-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.2-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.2-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -99,7 +99,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.2"
 ```
 
 Upgrade later with:
@@ -111,7 +111,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.2"
 ```
 
 ### From a source checkout
@@ -761,9 +761,9 @@ The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
 sent into Brain, while `ABC-1234-context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
-After upgrading to v1.0.1, rerun `brain agent-kit m365`, replace Agent Builder
+After upgrading to v1.0.2, rerun `brain agent-kit m365`, replace Agent Builder
 Instructions and `PROJECT_KNOWLEDGE.md`, and optionally refresh Suggested
-Prompts and `INVESTIGATION_PROTOCOL.md`. `AGENT_KIT.json` records Brain 1.0.1,
+Prompts and `INVESTIGATION_PROTOCOL.md`. `AGENT_KIT.json` records Brain 1.0.2,
 Agent Kit v4, and Investigation Protocol v5. Existing Agents need not be rebuilt;
 use a new conversation to validate v5 multi-wave and delta lineage.
 

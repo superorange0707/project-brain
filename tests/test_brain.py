@@ -2098,9 +2098,11 @@ path = "batch-service"
         self.assertFalse(tuning["recommendations"]["embedding_resident"])
         self.assertTrue((self.settings.state_dir / "model-tuning.json").is_file())
         output = io.StringIO()
-        with redirect_stdout(output):
+        diagnostics = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(diagnostics):
             self.assertEqual(0, main(["-c", str(self.config), "model", "autotune", "test-embedding", "--samples", "1"]))
         self.assertEqual("test-embedding", json.loads(output.getvalue())["pack_id"])
+        self.assertIn("running embedding conformance case 1/1", diagnostics.getvalue())
 
     def test_embedding_batch_parity_allows_only_bounded_runtime_rounding_drift(self) -> None:
         self.assertEqual(7e-3, EMBEDDING_BATCH_PARITY_TOLERANCE)

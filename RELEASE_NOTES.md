@@ -1,4 +1,4 @@
-# Project Brain v1.0.1 — Investigation Runtime
+# Project Brain v1.0.2 — Investigation Runtime
 
 Project Brain v1.0 turns the v0.9 Workspace Intelligence Atlas into a bounded,
 generation-pinned investigation runtime while preserving exact source as the
@@ -35,11 +35,20 @@ editing, target-code execution, or autonomous implementation behavior is added.
 This stable release has passed the final supervisory review, adversarial review,
 cross-platform verification, package integrity, and release-readiness gates.
 
-The v1.0.1 release also preserves exact compatibility with the previously
+The v1.0.2 release also preserves exact compatibility with the previously
 published Darwin model-pack capability arguments, bounds native batch/single
 floating-point drift without weakening independent reference or ranking gates,
 and verifies the Windows standalone through a Unicode, spaced, long-path Git
 workspace. No Atlas migration or model/cache reset is required.
+
+This patch pins a rebuilt Darwin arm64 Precision runtime whose deployment target
+is macOS 15, makes legacy model-pack conformance use a bounded verification-only
+timeout, and aligns managed reranker startup with the pack builder's verified
+`--reranking --pooling rank` contract. Normal online request limits and Atlas,
+Semantic, retrieval, ranking, cache, and generation identities are unchanged.
+The native macOS and Windows release-readiness jobs both completed full
+Semantic/Precision installation, conformance, refresh-alignment, and retrieval
+checks before publication.
 
 Native Windows 11 x64 is now a first-class v1 target. The implementation adds
 the permanent Python 3.11–3.14 Windows matrix, native process-tree and
@@ -50,6 +59,11 @@ Semantic/Precision pack builders. The official `semantic-pack-windows-v1.0.0`
 and `precision-pack-windows-v1.0.0` releases passed native conformance,
 checksum, clean-install, and release re-download gates; their immutable
 descriptors are pinned in the v1 catalog.
+
+Windows users can install the verified native amd64 ZIP with the published
+PowerShell installer. It requires neither Python nor WSL; Git for Windows is
+recommended only for Git-backed refresh. The portable wheel remains available
+for supported Python 3.11–3.14 environments.
 
 ---
 

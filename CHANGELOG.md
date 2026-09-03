@@ -2,6 +2,27 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.2] - 2026-09-03
+
+### Fixed
+
+- Rebuilt the Darwin arm64 Precision runtime with a macOS 15 deployment target
+  while preserving the immutable model, tokenizer, reference vectors, ranking
+  gates, and public pack provenance.
+- Gave legacy production packs a bounded verification-only timeout without
+  changing normal online model request limits.
+- Aligned managed reranker startup with the pack builder's verified
+  `--reranking --pooling rank` contract and added bounded verification-only
+  retries with source-free case-index diagnostics.
+
+### Verified
+
+- Passed native macOS and GitHub-hosted Windows Semantic/Precision installation,
+  conformance, Atlas alignment/freshness, and Precision retrieval gates. The
+  Windows standalone remains installable without Python or WSL.
+- Preserved all Atlas/Semantic schemas, generation and cache identities, model
+  packs, workspace configuration, ticket sessions, and exact-source authority.
+
 ## [1.0.1] - 2026-09-02
 
 ### Fixed
@@ -505,6 +526,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.2]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.2
 [1.0.1]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.1
 [1.0.0]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.0
 [0.9.2]: https://github.com/superorange0707/project-brain/releases/tag/v0.9.2

@@ -11,6 +11,7 @@ import socket
 import ssl
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -915,7 +916,11 @@ def _run_model_conformance(manifest: dict[str, Any]) -> dict[str, Any] | None:
         runtime.warmup()
         all_cases = list(cases) + candidate_pool_cases if capability == "reranker" else cases
         for number, case in enumerate(all_cases, start=1):
-            print(f"running {capability} conformance case {number}/{len(all_cases)}", flush=True)
+            print(
+                f"running {capability} conformance case {number}/{len(all_cases)}",
+                file=sys.stderr,
+                flush=True,
+            )
             if not isinstance(case, dict):
                 raise ValueError(f"golden_suite case {number} must be an object")
             if capability in {"embedding", "test"}:

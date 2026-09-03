@@ -177,19 +177,19 @@ Download the archive for your CPU from the
 extract it, and place all four executables on `PATH`:
 
 ```bash
-tar -xzf project-brain-v1.0.1-macos-arm64.tar.gz
+tar -xzf project-brain-v1.0.2-macos-arm64.tar.gz
 mkdir -p ~/.local/bin
 install brain codebase-memory-mcp zoekt zoekt-index ~/.local/bin/
 ```
 
 For a manual Windows installation, download
-`project-brain-v1.0.1-windows-amd64.zip`, verify it against the published
+`project-brain-v1.0.2-windows-amd64.zip`, verify it against the published
 `SHA256SUMS.txt`, and extract all four `.exe` files into one directory on
 `PATH`:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.1-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.1-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.2-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.2-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -206,19 +206,19 @@ unless `codebase-memory-mcp` is also present on `PATH`.
 ### uv tool (recommended)
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.1"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.2"
 ```
 
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.1"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.2"
 ```
 
 ### pip / release wheel
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.1/project_brain_context-1.0.1-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.2/project_brain_context-1.0.2-py3-none-any.whl
 ```
 
 Then verify:
@@ -391,9 +391,9 @@ The AI then permanently knows that it should talk to you directly
 for business, document, runtime, and environment facts, and emit a
 `INVESTIGATION_REQUEST` only for local repository evidence.
 
-After upgrading to v1.0.1, rerun `brain agent-kit m365`, replace Instructions
+After upgrading to v1.0.2, rerun `brain agent-kit m365`, replace Instructions
 and `PROJECT_KNOWLEDGE.md`, and optionally refresh Suggested Prompts and the
-protocol guide. `AGENT_KIT.json` identifies Brain 1.0.1, Agent Kit v4, and
+protocol guide. `AGENT_KIT.json` identifies Brain 1.0.2, Agent Kit v4, and
 Investigation Protocol v5. Existing Agents need not be rebuilt; start a new
 conversation when validating v5 multi-wave and delta lineage.
 
