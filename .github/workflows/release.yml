@@ -373,15 +373,16 @@ jobs:
           $result = .\verified\zoekt.exe -index_dir zoekt-smoke-index "brain-native-windows-smoke"
           if ($LASTEXITCODE -ne 0 -or "$result" -notmatch "example.txt") { throw "Zoekt native smoke failed" }
           $brain = (Resolve-Path .\verified\brain.exe).Path
-          $workspace = Join-Path $env:RUNNER_TEMP ("Project Brain 原生 空格 " + ("long-segment-" * 18))
-          New-Item -ItemType Directory -Path (Join-Path $workspace "repository") -Force | Out-Null
-          Set-Content -Path (Join-Path $workspace "repository/WindowsService.py") -Value "class WindowsService: pass # windows-native-retrieval-marker" -Encoding utf8
+          $workspace = Join-Path $env:RUNNER_TEMP "Project Brain 原生 空格"
           $nativeRepo = Join-Path $workspace "repository"
+          $longSource = Join-Path $nativeRepo (("long-segment\" * 15) + "WindowsService.py")
+          New-Item -ItemType Directory -Path (Split-Path -Parent $longSource) -Force | Out-Null
+          Set-Content -Path $longSource -Value "class WindowsService: pass # windows-native-retrieval-marker" -Encoding utf8
           git -c core.longpaths=true -C $nativeRepo init
           git -c core.longpaths=true -C $nativeRepo config core.longpaths true
           git -c core.longpaths=true -C $nativeRepo config user.name project-brain-ci
           git -c core.longpaths=true -C $nativeRepo config user.email project-brain-ci@example.invalid
-          git -c core.longpaths=true -C $nativeRepo add WindowsService.py
+          git -c core.longpaths=true -C $nativeRepo add -- .
           git -c core.longpaths=true -C $nativeRepo commit -m fixture
           Push-Location $workspace
           try {
