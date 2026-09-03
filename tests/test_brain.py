@@ -4602,6 +4602,11 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("gh release create", workflow)
         self.assertIn("gh release download", workflow)
         self.assertIn("shasum -a 256 --check SHA256SUMS.txt", workflow)
+        self.assertLess(
+            workflow.index('gh release edit "$RELEASE_TAG" --draft=false --latest=false'),
+            workflow.index('gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq .object.type'),
+        )
+        self.assertIn('--json targetCommitish --jq .targetCommitish', workflow)
         self.assertIn("timeout-minutes: 300", workflow)
 
     def test_standalone_release_builds_source_pinned_zoekt(self) -> None:
