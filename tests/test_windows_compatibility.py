@@ -19,7 +19,7 @@ from brain import locks
 from brain.atlas import _module_path
 from brain.backends.zoekt import _relative_result_path, status as zoekt_status
 from brain.core import _clipboard_command, load_settings, parse_context_request
-from brain.cli import _workspace_root, main
+from brain.cli import _configure_windows_stdio, _workspace_root, main
 from brain.models import install_official_pack, official_packs, validate_manifest
 from brain.semantic import chunk_source
 from brain.platforms import (
@@ -93,6 +93,30 @@ class _FakeMsvcrt:
 
 
 class WindowsCompatibilityTest(unittest.TestCase):
+    def test_windows_cli_reconfigures_redirected_legacy_streams_to_utf8(self) -> None:
+        input_bytes = io.BytesIO("输入".encode("utf-8"))
+        output_bytes = io.BytesIO()
+        error_bytes = io.BytesIO()
+        stdin = io.TextIOWrapper(input_bytes, encoding="cp1252")
+        stdout = io.TextIOWrapper(output_bytes, encoding="cp1252")
+        stderr = io.TextIOWrapper(error_bytes, encoding="cp1252")
+        with (
+            mock.patch("brain.cli.sys.platform", "win32"),
+            mock.patch("brain.cli.sys.stdin", stdin),
+            mock.patch("brain.cli.sys.stdout", stdout),
+            mock.patch("brain.cli.sys.stderr", stderr),
+        ):
+            _configure_windows_stdio()
+            stdout.write("D:/Project Brain 原生 空格")
+            stderr.write("路径")
+            stdout.flush()
+            stderr.flush()
+        self.assertEqual("utf-8", stdin.encoding)
+        self.assertEqual("utf-8", stdout.encoding)
+        self.assertEqual("utf-8", stderr.encoding)
+        self.assertEqual("D:/Project Brain 原生 空格", output_bytes.getvalue().decode("utf-8"))
+        self.assertEqual("路径", error_bytes.getvalue().decode("utf-8"))
+
     def test_windows_init_root_supports_cross_drive_repositories(self) -> None:
         current = PureWindowsPath("C:/workspace/repo-a/src")
         repositories = [

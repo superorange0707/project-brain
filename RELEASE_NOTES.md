@@ -1,4 +1,4 @@
-# Project Brain v1.0.3 — Investigation Runtime
+# Project Brain v1.0.4 — Investigation Runtime
 
 Project Brain v1.0 turns the v0.9 Workspace Intelligence Atlas into a bounded,
 generation-pinned investigation runtime while preserving exact source as the
@@ -35,7 +35,7 @@ editing, target-code execution, or autonomous implementation behavior is added.
 This stable release has passed the final supervisory review, adversarial review,
 cross-platform verification, package integrity, and release-readiness gates.
 
-The v1.0.3 release also preserves exact compatibility with the previously
+The v1.0.4 release also preserves exact compatibility with the previously
 published Darwin model-pack capability arguments, bounds native batch/single
 floating-point drift without weakening independent reference or ranking gates,
 and verifies the Windows standalone through a Unicode, spaced, long-path Git
@@ -65,7 +65,7 @@ PowerShell installer. It requires neither Python nor WSL; Git for Windows is
 recommended only for Git-backed refresh. The portable wheel remains available
 for supported Python 3.11–3.14 environments.
 
-The v1.0.3 release workflow keeps the Windows repository root within Git for
+The v1.0.4 release workflow keeps the Windows repository root within Git for
 Windows' working-directory limit while placing the fixture source beneath a
 real greater-than-260-character nested path. This preserves the intended native
 long-path test without confusing a test-harness path limit with a product
@@ -77,6 +77,11 @@ search at the end of meaningful comment-masked content instead of repeatedly
 scanning a large trailing comment as whitespace. Original masked source remains
 authoritative for offsets and identity, and the existing one-megabyte input and
 two-second per-file limits remain enforced.
+
+The native Windows CLI now configures redirected standard input, output, and
+error streams as UTF-8 at process startup. Unicode workspace paths therefore
+remain printable even when a PowerShell host or CI runner begins with a legacy
+Windows code page; normal ASCII output and the CLI JSON schemas are unchanged.
 
 ---
 

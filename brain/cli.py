@@ -44,6 +44,20 @@ from .platforms import logical_path
 MAX_CLI_INPUT_BYTES = 4 * 1024 * 1024
 
 
+def _configure_windows_stdio() -> None:
+    """Keep native Windows CLI streams UTF-8 under redirected code pages."""
+    if sys.platform != "win32":
+        return
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(
+                encoding="utf-8",
+                errors="strict" if name == "stdin" else "backslashreplace",
+            )
+
+
 def _checked_input(value: str, label: str) -> str:
     if len(value.encode("utf-8")) > MAX_CLI_INPUT_BYTES:
         raise BrainError(f"{label} exceeds the {MAX_CLI_INPUT_BYTES}-byte input limit")
@@ -987,6 +1001,7 @@ def execute(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_windows_stdio()
     try:
         return execute(_parser().parse_args(argv))
     except (BrainError, OSError, ValueError, RuntimeError) as exc:

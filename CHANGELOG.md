@@ -2,6 +2,16 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.4] - 2026-09-03
+
+### Fixed
+
+- Configured native Windows CLI standard streams as UTF-8 before command
+  execution so Unicode workspace paths remain printable under redirected
+  legacy code pages.
+- Preserved CLI schemas, Atlas identity, retrieval, generation, cache,
+  model-pack, workspace, and ticket-session behavior unchanged.
+
 ## [1.0.3] - 2026-09-03
 
 ### Fixed
@@ -541,6 +551,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.4]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.4
 [1.0.3]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.3
 [1.0.2]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.2
 [1.0.1]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.1
