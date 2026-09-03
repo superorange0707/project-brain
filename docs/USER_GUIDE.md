@@ -484,9 +484,9 @@ for batch and one-document calls. A minimal embedding case looks like:
 }
 ```
 
-The separately released [Precision pack v1.0.2](https://github.com/superorange0707/project-brain/releases/tag/precision-pack-v1.0.2)
+The separately released [Precision pack v1.0.3](https://github.com/superorange0707/project-brain/releases/tag/precision-pack-v1.0.3)
 is pinned by this compatible Core release. Its descriptor SHA-256 is
-`9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`:
+`f780010c883b9ded459f9e4190a262ee76b6a6e9fc20f9e47ab9a1452b438742`:
 
 ```bash
 brain model install precision

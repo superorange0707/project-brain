@@ -95,11 +95,11 @@ parts, reconstructed model, provenance, and clean temporary installation have
 all been verified. `brain model install semantic` then verifies that descriptor,
 the release parts, and the reassembled model before registering the pack.
 
-The separately released [Precision pack v1.0.2](https://github.com/superorange0707/project-brain/releases/tag/precision-pack-v1.0.2)
+The separately released [Precision pack v1.0.3](https://github.com/superorange0707/project-brain/releases/tag/precision-pack-v1.0.3)
 converts the exact official Qwen3-Reranker-4B source with a pinned local
-`llama.cpp` toolchain and compares public/synthetic results with Qwen's local
-Transformers reference. Its immutable descriptor SHA-256 is
-`9070626e90b0306237bdf208ce0991cbf3804ee1bbee4ddca28c93df288f7df7`.
+`llama.cpp` toolchain targeting macOS 15 and compares public/synthetic results
+with Qwen's local Transformers reference. Its immutable descriptor SHA-256 is
+`f780010c883b9ded459f9e4190a262ee76b6a6e9fc20f9e47ab9a1452b438742`.
 It is never bundled into Core or Homebrew; after this Core catalog release,
 `brain model install precision` resolves only that pinned release.
 On native Windows amd64 the alias resolves to the verified
