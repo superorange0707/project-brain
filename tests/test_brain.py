@@ -4637,6 +4637,7 @@ class ReleaseSafetyTest(unittest.TestCase):
             workflow,
         )
         self.assertIn('go-version: "1.24.7"', workflow)
+        self.assertIn('if ($null -eq $uiOutput) { $uiOutput = "" }', workflow)
         self.assertIn("github.com/sourcegraph/zoekt/cmd/zoekt@$ZOEKTVERSION", workflow)
         self.assertIn("github.com/sourcegraph/zoekt/cmd/zoekt-index@$ZOEKTVERSION", workflow)
         self.assertIn("v0.0.0-20251202141441-886b229dcd5e", workflow)

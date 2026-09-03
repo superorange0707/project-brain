@@ -2,6 +2,15 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.5] - 2026-09-03
+
+### Fixed
+
+- Made the native Windows UI release smoke tolerate the brief empty-log window
+  between redirected standard-output creation and the flushed startup token.
+- Preserved runtime behavior, UI protocol, Atlas/Semantic identity, model packs,
+  workspace state, caches, and ticket sessions unchanged.
+
 ## [1.0.4] - 2026-09-03
 
 ### Fixed
@@ -551,6 +560,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.5]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.5
 [1.0.4]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.4
 [1.0.3]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.3
 [1.0.2]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.2

@@ -424,6 +424,7 @@ jobs:
                 }
                 if (Test-Path $uiStdout) {
                   $uiOutput = Get-Content $uiStdout -Raw
+                  if ($null -eq $uiOutput) { $uiOutput = "" }
                   $tokenMatch = [regex]::Match($uiOutput, '\?token=([A-Za-z0-9_-]+)')
                   if ($tokenMatch.Success) { $uiToken = $tokenMatch.Groups[1].Value }
                 }
