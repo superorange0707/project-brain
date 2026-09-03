@@ -1,105 +1,70 @@
 # Project Brain v1.0.7 — Investigation Runtime
 
-Project Brain v1.0 turns the v0.9 Workspace Intelligence Atlas into a bounded,
-generation-pinned investigation runtime while preserving exact source as the
-final repository evidence authority.
+Project Brain v1 turns the Workspace Intelligence Atlas into a bounded,
+generation-pinned investigation runtime. It gives ChatGPT, Claude, M365
+Copilot, and other chat AIs locally retrieved, exact-source evidence without
+granting them permission to edit or execute your code.
 
-- Runtime Anchor Resolver handles symbols, stack frames, endpoints, events,
-  topics, configuration, persistence, constants, packages, and file hints with
-  bounded generation-scoped cache validation and explicit ambiguity.
-- Enterprise Java/Spring refresh intelligence covers MVC, Feign, Kafka, Spring
-  components/cache/configuration, JPA, and test references through additive,
-  immutable Atlas-generation components.
-- Ordered ExecutionFlow, cross-repository IntegrationFlow, Program Slice Lite,
-  and implementation/test/impact/contract/config-data surfaces remain candidate
-  navigation intelligence until their pinned source locations are verified.
-- The multi-wave controller preserves one Atlas/Semantic serving generation,
-  stable evidence/anchor/flow/blocker/context identities, Hypothesis Ledger,
-  Evidence Frontier, progressive metadata, and first-useful checkpoints for the
-  life of a ticket. It never substitutes a newer generation.
-- Investigation Protocol v5 adds strict byte-aware inputs, modes, runtime
-  anchors, stable lineage, full/delta checkpoints, and stale-base recovery while
-  retaining v1–v4 compatibility.
-- M365 Agent Kit v4 adds the coding-agent-style investigation state machine,
-  evidence labels, challenge/stop rules, and `INVESTIGATION_PROTOCOL.md`.
-- The Investigation Cockpit and local evaluation expose serving state, waves,
-  flows, surfaces, blockers, first-useful timing, M365 contract quality, and
-  bounded physical-operation metrics.
+## Highlights
 
-The v1 schema migration is additive and transactional. Existing `brain.toml`,
-snapshots, v0.9 Atlas/Semantic generations, embedding cache, model packs, and
-ticket sessions are preserved. Optional capability degradation never weakens
-exact pinned-source correctness. No hosted inference, source upload, source
-editing, target-code execution, or autonomous implementation behavior is added.
+- Native macOS, Linux, and Windows 11 x64 standalone releases.
+- Runtime anchors for symbols, stack frames, endpoints, events, configuration,
+  persistence, packages, and file hints.
+- Java/Spring MVC, Feign, Kafka, configuration, JPA, test, execution-flow, and
+  cross-repository integration intelligence.
+- Generation-pinned multi-wave investigations with stable evidence, anchor,
+  flow, blocker, checkpoint, and context-lineage identities.
+- Protocol v5 full/delta checkpoints, Hypothesis Ledger, Evidence Frontier,
+  first-useful checkpoints, and explicit stale-base recovery.
+- M365 Agent Kit v4 and a local Investigation Cockpit.
+- Core exact/lexical/structural fallback when optional local Semantic or
+  Precision capability is absent or fails.
 
-This stable release has passed the final supervisory review, adversarial review,
-cross-platform verification, package integrity, and release-readiness gates.
+## Downloads
 
-The v1.0.7 release also preserves exact compatibility with the previously
-published Darwin model-pack capability arguments, bounds native batch/single
-floating-point drift without weakening independent reference or ranking gates,
-and verifies the Windows standalone through a Unicode, spaced, long-path Git
-workspace. No Atlas migration or model/cache reset is required.
+Open **Assets** below to download the package for your platform:
 
-This patch pins a rebuilt Darwin arm64 Precision runtime whose deployment target
-is macOS 15, makes legacy model-pack conformance use a bounded verification-only
-timeout, and aligns managed reranker startup with the pack builder's verified
-`--reranking --pooling rank` contract. Normal online request limits and Atlas,
-Semantic, retrieval, ranking, cache, and generation identities are unchanged.
-The native macOS and Windows release-readiness jobs both completed full
-Semantic/Precision installation, conformance, refresh-alignment, and retrieval
-checks before publication.
+- `project-brain-v1.0.7-macos-arm64.tar.gz`
+- `project-brain-v1.0.7-macos-amd64.tar.gz`
+- `project-brain-v1.0.7-linux-arm64.tar.gz`
+- `project-brain-v1.0.7-linux-amd64.tar.gz`
+- `project-brain-v1.0.7-windows-amd64.zip`
+- Python wheel and source distribution
+- verified macOS/Linux and Windows installers
+- `SHA256SUMS.txt`
 
-Native Windows 11 x64 is now a first-class v1 target. The implementation adds
-the permanent Python 3.11–3.14 Windows matrix, native process-tree and
-cross-process locking behavior, stable separator-independent evidence paths,
-PowerShell clipboard integration, adjacent `.exe` backend discovery, a pinned
-four-executable Windows standalone ZIP workflow, and separately gated Windows
-Semantic/Precision pack builders. The official `semantic-pack-windows-v1.0.0`
-and `precision-pack-windows-v1.0.0` releases passed native conformance,
-checksum, clean-install, and release re-download gates; their immutable
-descriptors are pinned in the v1 catalog.
+Every release asset has GitHub build-provenance attestation. Verify downloads
+with `SHA256SUMS.txt`; model weights are published separately and are never
+bundled into Core.
 
-Windows users can install the verified native amd64 ZIP with the published
-PowerShell installer. It requires neither Python nor WSL; Git for Windows is
-recommended only for Git-backed refresh. The portable wheel remains available
-for supported Python 3.11–3.14 environments.
+On managed Windows machines that allow `git clone` but block direct `.ps1`
+downloads, obtain the tagged installer from the repository:
 
-The v1.0.7 release workflow keeps the Windows repository root within Git for
-Windows' working-directory limit while placing the fixture source beneath a
-real greater-than-260-character nested path. This preserves the intended native
-long-path test without confusing a test-harness path limit with a product
-failure. It does not change runtime, schema, cache, model-pack, or workspace
-state behavior.
+```powershell
+git clone --depth 1 --branch v1.0.7 https://github.com/superorange0707/project-brain.git project-brain-installer
+cd project-brain-installer
+.\scripts\install-project-brain.ps1 -Version 1.0.7
+```
 
-Java Atlas and Spring-intelligence extraction now stop regular-expression
-search at the end of meaningful comment-masked content instead of repeatedly
-scanning a large trailing comment as whitespace. Original masked source remains
-authoritative for offsets and identity, and the existing one-megabyte input and
-two-second per-file limits remain enforced.
+The explicit version skips the GitHub API lookup; the installer downloads and
+verifies only the matching ZIP and checksum file. If organization policy blocks
+PowerShell scripts themselves, use the portable ZIP instead.
 
-The native Windows CLI now configures redirected standard input, output, and
-error streams as UTF-8 at process startup. Unicode workspace paths therefore
-remain printable even when a PowerShell host or CI runner begins with a legacy
-Windows code page; normal ASCII output and the CLI JSON schemas are unchanged.
+## Upgrade safety
 
-The native Windows UI release smoke now treats a newly created, briefly empty
-redirected-output file as pending output and continues its bounded token wait.
-This corrects release validation timing only; the UI already flushes its startup
-token, and no runtime, protocol, schema, generation, cache, or workspace
-behavior changes.
+The v1 migration is additive and transactional. Existing `brain.toml`, source
+snapshots, Atlas/Semantic generations, embedding cache, model packs, and ticket
+sessions are preserved. No Atlas migration or model/cache reset is required for
+the v1.0.7 patch.
 
-The native Windows cross-process shared-lock test now allows a bounded
-30-second child-process startup window and reports child return codes and
-standard error on failure. This hardens the release gate under loaded hosted
-runners without changing production locking behavior.
+Exact pinned source remains the final evidence authority. Project Brain adds no
+hosted inference, cloud source upload, source editing, target-code execution, or
+autonomous implementation behavior.
 
-The macOS release-readiness gate now distinguishes a slow hosted runner's
-normal online-timeout fallback from a model-pack correctness failure. Installed
-Semantic and Precision conformance, authoritative Semantic generation
-alignment, native Semantic recall, bounded reranker invocation, and explicit
-fallback remain mandatory. Production request timeouts and runtime behavior are
-unchanged.
+See the [README](https://github.com/superorange0707/project-brain#install)
+for installation instructions and the
+[changelog](https://github.com/superorange0707/project-brain/blob/v1.0.7/CHANGELOG.md)
+for the complete version-by-version record.
 
 ---
 

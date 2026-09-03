@@ -15,7 +15,7 @@ Thanks for helping ordinary chat AIs understand real codebases more reliably.
 ## Development setup
 
 ```bash
-git clone git@github.com:superorange0707/project-brain.git
+git clone https://github.com/superorange0707/project-brain.git
 cd project-brain
 python -m venv .venv
 source .venv/bin/activate

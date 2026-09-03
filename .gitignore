@@ -1,7 +1,9 @@
+# Python caches and environments
 __pycache__/
 *.py[cod]
-.DS_Store
 .venv/
+
+# Build outputs
 build/
 dist/
 *.egg-info/
@@ -15,6 +17,10 @@ brain.toml
 config.yml
 config.yaml
 
+# Local maintainer/agent notes are never release inputs.
+AGENTS.md
+PLANS.md
+
 # Never commit local credentials or publishing configuration.
 .env
 .env.*
@@ -24,3 +30,6 @@ config.yaml
 *.pem
 *.p12
 *.pfx
+
+# Operating-system metadata
+.DS_Store

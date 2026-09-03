@@ -55,17 +55,29 @@ same directory on `PATH`.
 
 ### Native Windows 11 x64 installer
 
+When direct `.ps1` Release Asset downloads are blocked but `git clone` is
+allowed, obtain the exact tagged installer from the repository:
+
 ```powershell
-$installer = Join-Path $env:TEMP "install-project-brain.ps1"
-Invoke-WebRequest https://github.com/superorange0707/project-brain/releases/latest/download/install-project-brain.ps1 -OutFile $installer
-Set-ExecutionPolicy -Scope Process Bypass -Force
-& $installer
+git clone --depth 1 --branch v1.0.7 https://github.com/superorange0707/project-brain.git project-brain-installer
+cd project-brain-installer
+.\scripts\install-project-brain.ps1 -Version 1.0.7
 brain.exe --version
 ```
 
-The installer verifies the native ZIP against the release checksum, preserves
+Specifying `-Version` avoids the GitHub API lookup. The installer downloads only
+the versioned native ZIP and `SHA256SUMS.txt`, verifies the archive, preserves
 workspace/model/session state, and adds its managed binary directory to the
-user `PATH`. No WSL or Python runtime is required.
+user `PATH`. It does not require an execution-policy change when repository
+scripts are already allowed. No WSL or Python runtime is required.
+
+Create this installer clone in a downloads or temporary directory, not inside
+the directory that contains repositories configured as a Brain workspace. The
+clone is not required after installation.
+
+If PowerShell reports that script execution is disabled by organization policy,
+do not bypass that policy; use the portable ZIP below or ask the organization to
+approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 

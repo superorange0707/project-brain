@@ -12,7 +12,7 @@ body:
     id: version
     attributes:
       label: Project Brain version
-      placeholder: brain 0.1.0
+      placeholder: Output of brain --version (for example, brain X.Y.Z)
     validations:
       required: true
   - type: dropdown

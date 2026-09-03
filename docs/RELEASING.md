@@ -25,7 +25,10 @@ or weakening TLS.
    `SHA256SUMS.txt` and preserve existing Brain-owned state.
 3. Push a `vX.Y.Z` tag. The release workflow builds all artifacts, writes
    `SHA256SUMS.txt`, creates signed GitHub build-provenance attestations for
-   every asset, and creates the GitHub Release. Verify the downloaded Windows
+   every asset, and creates the GitHub Release. The first section of
+   `RELEASE_NOTES.md` (up to the first `---`) is the concise current-release
+   description; older sections remain repository history and are not copied to
+   the GitHub Release page. Verify the downloaded Windows
    ZIP (and any other asset) with
    `gh attestation verify <asset> --repo superorange0707/project-brain` in
    addition to checking `SHA256SUMS.txt`; provenance verification is a stable

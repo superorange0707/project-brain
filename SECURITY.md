@@ -2,13 +2,12 @@
 
 ## Supported versions
 
-Project Brain is currently alpha software. Security fixes are applied to the most
-recent minor release.
+Security fixes are applied to the current stable release line.
 
 | Version | Supported |
 |---|---|
-| 0.6.x | Yes |
-| 0.5.x | No |
+| 1.0.x | Yes |
+| 0.9.x | No |
 | Older | No |
 
 ## Reporting a vulnerability

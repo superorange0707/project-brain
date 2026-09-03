@@ -552,15 +552,19 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: "dist/*"
+      - name: Prepare current release notes
+        run: |
+          awk '/^---$/ { exit } { print }' RELEASE_NOTES.md > "$RUNNER_TEMP/project-brain-release-notes.md"
+          test -s "$RUNNER_TEMP/project-brain-release-notes.md"
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME" --draft --prerelease
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file "$RUNNER_TEMP/project-brain-release-notes.md" --title "Project Brain $GITHUB_REF_NAME" --draft --prerelease
           else
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME" --draft
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file "$RUNNER_TEMP/project-brain-release-notes.md" --title "Project Brain $GITHUB_REF_NAME" --draft
           fi
       - name: Verify downloaded draft assets and provenance before publication
         env:

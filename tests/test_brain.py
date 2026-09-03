@@ -4655,7 +4655,12 @@ class ReleaseSafetyTest(unittest.TestCase):
             "    needs: [compatibility, windows-compatibility, v1-release-readiness, build, standalone, standalone-windows, cross-platform-parity]\n",
             workflow,
         )
-        self.assertIn('gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file RELEASE_NOTES.md --title "Project Brain $GITHUB_REF_NAME" --draft', workflow)
+        self.assertIn("awk '/^---$/ { exit } { print }' RELEASE_NOTES.md", workflow)
+        self.assertIn(
+            'gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file "$RUNNER_TEMP/project-brain-release-notes.md" --title "Project Brain $GITHUB_REF_NAME" --draft',
+            workflow,
+        )
+        self.assertNotIn("--notes-file RELEASE_NOTES.md", workflow)
         self.assertIn("Publish only the verified release", workflow)
         self.assertIn("    steps:\n      - uses: actions/checkout@v7\n        with:\n          persist-credentials: false\n      - uses: actions/download-artifact@v8", workflow)
 
