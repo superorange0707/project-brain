@@ -279,7 +279,7 @@ class AutoRefreshServiceTests(unittest.TestCase):
             decision = detect_auto_refresh(self.settings)
 
         self.assertEqual("action_required", decision.kind)
-        self.assertEqual(("New repositories require an explicit brain.toml edit.",), decision.reasons)
+        self.assertEqual(("New repositories are ready to add with an explicit refresh.",), decision.reasons)
 
     def test_model_and_storage_action_required_states_are_not_refreshable(self) -> None:
         with patch("brain.editions.current_edition", return_value="semantic"), patch(

@@ -117,6 +117,13 @@ brain model autotune PACK --latency-budget-ms 3000
   refresh, supplies validated entity identity to Precision reranking, applies
   fusion features once, and restores active refresh progress after a UI reload
   without changing Atlas/Semantic generation or persistence schemas.
+- The v1.0.9 patch restores explicit refresh-time repository discovery without
+  restoring the old overwrite-prone config replacement. Newly cloned
+  repositories are appended to the authoritative `brain.toml` under the
+  workspace writer lease after direct-file identity and capacity validation,
+  then the published config is re-parsed before the same refresh continues.
+  Background Auto Refresh does not silently widen scope and instead waits for
+  a user-started refresh.
 - The v1 release gate permanently requires the complete Python 3.11–3.14 matrix.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.

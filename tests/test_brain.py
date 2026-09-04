@@ -4086,7 +4086,7 @@ class InitTest(unittest.TestCase):
                     load_settings(config)
                 self.assertFalse((repo / key).exists())
 
-    def test_refresh_reports_new_repositories_without_mutating_config_and_can_be_opted_out(self) -> None:
+    def test_refresh_adds_new_repositories_and_discovery_can_be_opted_out(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "repo-a/.git").mkdir(parents=True)
@@ -4098,19 +4098,18 @@ class InitTest(unittest.TestCase):
             )
             (root / "repo-b/.git").mkdir(parents=True)
 
-            before = config.read_bytes()
-            error = io.StringIO()
-            with redirect_stderr(error):
-                self.assertEqual(2, main(["-c", str(config), "refresh", "--no-fetch"]))
-            self.assertIn("require an explicit brain.toml edit", error.getvalue())
-            self.assertEqual(before, config.read_bytes())
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, main(["-c", str(config), "refresh", "--no-fetch"]))
+            self.assertEqual({"repo-a", "repo-b"}, {repo.name for repo in load_settings(config).repositories})
 
             (root / "repo-c/.git").mkdir(parents=True)
+            before = config.read_bytes()
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(0, main(["-c", str(config), "refresh", "--no-fetch", "--no-discover"]))
             self.assertEqual(before, config.read_bytes())
+            self.assertEqual({"repo-a", "repo-b"}, {repo.name for repo in load_settings(config).repositories})
 
-    def test_new_repositories_require_an_explicit_config_edit(self) -> None:
+    def test_new_repositories_are_appended_with_unique_names(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             first = root / "team-a/service"
@@ -4127,21 +4126,15 @@ class InitTest(unittest.TestCase):
             )
 
             settings = load_settings(config)
-            before = config.read_bytes()
-            with self.assertRaisesRegex(BrainError, "automatic config mutation is disabled"):
-                discover_and_configure_repositories(settings)
-            self.assertEqual(before, config.read_bytes())
-            self.assertEqual(["service"], [repo.name for repo in settings.repositories])
-            with config.open("a", encoding="utf-8") as output:
-                output.write(
-                    '\n[[repositories]]\nname="team-b-service"\npath="team-b/service"\n'
-                )
+            additions = discover_and_configure_repositories(settings)
+            self.assertEqual(["team-b-service"], [repo.name for repo in additions])
+            self.assertEqual({"service", "team-b-service"}, {repo.name for repo in settings.repositories})
             self.assertEqual(
                 {"service", "team-b-service"},
                 {repo.name for repo in load_settings(config).repositories},
             )
 
-    def test_repository_discovery_never_enters_a_config_mutation_boundary(self) -> None:
+    def test_repository_discovery_write_failure_preserves_config(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "repo-a/.git").mkdir(parents=True)
@@ -4154,18 +4147,16 @@ class InitTest(unittest.TestCase):
             )
             settings = load_settings(config)
             before = config.read_bytes()
-            with mock.patch(
-                "brain.core.os.write", side_effect=AssertionError("config write boundary reached"),
-            ) as wrote, mock.patch(
-                "pathlib.Path.replace", side_effect=AssertionError("config replace boundary reached"),
-            ) as replaced, self.assertRaisesRegex(BrainError, "automatic config mutation is disabled"):
+            with mock.patch("brain.core.os.write", side_effect=OSError("injected failure")) as wrote, mock.patch(
+                "pathlib.Path.replace", side_effect=AssertionError("predictable replacement boundary reached"),
+            ) as replaced, self.assertRaisesRegex(BrainError, "changed during repository discovery"):
                 discover_and_configure_repositories(settings)
-            wrote.assert_not_called()
+            wrote.assert_called_once()
             replaced.assert_not_called()
             self.assertEqual(before, config.read_bytes())
             self.assertEqual(["repo-a"], [repo.name for repo in settings.repositories])
 
-    def test_repository_discovery_preserves_an_in_place_editor_save_exactly(self) -> None:
+    def test_repository_discovery_preserves_an_in_place_editor_save(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "repo-a/.git").mkdir(parents=True)
@@ -4179,12 +4170,13 @@ class InitTest(unittest.TestCase):
             settings = load_settings(config)
             user_save = config.read_bytes() + b'# in-place editor save\n'
             config.write_bytes(user_save)
-            with self.assertRaisesRegex(BrainError, "automatic config mutation is disabled"):
-                discover_and_configure_repositories(settings)
-            self.assertEqual(user_save, config.read_bytes())
-            self.assertEqual(["repo-a"], [repo.name for repo in settings.repositories])
+            additions = discover_and_configure_repositories(settings)
+            self.assertEqual(["repo-b"], [repo.name for repo in additions])
+            self.assertTrue(config.read_bytes().startswith(user_save))
+            self.assertIn("# in-place editor save", config.read_text(encoding="utf-8"))
+            self.assertEqual({"repo-a", "repo-b"}, {repo.name for repo in settings.repositories})
 
-    def test_repository_discovery_never_follows_a_predictable_config_temp_symlink(self) -> None:
+    def test_repository_discovery_does_not_use_a_predictable_config_temp_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "repo-a/.git").mkdir(parents=True)
@@ -4199,13 +4191,12 @@ class InitTest(unittest.TestCase):
             outside.write_text("outside marker\n", encoding="utf-8")
             (root / "brain.toml.tmp").symlink_to(outside)
 
-            before = config.read_bytes()
-            with self.assertRaisesRegex(BrainError, "automatic config mutation is disabled"):
-                discover_and_configure_repositories(load_settings(config))
+            settings = load_settings(config)
+            additions = discover_and_configure_repositories(settings)
+            self.assertEqual(["repo-b"], [repo.name for repo in additions])
             self.assertEqual("outside marker\n", outside.read_text(encoding="utf-8"))
             self.assertFalse(config.is_symlink())
-            self.assertEqual(before, config.read_bytes())
-            self.assertEqual({"repo-a"}, {repo.name for repo in load_settings(config).repositories})
+            self.assertEqual({"repo-a", "repo-b"}, {repo.name for repo in load_settings(config).repositories})
 
     def test_demo_creates_a_complete_four_repo_investigation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

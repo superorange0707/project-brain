@@ -1,4 +1,4 @@
-# Project Brain v1.0.8 — Faster Semantic Refresh and Better Precision Ranking
+# Project Brain v1.0.9 — Safe Automatic Repository Discovery
 
 Project Brain v1 turns the Workspace Intelligence Atlas into a bounded,
 generation-pinned investigation runtime. It gives ChatGPT, Claude, M365
@@ -7,6 +7,13 @@ granting them permission to edit or execute your code.
 
 ## Highlights
 
+- Explicit UI/CLI refresh once again discovers newly cloned repositories,
+  safely appends them to the authoritative `brain.toml`, and includes them in
+  the same refresh instead of failing with a manual-edit requirement.
+- Repository additions run under the existing workspace writer lease, validate
+  direct file identity and bounds, avoid predictable temporary paths, preserve
+  completed editor saves, and re-parse the config before indexing. Background
+  Auto Refresh still requires an explicit manual refresh before widening scope.
 - Semantic refresh keeps the verified local embedding runtime resident for the
   complete bounded build instead of repeatedly reloading the same model.
 - Embedding-cache capacity checks, commits, and LRU pruning are amortized across
@@ -31,28 +38,27 @@ granting them permission to edit or execute your code.
 
 ## Downloads
 
-Open **Assets** below to download the package for your platform:
+This initial publication contains the locally verified Apple Silicon package:
 
-- `project-brain-v1.0.8-macos-arm64.tar.gz`
-- `project-brain-v1.0.8-macos-amd64.tar.gz`
-- `project-brain-v1.0.8-linux-arm64.tar.gz`
-- `project-brain-v1.0.8-linux-amd64.tar.gz`
-- `project-brain-v1.0.8-windows-amd64.zip`
+- `project-brain-v1.0.9-macos-arm64.tar.gz`
 - Python wheel and source distribution
-- verified macOS/Linux and Windows installers
+- verified macOS/Linux installer script
 - `SHA256SUMS.txt`
 
-Every release asset has GitHub build-provenance attestation. Verify downloads
-with `SHA256SUMS.txt`; model weights are published separately and are never
-bundled into Core.
+Verify downloads with `SHA256SUMS.txt`; model weights are published separately
+and are never bundled into Core. Hosted GitHub Actions builds are currently
+disabled at the account level, so this manual tagged build does not claim a
+GitHub-hosted provenance attestation. macOS Intel, Linux, and Windows native
+packages remain on the fully verified v1.0.7 release until their native builds
+can run; they have not been relabelled as v1.0.9.
 
 On managed Windows machines that allow `git clone` but block direct `.ps1`
 downloads, obtain the tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.8 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.7 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.8
+.\scripts\install-project-brain.ps1 -Version 1.0.7
 ```
 
 The explicit version skips the GitHub API lookup; the installer downloads and
@@ -64,7 +70,7 @@ PowerShell scripts themselves, use the portable ZIP instead.
 The v1 migration is additive and transactional. Existing `brain.toml`, source
 snapshots, Atlas/Semantic generations, embedding cache, model packs, and ticket
 sessions are preserved. No Atlas/Semantic rebuild, schema migration, model
-reinstall, or cache reset is required solely for the v1.0.8 patch. The internal
+reinstall, or cache reset is required solely for the v1.0.9 patch. The internal
 generation-scoped route cache is safely recomputed on first use.
 
 Exact pinned source remains the final evidence authority. Project Brain adds no
@@ -73,7 +79,7 @@ autonomous implementation behavior.
 
 See the [README](https://github.com/superorange0707/project-brain#install)
 for installation instructions and the
-[changelog](https://github.com/superorange0707/project-brain/blob/v1.0.8/CHANGELOG.md)
+[changelog](https://github.com/superorange0707/project-brain/blob/v1.0.9/CHANGELOG.md)
 for the complete version-by-version record.
 
 ---

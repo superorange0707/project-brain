@@ -126,7 +126,7 @@ def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
         discovered = set(discover_git_repositories([settings.root])) - configured_paths
         if discovered:
             return FreshnessDecision.action_required(
-                "New repositories require an explicit brain.toml edit."
+                "New repositories are ready to add with an explicit refresh."
             )
         reasons: set[str] = set()
 

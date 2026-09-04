@@ -2,6 +2,29 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.9] - 2026-09-04
+
+### Fixed
+
+- Restored explicit refresh-time repository discovery: newly cloned Git
+  repositories are safely appended to the authoritative `brain.toml` and
+  included in the same refresh instead of failing with a manual-edit error.
+- Kept background Auto Refresh from silently widening repository scope; it
+  reports Action Required until the user starts an explicit refresh.
+- Renamed the cockpit option to **Find and add new repositories** so the
+  configuration change is clear before refresh starts.
+
+### Safety
+
+- Repository additions share the existing cross-process workspace writer
+  lease, enforce repository/config count and byte bounds, validate the direct
+  config-file identity before append, avoid predictable temporary paths,
+  preserve completed editor saves, and re-parse the result before indexing.
+- Preserved target-repository read-only behavior, Atlas/Semantic generation
+  identity, model packs, embedding caches, and ticket sessions. No index rebuild
+  is required solely for this patch unless a newly added repository must be
+  indexed.
+
 ## [1.0.8] - 2026-09-03
 
 ### Improved
@@ -607,6 +630,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.9]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.9
 [1.0.8]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.8
 [1.0.7]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.7
 [1.0.6]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.6

@@ -252,8 +252,8 @@
             <p class="help" id="semantic-status">No semantic generation status yet.</p>
           </article>
           <article class="card wide">
-            <div class="row"><div class="grow"><h2>Refresh Brain</h2><p class="help">Normal refresh checks for unconfigured repositories and requests an explicit brain.toml edit, fetches allowed refs, creates immutable snapshots, builds Core intelligence, then aligns Semantic indexing when the chosen edition requires it.</p></div><button class="button primary" id="brain-refresh">Refresh Brain</button></div>
-            <div class="row"><label class="check"><input type="checkbox" id="refresh-fetch" checked> Fetch remotes</label><label class="check"><input type="checkbox" id="refresh-discover" checked> Check for new repositories</label><span class="help" id="job-status">No operation running.</span></div>
+            <div class="row"><div class="grow"><h2>Refresh Brain</h2><p class="help">Normal refresh safely adds newly discovered repositories to brain.toml, fetches allowed refs, creates immutable snapshots, builds Core intelligence, then aligns Semantic indexing when the chosen edition requires it.</p></div><button class="button primary" id="brain-refresh">Refresh Brain</button></div>
+            <div class="row"><label class="check"><input type="checkbox" id="refresh-fetch" checked> Fetch remotes</label><label class="check"><input type="checkbox" id="refresh-discover" checked> Find and add new repositories</label><span class="help" id="job-status">No operation running.</span></div>
             <div class="row"><label for="auto-refresh-mode"><strong>Auto Refresh</strong></label><select id="auto-refresh-mode"><option value="off">Off</option><option value="when_idle">When idle</option></select><span class="help">Last check: <span id="auto-refresh-last-check">Never</span> · Last refresh: <span id="auto-refresh-last-refresh">Never</span> · <span id="auto-refresh-status">Off</span></span></div>
             <div class="refresh-progress" id="refresh-progress" aria-live="polite">
               <div class="refresh-phase" id="refresh-phase">No Refresh Brain operation started.</div>

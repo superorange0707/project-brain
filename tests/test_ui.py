@@ -418,18 +418,12 @@ None beyond the stated boundary.
         self.assertEqual(400, caught.exception.code)
         caught.exception.close()
 
-    def test_sync_reports_new_repository_without_mutating_user_config(self) -> None:
+    def test_sync_adds_new_repository_to_config(self) -> None:
         (self.root / "service-b/.git").mkdir(parents=True)
-        before = self.config.read_bytes()
-
-        with self.assertRaises(HTTPError) as caught:
-            self.post("/api/sync", {})
-        self.assertEqual(400, caught.exception.code)
-        error = json.loads(caught.exception.read())
-        caught.exception.close()
-        self.assertIn("explicit brain.toml edit", error["error"])
-        self.assertEqual(before, self.config.read_bytes())
-        self.assertEqual(1, len(self.settings.repositories))
+        _, response, _ = self.post("/api/sync", {})
+        self.assertEqual(["service-b"], response["data"]["discovered"])
+        self.assertEqual({"service-a", "service-b"}, {repo.name for repo in self.settings.repositories})
+        self.assertEqual({"service-a", "service-b"}, {repo.name for repo in load_settings(self.config).repositories})
 
     def test_cli_and_ui_sync_delegate_to_the_same_refresh_service(self) -> None:
         outcome = self.refresh_outcome()

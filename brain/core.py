@@ -268,20 +268,113 @@ def discover_git_repositories(roots: Iterable[Path]) -> list[Path]:
     return sorted(paths)
 
 
+@workspace_exclusive
 def discover_and_configure_repositories(settings: Settings) -> list[Repository]:
-    """Detect unconfigured repositories without mutating user-owned configuration."""
+    """Safely append newly cloned repositories to the authoritative brain.toml."""
     configured_paths = {repo.path.resolve() for repo in settings.repositories}
     new_paths = [path for path in discover_git_repositories([settings.root]) if path not in configured_paths]
     if not new_paths:
         return []
-    displayed = [str(path.relative_to(settings.root)) for path in new_paths[:20]]
-    remainder = len(new_paths) - len(displayed)
-    summary = ", ".join(displayed) + (f" (+{remainder} more)" if remainder else "")
-    raise BrainError(
-        "New Git repositories require an explicit brain.toml edit; automatic config mutation "
-        f"is disabled to protect concurrent user saves. Pending: {summary}. "
-        "Add the repositories manually, or rerun with --no-discover to keep the current scope."
-    )
+    if settings.config_path.suffix.lower() != ".toml":
+        raise BrainError(
+            "New Git repositories were found, but automatic config updates require brain.toml; "
+            "migrate the legacy YAML config or add them manually."
+        )
+
+    try:
+        expected = settings.config_path.lstat()
+        raw, exceeded = read_direct_file_bytes(settings.config_path, max_bytes=MAX_CONFIG_BYTES)
+        current = settings.config_path.lstat()
+    except (OSError, ValueError) as error:
+        raise BrainError("Could not safely read brain.toml for repository discovery") from error
+    if (
+        exceeded
+        or settings.config_path.is_symlink()
+        or not stat.S_ISREG(current.st_mode)
+        or (expected.st_dev, expected.st_ino, expected.st_size, expected.st_mtime_ns, expected.st_ctime_ns)
+        != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+    ):
+        raise BrainError("brain.toml changed during repository discovery; retry refresh")
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+        repo_values = data.get("repositories") or []
+        configured_names = {str(value["name"]) for value in repo_values}
+        current_paths = set()
+        for value in repo_values:
+            candidate = Path(os.path.expandvars(str(value["path"]))).expanduser()
+            current_paths.add((candidate if candidate.is_absolute() else settings.root / candidate).resolve())
+    except (KeyError, OSError, TypeError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise BrainError("brain.toml changed or became invalid during repository discovery") from error
+
+    new_paths = [path for path in new_paths if path not in current_paths]
+    if not new_paths:
+        settings.repositories[:] = load_settings(settings.config_path).repositories
+        return []
+    if len(repo_values) + len(new_paths) > MAX_CONFIG_REPOSITORIES:
+        raise BrainError(f"Config supports at most {MAX_CONFIG_REPOSITORIES} repositories")
+
+    all_paths = [*current_paths, *new_paths]
+    rows: list[str] = []
+    for path in new_paths:
+        candidate = path.name
+        if sum(other.name == path.name for other in all_paths) > 1 or candidate in configured_names:
+            candidate = "-".join(path.relative_to(settings.root).parts)
+        name = candidate
+        counter = 2
+        while name in configured_names:
+            name = f"{candidate}-{counter}"
+            counter += 1
+        configured_names.add(name)
+        rows.extend([
+            "[[repositories]]",
+            f"name = {json.dumps(name)}",
+            f"path = {json.dumps(str(path.relative_to(settings.root)))}",
+            'description = ""',
+            "tags = []",
+            "",
+        ])
+
+    separator = b"\n" if raw.endswith(b"\n") else b"\n\n"
+    payload = separator + "\n".join(rows).encode("utf-8")
+    if len(raw) + len(payload) > MAX_CONFIG_BYTES:
+        raise BrainError(f"Config exceeds the {MAX_CONFIG_BYTES:,}-byte direct-file limit: {settings.config_path}")
+
+    descriptor = -1
+    try:
+        flags = (
+            os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(settings.config_path, flags)
+        opened = os.fstat(descriptor)
+        path_metadata = settings.config_path.lstat()
+        if (
+            settings.config_path.is_symlink()
+            or not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (path_metadata.st_dev, path_metadata.st_ino)
+            or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+            != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+        ):
+            raise OSError("brain.toml identity changed while opening")
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("brain.toml append made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+    except OSError as error:
+        raise BrainError("brain.toml changed during repository discovery; retry refresh") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    published = load_settings(settings.config_path)
+    published_paths = {repo.path.resolve() for repo in published.repositories}
+    if any(path not in published_paths for path in new_paths):
+        raise BrainError("brain.toml changed during repository discovery; retry refresh")
+    settings.repositories[:] = published.repositories
+    return [repo for repo in settings.repositories if repo.path.resolve() in set(new_paths)]
 
 
 @dataclass

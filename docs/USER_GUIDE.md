@@ -33,14 +33,15 @@ brew upgrade project-brain
 ```
 
 This installs prebuilt executables and does not compile against the local Xcode
-toolchain. Homebrew maps `superorange0707/tap` to the separate
+toolchain. Apple Silicon receives v1.0.9; Intel remains on v1.0.7 until its
+native build is available. Homebrew maps `superorange0707/tap` to the separate
 [`homebrew-tap`](https://github.com/superorange0707/homebrew-tap) formula index.
 
 ### Linux installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/latest/download/install-project-brain.sh
-sh install-project-brain.sh
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.7/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.7
 ```
 
 This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
@@ -48,10 +49,12 @@ adjacent executables in `~/.local/bin` without changing Brain workspace state.
 
 ### Standalone macOS/Linux archive
 
-Download the matching archive from the
-[latest release](https://github.com/superorange0707/project-brain/releases/latest),
-then keep `brain`, `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the
-same directory on `PATH`.
+Apple Silicon uses the
+[v1.0.9 archive](https://github.com/superorange0707/project-brain/releases/tag/v1.0.9).
+macOS Intel and Linux remain on the fully verified
+[v1.0.7 archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.7)
+until hosted native builds are available. Keep `brain`, `codebase-memory-mcp`,
+`zoekt`, and `zoekt-index` in the same directory on `PATH`.
 
 ### Native Windows 11 x64 installer
 
@@ -59,9 +62,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.8 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.7 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.8
+.\scripts\install-project-brain.ps1 -Version 1.0.7
 brain.exe --version
 ```
 
@@ -81,14 +84,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.8-windows-amd64.zip` and the published
+Download `project-brain-v1.0.7-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.8-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.8-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.7-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.7-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -111,7 +114,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.8"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.9"
 ```
 
 Upgrade later with:
@@ -123,7 +126,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.8"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.9"
 ```
 
 ### From a source checkout
@@ -198,18 +201,20 @@ on demand when a symbol request first implicates them, so a 30-repo workspace do
 not pay the startup cost for every repo. Run `brain doctor` only when you want the
 detailed health report.
 
-After initialization, clone new repositories normally. The next `brain refresh`,
-synced ticket start, or cockpit **Refresh Brain** reports unconfigured repositories
-as an explicit action. Add their `[[repositories]]` blocks to `brain.toml`, then
-refresh again. Refresh never mutates this user-owned config implicitly, so an
-editor save cannot be overwritten or partially appended. Use `--no-discover`
-when a workspace intentionally excludes other Git repos below the same parent
-folder and should skip the pending-repository check.
+After initialization, clone new repositories normally. The next explicit
+`brain refresh`, synced ticket start, or cockpit **Refresh Brain** safely appends
+their `[[repositories]]` blocks to `brain.toml` and includes them in the same
+refresh. The update runs under the existing workspace writer lease, validates
+the direct config-file identity, appends without replacing an editor save, and
+re-parses the published config before indexing. Use `--no-discover`, or clear
+**Find and add new repositories**, when a workspace intentionally excludes other
+Git repos below the same parent folder.
 
 The cockpit's opt-in **Auto Refresh: When idle** mode checks selected commit refs,
 Core index alignment, required Semantic generation alignment, and newly cloned
-repositories. A newly cloned repository becomes **Action Required** until its
-explicit `brain.toml` block is added; it is not placed in a failing refresh loop.
+repositories. A newly cloned repository becomes **Action Required** until an
+explicit manual refresh approves adding it; it is not silently added by the
+background scheduler or placed in a failing refresh loop.
 Ordinary working-tree edits are ignored. Recoverable changes are debounced into
 one call to the same `refresh_brain()` pipeline used by manual refresh. Active
 ticket retrievals leave that refresh pending; new tickets may
@@ -773,9 +778,9 @@ The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
 sent into Brain, while `ABC-1234-context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
-The v1.0.8 performance patch does not change Agent Kit v4 or Investigation
+The v1.0.9 repository-discovery patch does not change Agent Kit v4 or Investigation
 Protocol v5, so an existing M365 Agent does not need to be regenerated. If you
-choose to rerun `brain agent-kit m365`, `AGENT_KIT.json` records Brain 1.0.8;
+choose to rerun `brain agent-kit m365`, `AGENT_KIT.json` records Brain 1.0.9;
 replace the generated files only when you want that metadata refresh.
 
 ```bash
