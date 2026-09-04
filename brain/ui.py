@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import shutil
 import threading
 import time
 import webbrowser
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,8 +16,10 @@ from importlib.resources import files as package_files
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-from .platforms import read_managed_text
+from .platforms import atomic_managed_text_write, read_managed_text
 
 from .agent import archive_final_solution, create_m365_agent_kit, response_preview
 from .core import (
@@ -39,7 +42,7 @@ from .core import (
 )
 from .experience import load_experience_index
 from .locks import WorkspaceOperationBusy, ticket_exclusive
-from .ops import progress_event
+from .ops import StateCapacityError, progress_event
 
 
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
@@ -48,6 +51,7 @@ MAX_SESSION_RESULTS = 200
 MAX_SESSION_ARTIFACT_SCAN_ITEMS = 500
 MAX_SESSION_ARTIFACT_RESULTS = 200
 MAX_UI_ARTIFACT_BYTES = 4 * 1024 * 1024
+UI_INSTANCE_FILE = "ui-instance.json"
 
 
 def _display_path(settings: Settings, path: Path) -> str:
@@ -187,13 +191,18 @@ def project_status(
         })
     brain = dashboard_status(settings)
     sessions = _sessions(settings)
-    active_jobs = [item for item in (jobs or []) if item.get("status") in {"pending", "running"}]
+    active_jobs = [item for item in (jobs or []) if item.get("status") in {"pending", "running", "interrupted"}]
     by_ticket = {str(item.get("ticket")): item for item in active_jobs if item.get("ticket")}
     for session in sessions:
         job = by_ticket.get(str(session["ticket"]))
         if job:
             session["status"] = "retrieving"
             session["job"] = job
+    storage_state = storage(settings)
+    safe_storage = {
+        key: storage_state.get(key)
+        for key in ("total_bytes", "complete", "scanned_entries", "free_bytes", "limits")
+    }
     return {
         "project": {"name": settings.name, "config": settings.config_path.name},
         "summary": {
@@ -211,7 +220,7 @@ def project_status(
             "generation": (current_generation(settings) or {}).get("generation"),
             "capabilities": brain["capabilities"],
             "benchmark": benchmark_report(settings),
-            "storage": storage(settings),
+            "storage": safe_storage,
             "atlas_components": brain["freshness"].get("components") or {},
         },
         "brain": brain,
@@ -308,11 +317,12 @@ def _delete_session(settings: Settings, ticket: str) -> list[str]:
     if not generated_root_is_direct:
         raise BrainError("Generated handoff directory escapes managed Brain state")
     handoff_directory = settings.generated_dir / "handoffs"
-    pattern = re.compile(
+    legacy_pattern = re.compile(
         rf"^{re.escape(safe_name)}-(?:current|start|final|update|context-\d+|evidence-\d+|feedback-\d+|"
         rf"checkpoint-\d+|checkpoint-delta-\d+)\.md$"
     )
     handoffs: list[Path] = []
+    ticket_handoffs = handoff_directory / safe_name
     if handoff_directory.exists() and (
         handoff_directory.is_symlink()
         or not handoff_directory.is_dir()
@@ -321,12 +331,23 @@ def _delete_session(settings: Settings, ticket: str) -> list[str]:
         raise BrainError("Generated handoff directory escapes managed Brain state")
     if handoff_directory.is_dir():
         for path in handoff_directory.iterdir():
-            if path.is_file() and not path.is_symlink() and pattern.fullmatch(path.name):
+            if path.is_file() and not path.is_symlink() and legacy_pattern.fullmatch(path.name):
                 if path.resolve().parent != handoff_directory.resolve():
                     raise BrainError("Generated handoff escapes managed Brain state")
                 handoffs.append(path)
+        if ticket_handoffs.is_symlink() or (
+            ticket_handoffs.exists()
+            and (
+                not ticket_handoffs.is_dir()
+                or ticket_handoffs.resolve().parent != handoff_directory.resolve()
+            )
+        ):
+            raise BrainError("Ticket handoff directory escapes managed Brain state")
     shutil.rmtree(directory)
     removed = [str(directory)]
+    if ticket_handoffs.is_dir():
+        shutil.rmtree(ticket_handoffs)
+        removed.append(str(ticket_handoffs))
     for path in handoffs:
         path.unlink()
         removed.append(str(path))
@@ -338,14 +359,87 @@ class _OperationCoordinator:
 
     _RETAINED = 20
 
-    def __init__(self, max_retrievals: int = 2) -> None:
+    def __init__(self, max_retrievals: int = 2, *, state_dir: Path | None = None) -> None:
         self._lock = threading.Lock()
         self._active_mutation: str | None = None
         self._active_retrievals: dict[str, str] = {}
         self._max_retrievals = max(1, max_retrievals)
         self._jobs: dict[str, dict[str, Any]] = {}
+        self._state_dir = state_dir
+        self._state_path = state_dir / "ui-refresh.json" if state_dir is not None else None
+        self._last_persist = 0.0
+        self._restore_refresh()
 
-    def _claim(self, name: str, *, kind: str = "mutation", ticket: str | None = None) -> str:
+    def _restore_refresh(self) -> None:
+        if self._state_dir is None or self._state_path is None:
+            return
+        try:
+            value = json.loads(read_managed_text(
+                self._state_dir, self._state_path, max_bytes=256 * 1024,
+            ))
+            job = value.get("refresh") if isinstance(value, dict) else None
+            if not isinstance(job, dict) or job.get("name") != "refresh":
+                return
+            if job.get("status") not in {"pending", "running"}:
+                return
+            job_id = str(job.get("id") or "")
+            progress = job.get("progress")
+            if not job_id or not isinstance(progress, dict):
+                return
+            job = {
+                "id": job_id,
+                "name": "refresh",
+                "kind": "mutation",
+                "ticket": None,
+                "status": "interrupted",
+                "phase": "Interrupted — ready to resume",
+                "progress": progress,
+                "started_at_ms": int(job.get("started_at_ms") or 0),
+                "result": None,
+                "error": "The UI process stopped. Run Refresh Brain to resume from reusable published state and embedding cache.",
+                "resume": job.get("resume") if isinstance(job.get("resume"), dict) else {},
+                "_started": time.perf_counter(),
+            }
+            self._jobs[job_id] = job
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return
+
+    def _persist_refresh_locked(self, *, force: bool = False) -> None:
+        if self._state_dir is None or self._state_path is None:
+            return
+        refresh = next((
+            item for item in reversed(list(self._jobs.values()))
+            if item.get("name") == "refresh"
+        ), None)
+        if refresh is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_persist < 1.0:
+            return
+        payload = {
+            key: value for key, value in refresh.items()
+            if key in {"id", "name", "kind", "status", "phase", "progress", "started_at_ms", "resume"}
+        }
+        try:
+            self._state_dir.mkdir(parents=True, exist_ok=True)
+            atomic_managed_text_write(
+                self._state_dir,
+                self._state_path,
+                json.dumps({"schema_version": 1, "refresh": payload}, indent=2) + "\n",
+            )
+            self._state_path.chmod(0o600)
+            self._last_persist = now
+        except (OSError, TypeError, ValueError):
+            return
+
+    def _claim(
+        self,
+        name: str,
+        *,
+        kind: str = "mutation",
+        ticket: str | None = None,
+        resume: dict[str, Any] | None = None,
+    ) -> str:
         with self._lock:
             if kind == "mutation" and (self._active_mutation is not None or self._active_retrievals):
                 active_id = self._active_mutation or next(iter(self._active_retrievals.values()))
@@ -366,7 +460,11 @@ class _OperationCoordinator:
                 self._active_mutation = job_id
             else:
                 self._active_retrievals[str(ticket)] = job_id
-            self._jobs[job_id] = {
+            if name == "refresh":
+                for key, existing in list(self._jobs.items()):
+                    if existing.get("name") == "refresh" and existing.get("status") == "interrupted":
+                        self._jobs.pop(key, None)
+            job = {
                 "id": job_id,
                 "name": name,
                 "kind": kind,
@@ -377,22 +475,31 @@ class _OperationCoordinator:
                 "started_at_ms": round(time.time() * 1000),
                 "result": None,
                 "error": None,
+                "recovery": None,
                 "_started": time.perf_counter(),
             }
+            if name == "refresh":
+                job["resume"] = resume or {}
+            self._jobs[job_id] = job
+            if name == "refresh":
+                self._persist_refresh_locked(force=True)
             return job_id
 
     def _finish(self, job_id: str, *, result: dict[str, Any] | None = None, error: Exception | None = None) -> None:
         with self._lock:
             job = self._jobs[job_id]
             if error is None:
-                job.update({"status": "succeeded", "phase": "Completed", "result": result or {}, "error": None})
+                job.update({
+                    "status": "succeeded", "phase": "Completed", "result": result or {},
+                    "error": None, "recovery": None,
+                })
             else:
                 # Errors from refresh/model runtimes can contain a local path or
                 # transport context.  The UI receives only a safe class label.
                 message = str(error).strip()
                 safe_validation = (
                     job.get("name") != "auto-refresh"
-                    and isinstance(error, (BrainError, ValueError))
+                    and isinstance(error, (BrainError, StateCapacityError, ValueError))
                     and "://" not in message
                     and len(message) <= 280
                 )
@@ -402,6 +509,7 @@ class _OperationCoordinator:
                     "progress": progress_event("failed", elapsed_ms=(time.perf_counter() - float(job["_started"])) * 1000),
                     "result": None,
                     "error": message if safe_validation else f"Operation failed ({type(error).__name__}).",
+                    "recovery": error.recovery() if isinstance(error, StateCapacityError) else None,
                 })
             if job.get("kind") == "mutation" and self._active_mutation == job_id:
                 self._active_mutation = None
@@ -411,6 +519,8 @@ class _OperationCoordinator:
             completed = [key for key, item in self._jobs.items() if item["status"] in {"succeeded", "failed"}]
             for key in completed[:-self._RETAINED]:
                 self._jobs.pop(key, None)
+            if job.get("name") == "refresh":
+                self._persist_refresh_locked(force=True)
 
     def _progress(self, job_id: str, event: dict[str, Any] | str) -> None:
         with self._lock:
@@ -433,9 +543,19 @@ class _OperationCoordinator:
                     if key not in safe and previous.get(key):
                         safe[key] = previous[key]
                 self._jobs[job_id].update({"status": "running", "phase": safe["phase_label"], "progress": safe})
+                if self._jobs[job_id].get("name") == "refresh":
+                    self._persist_refresh_locked()
 
-    def start(self, name: str, operation: Any, *, kind: str = "mutation", ticket: str | None = None) -> dict[str, Any]:
-        job_id = self._claim(name, kind=kind, ticket=ticket)
+    def start(
+        self,
+        name: str,
+        operation: Any,
+        *,
+        kind: str = "mutation",
+        ticket: str | None = None,
+        resume: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        job_id = self._claim(name, kind=kind, ticket=ticket, resume=resume)
 
         def run() -> None:
             try:
@@ -491,7 +611,10 @@ class _Server(ThreadingHTTPServer):
 
         self.settings = settings
         self.token = token
-        self.operations = _OperationCoordinator(settings.max_concurrent_investigations)
+        self.operations = _OperationCoordinator(
+            settings.max_concurrent_investigations,
+            state_dir=settings.state_dir,
+        )
         self.auto_refresh = AutoRefreshService(
             settings,
             refresher=self._auto_refresh,
@@ -504,11 +627,27 @@ class _Server(ThreadingHTTPServer):
         from .ops import refresh_brain
 
         try:
-            return self.operations.foreground("auto-refresh", lambda: refresh_brain(self.settings, fetch=True, discover=True))
+            return self.operations.foreground(
+                "auto-refresh",
+                lambda: refresh_brain(self.reload_settings(), fetch=True, discover=True),
+            )
         except BrainError as error:
             if not self.operations.is_idle():
                 raise WorkspaceOperationBusy("workspace is not idle") from error
             raise
+
+    def reload_settings(self) -> Settings:
+        from .core import load_settings
+
+        loaded = load_settings(self.settings.config_path)
+        fixed_paths = ("root", "config_path", "knowledge_dir", "runs_dir", "state_dir", "generated_dir")
+        if any(getattr(loaded, name) != getattr(self.settings, name) for name in fixed_paths):
+            raise BrainError("Managed workspace paths changed in brain.toml; restart the UI before refreshing")
+        runtime_only = {"atlas_generation", "atlas_generation_mode", "atlas_cards", "evaluation_ablations"}
+        for item in fields(Settings):
+            if item.name not in fixed_paths and item.name not in runtime_only:
+                setattr(self.settings, item.name, getattr(loaded, item.name))
+        return self.settings
 
     def server_close(self) -> None:
         self.auto_refresh.stop()
@@ -542,7 +681,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _error(self, exc: Exception, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
-        self._json({"ok": False, "error": str(exc)}, status)
+        payload: dict[str, Any] = {"ok": False, "error": str(exc)}
+        if isinstance(exc, StateCapacityError):
+            payload["recovery"] = exc.recovery()
+        self._json(payload, status)
 
     def _authorized(self) -> bool:
         host = self.headers.get("Host", "")
@@ -579,7 +721,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         query = parse_qs(parsed.query)
         try:
-            if parsed.path == "/api/status":
+            if parsed.path == "/api/health":
+                self._json({"ok": True, "data": {"status": "ready"}})
+            elif parsed.path == "/api/status":
                 self._json({"ok": True, "data": project_status(
                     self.server.settings,
                     self.server.operations.list(),
@@ -639,7 +783,17 @@ class _Handler(BaseHTTPRequestHandler):
                     "data": self.server.auto_refresh.set_mode(str(body.get("mode") or "")),
                 })
                 return
-            if parsed.path in {"/api/refresh", "/api/model", "/api/edition"}:
+            if parsed.path == "/api/shutdown":
+                if not self.server.operations.is_idle():
+                    raise BrainError("The UI cannot stop while a refresh or investigation is running")
+                self._json({"ok": True, "data": {"stopping": True}})
+                threading.Thread(
+                    target=self.server.shutdown,
+                    name="project-brain-ui-shutdown",
+                    daemon=True,
+                ).start()
+                return
+            if parsed.path in {"/api/refresh", "/api/model", "/api/edition", "/api/gc"}:
                 self._start_operation(parsed.path, body)
             elif parsed.path == "/api/retrieval":
                 self._start_retrieval(body)
@@ -667,7 +821,22 @@ class _Handler(BaseHTTPRequestHandler):
             discover = bool(body.get("discover", True))
             job = self.server.operations.start(
                 "refresh",
-                lambda progress: {**refresh_brain(settings, fetch=fetch, discover=discover, progress=progress).as_dict(), "status": project_status(settings)},
+                lambda progress: {
+                    **refresh_brain(
+                        self.server.reload_settings(),
+                        fetch=fetch,
+                        discover=discover,
+                        progress=progress,
+                    ).as_dict(),
+                    "status": project_status(settings),
+                },
+                resume={"fetch": fetch, "discover": discover},
+            )
+        elif path == "/api/gc":
+            apply = bool(body.get("apply"))
+            job = self.server.operations.start(
+                "storage-recovery",
+                lambda _progress: self._gc_job(settings, apply=apply),
             )
         elif path == "/api/edition":
             from .ops import change_edition
@@ -690,6 +859,31 @@ class _Handler(BaseHTTPRequestHandler):
                 lambda progress: self._model_job(settings, action, value, progress),
             )
         self._json({"ok": True, "data": job}, HTTPStatus.ACCEPTED)
+
+    @staticmethod
+    def _gc_job(settings: Settings, *, apply: bool) -> dict[str, Any]:
+        from .ops import gc
+
+        report = gc(settings, dry_run=not apply, keep_recent=2)
+        blockers = report.get("reachability_gc_blocked") or []
+        semantic_blockers = report.get("semantic_gc_blocked") or []
+        counts: dict[str, int] = {}
+        for item in report.get("remove") or []:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "artifact")
+            counts[kind] = counts.get(kind, 0) + 1
+        return {
+            "applied": apply and not blockers,
+            "blocked": bool(blockers),
+            "blocker": "Safe cleanup could not prove that all candidates are unpinned; nothing was removed." if blockers else None,
+            "semantic_blocked": bool(semantic_blockers),
+            "reclaim_bytes": int(report.get("reclaim_bytes") or 0),
+            "removable_count": sum(counts.values()),
+            "counts": counts,
+            "pinned_generations": len(report.get("pinned_generations") or []),
+            "pinned_snapshots": len(report.get("pinned_snapshots") or []),
+        }
 
     def _start_retrieval(self, body: dict[str, Any]) -> None:
         ticket = str(body.get("ticket") or "").strip()
@@ -901,7 +1095,85 @@ def _target(body: dict[str, Any]) -> str:
     return target
 
 
+def _ui_instance_path(settings: Settings) -> Path:
+    return settings.state_dir / UI_INSTANCE_FILE
+
+
+def _load_ui_instance(settings: Settings) -> dict[str, Any] | None:
+    path = _ui_instance_path(settings)
+    try:
+        loaded = json.loads(read_managed_text(settings.state_dir, path, max_bytes=16 * 1024))
+        if not isinstance(loaded, dict):
+            return None
+        port = int(loaded.get("port") or 0)
+        token = str(loaded.get("token") or "")
+        if (
+            int(loaded.get("schema_version") or 0) != 1
+            or not 1 <= port <= 65535
+            or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token)
+        ):
+            return None
+        return {**loaded, "port": port, "token": token}
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _probe_ui_instance(instance: dict[str, Any], *, stop: bool = False) -> bool:
+    request = Request(
+        f"http://127.0.0.1:{instance['port']}/api/{'shutdown' if stop else 'health'}",
+        data=b"{}" if stop else None,
+        headers={
+            "X-Brain-Token": str(instance["token"]),
+            **({"Content-Type": "application/json"} if stop else {}),
+        },
+        method="POST" if stop else "GET",
+    )
+    try:
+        with urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read(64 * 1024))
+        return bool(isinstance(payload, dict) and payload.get("ok"))
+    except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _forget_ui_instance(settings: Settings, instance: dict[str, Any] | None = None) -> None:
+    path = _ui_instance_path(settings)
+    if instance is not None:
+        current = _load_ui_instance(settings)
+        if current is not None and current.get("token") != instance.get("token"):
+            return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def ui_instance(settings: Settings, action: str) -> dict[str, Any]:
+    instance = _load_ui_instance(settings)
+    running = bool(instance and _probe_ui_instance(instance))
+    if not running:
+        _forget_ui_instance(settings, instance)
+    stopping = False
+    if running and action == "stop":
+        if not _probe_ui_instance(instance, stop=True):
+            raise BrainError("The UI is busy and cannot stop until its refresh or investigation completes")
+        stopping = True
+    return {
+        "running": running,
+        "stopping": stopping,
+        "port": instance.get("port") if running and instance else None,
+    }
+
+
 def serve_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True) -> None:
+    existing = _load_ui_instance(settings)
+    if existing and _probe_ui_instance(existing):
+        url = f"http://127.0.0.1:{existing['port']}/?token={existing['token']}"
+        print(f"Project Brain UI already running: {url}", flush=True)
+        if open_browser:
+            webbrowser.open(url)
+        return
+    _forget_ui_instance(settings, existing)
     token = secrets.token_urlsafe(32)
     try:
         server = _Server(("127.0.0.1", port), settings, token)
@@ -909,6 +1181,23 @@ def serve_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True)
         raise BrainError(f"Could not start Project Brain UI on loopback port {port}: {exc}") from exc
     actual_port = int(server.server_address[1])
     url = f"http://127.0.0.1:{actual_port}/?token={token}"
+    instance = {
+        "schema_version": 1,
+        "pid": os.getpid(),
+        "port": actual_port,
+        "token": token,
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    try:
+        atomic_managed_text_write(
+            settings.state_dir,
+            _ui_instance_path(settings),
+            json.dumps(instance, indent=2) + "\n",
+        )
+        _ui_instance_path(settings).chmod(0o600)
+    except (OSError, ValueError) as exc:
+        server.server_close()
+        raise BrainError(f"Could not create the private UI instance record: {exc}") from exc
     print(f"Project Brain UI: {url}", flush=True)
     print("Local-only session. Press Ctrl+C to stop.", flush=True)
     if open_browser:
@@ -922,4 +1211,5 @@ def serve_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True)
             server.server_close()
         except KeyboardInterrupt:
             pass
+        _forget_ui_instance(settings, instance)
         print("\nProject Brain UI stopped.")

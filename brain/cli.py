@@ -242,6 +242,7 @@ def _parser() -> argparse.ArgumentParser:
     status_command.add_argument("--json", action="store_true", help="print machine-readable project status")
 
     ui = commands.add_parser("ui", help="open the local Project Brain investigation cockpit")
+    ui.add_argument("action", nargs="?", choices=("start", "status", "stop"), default="start")
     ui.add_argument("--port", type=int, default=8765, help="loopback port; use 0 for any free port")
     ui.add_argument("--no-open", action="store_true", help="do not open the browser automatically")
 
@@ -981,9 +982,16 @@ def execute(args: argparse.Namespace) -> int:
     if args.command == "ui":
         if not 0 <= args.port <= 65535:
             raise BrainError("--port must be between 0 and 65535")
-        from .ui import serve_ui
+        from .ui import serve_ui, ui_instance
 
-        serve_ui(settings, port=args.port, open_browser=not args.no_open)
+        if args.action == "status":
+            status = ui_instance(settings, "status")
+            print(f"Project Brain UI is running on 127.0.0.1:{status['port']}." if status["running"] else "Project Brain UI is not running.")
+        elif args.action == "stop":
+            status = ui_instance(settings, "stop")
+            print("Project Brain UI is stopping." if status["stopping"] else "Project Brain UI is not running.")
+        else:
+            serve_ui(settings, port=args.port, open_browser=not args.no_open)
         return 0
     if args.command in {"next", "prev"}:
         path, current, total = move_delivery(settings, args.ticket, 1 if args.command == "next" else -1)
@@ -1006,6 +1014,10 @@ def main(argv: list[str] | None = None) -> int:
         return execute(_parser().parse_args(argv))
     except (BrainError, OSError, ValueError, RuntimeError) as exc:
         print(f"brain: {exc}", file=sys.stderr)
+        from .ops import StateCapacityError
+
+        if isinstance(exc, StateCapacityError):
+            print("brain: recovery: open `brain ui` and use Storage & recovery; pinned ticket evidence is preserved", file=sys.stderr)
         return 2
 
 

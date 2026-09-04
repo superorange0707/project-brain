@@ -1096,6 +1096,50 @@ path = "batch-service"
         ):
             ops_module.ensure_write_capacity(self.settings)
 
+    def test_capacity_and_gc_account_sealed_snapshots_without_walking_every_file(self) -> None:
+        from brain import ops as ops_module
+
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            snapshot = state / "snapshots/service/sha-capacity"
+            snapshot.mkdir(parents=True)
+            for number in range(40):
+                (snapshot / f"source-{number:03d}.java").write_bytes(b"source")
+            seal = sync_module._snapshot_seal(snapshot, snapshot.name)
+            seal_path = sync_module._snapshot_seal_path(snapshot.parent, snapshot.name)
+            seal_path.write_text(json.dumps(seal), encoding="utf-8")
+            expected = 40 * len(b"source") + seal_path.stat().st_size
+            ops_module._SNAPSHOT_CAPACITY_CACHE.clear()
+
+            with mock.patch.object(ops_module, "MAX_CAPACITY_SCAN_ENTRIES", 8):
+                self.assertEqual(expected, ops_module._directory_bytes(state))
+            budget = ops_module._GcScanBudget(
+                remaining_items=2,
+                deadline=time.monotonic() + 5,
+            )
+            self.assertEqual(40 * len(b"source"), ops_module._gc_path_bytes(
+                replace(self.settings, state_dir=state), snapshot, budget,
+            ))
+
+            seal["sha"] = "wrong"
+            seal_path.write_text(json.dumps(seal), encoding="utf-8")
+            ops_module._SNAPSHOT_CAPACITY_CACHE.clear()
+            with mock.patch.object(ops_module, "MAX_CAPACITY_SCAN_ENTRIES", 8), self.assertRaisesRegex(
+                OSError, "capacity scan budget exceeded",
+            ):
+                ops_module._directory_bytes(state)
+
+    def test_capacity_error_exposes_a_safe_recovery_without_local_paths(self) -> None:
+        from brain.ops import StateCapacityError
+
+        error = StateCapacityError(
+            "state_quota_exceeded",
+            "Project Brain state quota would be exceeded",
+        )
+        recovery = error.recovery()
+        self.assertEqual("safe_gc", recovery["action"])
+        self.assertNotIn(str(self.root), json.dumps(recovery))
+
     def test_context_and_retrieval_config_cannot_disable_global_bounds(self) -> None:
         project = self.root / "oversized-config"
         repository = project / "repository"
@@ -1205,6 +1249,15 @@ path = "batch-service"
         }
         self.assertEqual(before, after)
 
+        handoffs.unlink()
+        handoffs.mkdir()
+        outside_handoffs = self.root / "outside-ticket-handoffs"
+        outside_handoffs.mkdir()
+        (handoffs / "SEC-HANDOFF").symlink_to(outside_handoffs, target_is_directory=True)
+        with self.assertRaisesRegex(BrainError, "parent must not be a symbolic link"):
+            deliver(self.settings, "SEC-HANDOFF", "bounded handoff", "m365", copy=False)
+        self.assertEqual([], list(outside_handoffs.iterdir()))
+
     def test_direct_reads_and_managed_writes_reject_racing_path_substitution(self) -> None:
         from brain.index import _read_source_bytes
         from brain.platforms import atomic_managed_bytes_write as real_managed_write
@@ -1279,6 +1332,20 @@ path = "batch-service"
             with self.assertRaisesRegex(BrainError, "does not belong to this session"):
                 core_module.move_delivery(self.settings, "SEC-A", 0)
         copied.assert_not_called()
+
+    def test_legacy_flat_handoff_remains_readable_after_ticket_folder_upgrade(self) -> None:
+        start_session(self.settings, "LEGACY-HANDOFF", "Read the existing flat handoff.")
+        legacy = self.settings.generated_dir / "handoffs/LEGACY-HANDOFF-context-001.md"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("legacy context", encoding="utf-8")
+        state = session_state(self.settings, "LEGACY-HANDOFF")
+        state["delivery"] = {"parts": [str(legacy)], "current": 1}
+        core_module.save_session(self.settings, "LEGACY-HANDOFF", state)
+        with mock.patch("brain.core.clipboard_write") as copied:
+            path, current, total = core_module.move_delivery(self.settings, "LEGACY-HANDOFF", 0)
+        self.assertEqual(legacy, path)
+        self.assertEqual((1, 1), (current, total))
+        copied.assert_called_once_with("legacy context")
 
     def test_git_manifest_indexes_only_new_blobs_and_hydrates_missing_snapshot_files(self) -> None:
         repo = self.settings.repo("trading-service")
@@ -1677,20 +1744,20 @@ path = "batch-service"
     def test_final_solution_m365_handoff_and_agent_kit(self) -> None:
         start, _ = start_session(self.settings, "ABC-M365", "Prepare an M365 handoff.")
         first, _ = deliver(self.settings, "ABC-M365", start, "m365", copy=False)
-        self.assertEqual("ABC-M365-start.md", first[0].name)
-        self.assertEqual(self.settings.generated_dir / "handoffs", first[0].parent)
+        self.assertEqual("start.md", first[0].name)
+        self.assertEqual(self.settings.generated_dir / "handoffs/ABC-M365", first[0].parent)
         self.assertTrue((self.settings.runs_dir / "ABC-M365/current-handoff.md").is_file())
-        self.assertTrue((self.settings.generated_dir / "handoffs/ABC-M365-current.md").is_file())
+        self.assertTrue((self.settings.generated_dir / "handoffs/ABC-M365/current.md").is_file())
 
         context, _, _ = create_context(self.settings, "ABC-M365", REQUEST)
         request_handoff, _ = deliver(self.settings, "ABC-M365", context, "m365", copy=False)
-        self.assertEqual("ABC-M365-context-001.md", request_handoff[0].name)
+        self.assertEqual("context-001.md", request_handoff[0].name)
         self.assertIn("Request: `001`", request_handoff[0].read_text(encoding="utf-8"))
 
         final_text = FINAL_SOLUTION
         final_path = archive_final_solution(self.settings, "ABC-M365", final_text)
         second, _ = deliver(self.settings, "ABC-M365", final_text, "m365", copy=False)
-        self.assertEqual("ABC-M365-final.md", second[0].name)
+        self.assertEqual("final.md", second[0].name)
         self.assertNotEqual(first[0], second[0])
         self.assertEqual(final_text, second[0].read_text(encoding="utf-8"))
         self.assertTrue(final_path.is_file())
@@ -1800,7 +1867,8 @@ path = "batch-service"
         self.assertTrue(stored.is_file())
         self.assertIn("explicitly supplied by the user", content)
         handoff, _ = deliver(self.settings, "ABC-DOC", content, "m365", copy=False)
-        self.assertEqual("ABC-DOC-evidence-001.md", handoff[0].name)
+        self.assertEqual("evidence-001.md", handoff[0].name)
+        self.assertEqual(self.settings.generated_dir / "handoffs/ABC-DOC", handoff[0].parent)
 
         context, _, _ = create_context(self.settings, "ABC-DOC", REQUEST)
         self.assertIn("Transaction cache TTL must be at least 45 seconds", context)
@@ -4156,6 +4224,37 @@ class InitTest(unittest.TestCase):
             self.assertEqual(before, config.read_bytes())
             self.assertEqual(["repo-a"], [repo.name for repo in settings.repositories])
 
+    def test_repository_discovery_partial_write_failure_rolls_back_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo-a/.git").mkdir(parents=True)
+            (root / "repo-b/.git").mkdir(parents=True)
+            config = root / "brain.toml"
+            config.write_text(
+                '[project]\nname="discovery-partial-write"\n[graph]\nenabled=false\n'
+                '[[repositories]]\nname="repo-a"\npath="repo-a"\n',
+                encoding="utf-8",
+            )
+            settings = load_settings(config)
+            before = config.read_bytes()
+            real_write = os.write
+            calls = 0
+
+            def fail_after_short_write(descriptor, value):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return real_write(descriptor, bytes(value[:8]))
+                raise OSError("injected failure after a short write")
+
+            with mock.patch("brain.core.os.write", side_effect=fail_after_short_write), self.assertRaisesRegex(
+                BrainError, "changed during repository discovery",
+            ):
+                discover_and_configure_repositories(settings)
+            self.assertEqual(2, calls)
+            self.assertEqual(before, config.read_bytes())
+            self.assertEqual("discovery-partial-write", tomllib.loads(config.read_text(encoding="utf-8"))["project"]["name"])
+
     def test_repository_discovery_preserves_an_in_place_editor_save(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -4548,6 +4647,11 @@ class ReleaseSafetyTest(unittest.TestCase):
         self.assertIn("sha256sum -c SHA256SUMS.txt", workflow)
         self.assertIn('gh attestation verify "$asset" --repo "$GH_REPO"', workflow)
         self.assertIn('gh release edit "$GITHUB_REF_NAME" --draft=false --latest', workflow)
+        self.assertIn("Publish and require anonymous asset availability", workflow)
+        self.assertIn('RELEASE_BASE="https://github.com/${GH_REPO}/releases/download/${GITHUB_REF_NAME}"', workflow)
+        self.assertIn('curl --fail --location --silent --show-error', workflow)
+        self.assertIn('gh release edit "$GITHUB_REF_NAME" --draft=true', workflow)
+        self.assertIn("cd anonymous-release-verification\n          sha256sum -c SHA256SUMS.txt", workflow)
         self.assertIn("Formula/project-brain-rc.rb", workflow)
         self.assertIn("--release-candidate", workflow)
         self.assertIn("!contains(github.ref_name, '-')", workflow)
@@ -4700,7 +4804,7 @@ class ReleaseSafetyTest(unittest.TestCase):
             workflow,
         )
         self.assertNotIn("--notes-file RELEASE_NOTES.md", workflow)
-        self.assertIn("Publish only the verified release", workflow)
+        self.assertIn("Publish and require anonymous asset availability", workflow)
         self.assertIn("    steps:\n      - uses: actions/checkout@v7\n        with:\n          persist-credentials: false\n      - uses: actions/download-artifact@v8", workflow)
 
     def test_repository_contains_no_credential_or_private_path_material(self) -> None:

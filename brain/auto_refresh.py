@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from .core import Repository, Settings
 
 
+MAX_FRESHNESS_PROBE_SECONDS = 45.0
+
+
 @dataclass(frozen=True)
 class FreshnessDecision:
     """A source-free decision suitable for local status surfaces."""
@@ -50,25 +53,51 @@ def _branch_name(ref: str | None) -> str | None:
     return value if value and value != "HEAD" and not value.startswith("refs/") else None
 
 
-def _probe_repository(repo: Repository, stored: dict[str, Any], branch_priority: list[str]) -> tuple[bool, bool]:
+def _probe_repository(
+    repo: Repository,
+    stored: dict[str, Any],
+    branch_priority: list[str],
+    deadline: float,
+) -> tuple[bool, bool]:
     """Return (drift, failed) without changing refs or inspecting worktree files."""
-    from .sync import _git, _git_text, _ssh_endpoint
+    from .sync import _git, _ssh_endpoint
 
-    if _git(repo, "rev-parse", "--git-dir", timeout=10).returncode != 0:
+    def git(*args: str, timeout: float, extra_env: dict[str, str] | None = None) -> Any:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        return _git(
+            repo, *args,
+            timeout=min(timeout, max(0.05, remaining)),
+            extra_env=extra_env,
+        )
+
+    def git_text(*args: str, timeout: float = 10) -> str | None:
+        result = git(*args, timeout=timeout)
+        if result is None or result.returncode != 0 or not str(result.stdout or "").strip():
+            return None
+        return str(result.stdout).strip()
+
+    git_directory = git("rev-parse", "--git-dir", timeout=10)
+    if git_directory is None:
+        return False, True
+    if git_directory.returncode != 0:
         return False, False
     stored_sha = str(stored.get("sha") or "")
     stored_ref = str(stored.get("ref") or "")
-    remotes = (_git_text(repo, "remote") or "").splitlines()
+    remotes = (git_text("remote") or "").splitlines()
     if "origin" not in remotes or stored_ref.startswith("refs/heads/"):
         ref = stored_ref or "HEAD"
-        result = _git(repo, "rev-parse", "--verify", ref, timeout=10)
+        result = git("rev-parse", "--verify", ref, timeout=10)
+        if result is None:
+            return False, True
         sha = str(result.stdout or "").strip()
         return (bool(stored_sha and sha and sha != stored_sha), result.returncode != 0 or not sha)
 
     extra_env = None
-    remote = _git_text(repo, "remote", "get-url", "origin")
+    remote = git_text("remote", "get-url", "origin")
     if _ssh_endpoint(remote):
-        command = _git_text(repo, "config", "--get", "core.sshCommand") or os.environ.get("GIT_SSH_COMMAND") or "ssh"
+        command = git_text("config", "--get", "core.sshCommand") or os.environ.get("GIT_SSH_COMMAND") or "ssh"
         try:
             executable = Path(shlex.split(command, posix=os.name != "nt")[0].strip("\"'")).name.lower()
         except (ValueError, IndexError):
@@ -76,13 +105,12 @@ def _probe_repository(repo: Repository, stored: dict[str, Any], branch_priority:
         if executable not in {"ssh", "ssh.exe"}:
             return False, True
         extra_env = {"GIT_SSH_COMMAND": f"{command} -o BatchMode=yes"}
-    result = _git(
-        repo,
+    result = git(
         "ls-remote", "--symref", "origin", "HEAD", "refs/heads/*",
         timeout=30,
         extra_env=extra_env,
     )
-    if result.returncode != 0:
+    if result is None or result.returncode != 0:
         return False, True
     heads: dict[str, str] = {}
     default_branch: str | None = None
@@ -146,9 +174,12 @@ def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
             reasons.add("Semantic generation is stale or misaligned.")
 
         workers = min(8, max(1, len(settings.repositories)))
+        deadline = time.monotonic() + MAX_FRESHNESS_PROBE_SECONDS
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="brain-freshness") as executor:
             probes = list(executor.map(
-                lambda repo: _probe_repository(repo, sources.get(repo.name) or {}, settings.branch_priority),
+                lambda repo: _probe_repository(
+                    repo, sources.get(repo.name) or {}, settings.branch_priority, deadline,
+                ),
                 settings.repositories,
             ))
         if any(failed for _, failed in probes):

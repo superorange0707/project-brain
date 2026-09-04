@@ -340,6 +340,7 @@ def discover_and_configure_repositories(settings: Settings) -> list[Repository]:
         raise BrainError(f"Config exceeds the {MAX_CONFIG_BYTES:,}-byte direct-file limit: {settings.config_path}")
 
     descriptor = -1
+    appended = 0
     try:
         flags = (
             os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0)
@@ -361,9 +362,21 @@ def discover_and_configure_repositories(settings: Settings) -> list[Repository]:
             written = os.write(descriptor, view)
             if written <= 0:
                 raise OSError("brain.toml append made no progress")
+            appended += written
             view = view[written:]
         os.fsync(descriptor)
     except OSError as error:
+        if descriptor >= 0 and appended:
+            try:
+                changed = os.fstat(descriptor)
+                if (
+                    (changed.st_dev, changed.st_ino) == (current.st_dev, current.st_ino)
+                    and changed.st_size == current.st_size + appended
+                ):
+                    os.ftruncate(descriptor, current.st_size)
+                    os.fsync(descriptor)
+            except OSError:
+                pass
         raise BrainError("brain.toml changed during repository discovery; retry refresh") from error
     finally:
         if descriptor >= 0:
@@ -3203,8 +3216,7 @@ def _publish_first_useful_checkpoint(
     if not evidence_rows:
         return None
     artifact = directory / f"checkpoint-{number:03d}.md"
-    handoff_directory = settings.generated_dir / "handoffs"
-    handoff = handoff_directory / f"{directory.name}-checkpoint-{number:03d}.md"
+    handoff = handoff_dir(settings, ticket) / f"checkpoint-{number:03d}.md"
     internal_ids = [_evidence_id(item) for _, item in evidence_rows]
     checkpoint = {
         "schema_version": "first-useful-checkpoint-v1",
@@ -3922,6 +3934,13 @@ def _atomic_generated_text_write(settings: Settings, path: Path, content: str) -
         atomic_managed_bytes_write(settings.generated_dir, artifact, content.encode("utf-8"))
     except ValueError as error:
         raise BrainError("Generated artifact path changed during publication") from error
+
+
+def handoff_dir(settings: Settings, ticket: str) -> Path:
+    """Return the user-facing handoff directory for one managed ticket."""
+    directory = settings.generated_dir / "handoffs" / session_dir(settings, ticket).name
+    _validated_generated_artifact(settings, directory / ".handoff-root")
+    return directory
 
 
 def session_dir(settings: Settings, ticket: str) -> Path:
@@ -4864,9 +4883,7 @@ def create_context(
             )
             continuation_path = directory / f"checkpoint-delta-{number:03d}.md"
             _atomic_session_text_write(settings, ticket, continuation_path, continuation)
-            continuation_handoff = (
-                settings.generated_dir / "handoffs" / f"{directory.name}-checkpoint-delta-{number:03d}.md"
-            )
+            continuation_handoff = handoff_dir(settings, ticket) / f"checkpoint-delta-{number:03d}.md"
             _atomic_generated_text_write(settings, continuation_handoff, continuation)
             progressive_checkpoint.update({
                 "continuation_status": "published",
@@ -5331,8 +5348,8 @@ def deliver(settings: Settings, ticket: str, text: str, target: str, *, copy: bo
     if target == "m365":
         from .agent import final_solution_contract
 
-        handoff_directory = settings.generated_dir / "handoffs"
-        current_handoff = handoff_directory / f"{directory.name}-current.md"
+        handoff_directory = handoff_dir(settings, ticket)
+        current_handoff = handoff_directory / "current.md"
         _validated_generated_artifact(settings, current_handoff)
         internal_handoff = directory / "current-handoff.md"
         _atomic_session_text_write(settings, ticket, internal_handoff, text)
@@ -5350,7 +5367,7 @@ def deliver(settings: Settings, ticket: str, text: str, target: str, *, copy: bo
         else:
             match = re.search(r"(?m)^Request: `(\d+)`", text)
             label = f"context-{int(match.group(1)):03d}" if match else "update"
-        handoff = handoff_directory / f"{directory.name}-{label}.md"
+        handoff = handoff_directory / f"{label}.md"
         _atomic_generated_text_write(settings, handoff, text)
         paths = [handoff]
         state["delivery"] = {
@@ -5403,11 +5420,21 @@ def delivery_artifact(
     if session_relative is None and handoff_relative is None:
         raise BrainError("Invalid delivery artifact in session state")
     if handoff_relative is not None:
-        label = re.compile(
+        legacy_label = re.compile(
             rf"^{re.escape(directory.name)}-(?:current|start|final|update|context-\d+|evidence-\d+|"
             rf"feedback-\d+|checkpoint-\d+|checkpoint-delta-\d+)\.md$"
         )
-        if len(handoff_relative.parts) != 1 or not label.fullmatch(path.name):
+        ticket_label = re.compile(
+            r"^(?:current|start|final|update|context-\d+|evidence-\d+|feedback-\d+|"
+            r"checkpoint-\d+|checkpoint-delta-\d+)\.md$"
+        )
+        legacy = len(handoff_relative.parts) == 1 and legacy_label.fullmatch(path.name)
+        organized = (
+            len(handoff_relative.parts) == 2
+            and handoff_relative.parts[0] == directory.name
+            and ticket_label.fullmatch(path.name)
+        )
+        if not legacy and not organized:
             raise BrainError("Delivery handoff does not belong to this session")
     root = handoffs if handoff_relative is not None else directory
     try:

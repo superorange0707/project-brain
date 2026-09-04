@@ -8,7 +8,7 @@ import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable
 
 from .catalog import (
@@ -30,15 +30,34 @@ if TYPE_CHECKING:
 _GIB = 1024 ** 3
 MAX_GC_SESSION_SCAN_ITEMS = 10_000
 MAX_GC_SCAN_ITEMS = 500_000
-MAX_GC_SCAN_SECONDS = 5.0
+MAX_GC_SCAN_SECONDS = 30.0
 MAX_GC_ACCOUNTED_BYTES = 16 * 1024 ** 4
 MAX_STORAGE_STATUS_ENTRIES = 5_000
 MAX_STORAGE_STATUS_SECONDS = 0.05
 MAX_CAPACITY_SCAN_ENTRIES = 500_000
-MAX_CAPACITY_SCAN_SECONDS = 2.0
+MAX_CAPACITY_SCAN_SECONDS = 30.0
 STORAGE_STATUS_TTL_SECONDS = 5.0
 _STORAGE_STATUS_CACHE: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
 _STORAGE_STATUS_LOCK = threading.Lock()
+_SNAPSHOT_CAPACITY_CACHE: dict[tuple[object, ...], int] = {}
+_SNAPSHOT_CAPACITY_LOCK = threading.Lock()
+
+
+class StateCapacityError(OSError):
+    """A safe, actionable managed-storage refusal."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+    def recovery(self) -> dict[str, str]:
+        return {
+            "code": self.code,
+            "title": "Storage needs attention",
+            "message": str(self),
+            "action": "safe_gc",
+            "action_label": "Safely reclaim unpinned state",
+        }
 
 
 class _GcScanIncomplete(RuntimeError):
@@ -60,6 +79,9 @@ class _GcScanBudget:
 
     def file_bytes(self, size: int) -> int:
         self.consume()
+        return self.account_bytes(size)
+
+    def account_bytes(self, size: int) -> int:
         if size < 0 or self.accounted_bytes + size > MAX_GC_ACCOUNTED_BYTES:
             raise _GcScanIncomplete("GC reclaim accounting exceeded its byte budget")
         self.accounted_bytes += size
@@ -578,6 +600,68 @@ def dashboard_status(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _sealed_snapshot_bytes(state_root: Path, snapshot: Path, *, deadline: float) -> int | None:
+    """Account for an immutable snapshot from its existing bounded seal."""
+    try:
+        relative = snapshot.relative_to(state_root)
+    except ValueError:
+        return None
+    if len(relative.parts) != 3 or relative.parts[0] != "snapshots":
+        return None
+    try:
+        from .sync import MAX_GIT_SNAPSHOT_ITEMS, MAX_GIT_SNAPSHOT_SEAL_BYTES, _snapshot_seal_path
+
+        seal = _snapshot_seal_path(snapshot.parent, snapshot.name)
+        seal_stat = seal.lstat()
+        snapshot_stat = snapshot.lstat()
+        if seal.is_symlink() or not seal.is_file() or snapshot.is_symlink() or not snapshot.is_dir():
+            return None
+        key = (
+            str(seal),
+            seal_stat.st_dev, seal_stat.st_ino, seal_stat.st_size,
+            seal_stat.st_mtime_ns, seal_stat.st_ctime_ns,
+            snapshot_stat.st_dev, snapshot_stat.st_ino,
+            snapshot_stat.st_mtime_ns, snapshot_stat.st_ctime_ns,
+        )
+        with _SNAPSHOT_CAPACITY_LOCK:
+            cached = _SNAPSHOT_CAPACITY_CACHE.get(key)
+        if cached is not None:
+            return cached
+        value = json.loads(read_managed_text(
+            state_root, seal, max_bytes=MAX_GIT_SNAPSHOT_SEAL_BYTES,
+        ))
+        files = value.get("files") if isinstance(value, dict) else None
+        if value.get("version") != 3 or value.get("sha") != snapshot.name or not isinstance(files, dict):
+            return None
+        if len(files) > MAX_GIT_SNAPSHOT_ITEMS:
+            return None
+        total = 0
+        for index, (name, details) in enumerate(files.items(), 1):
+            if index % 1024 == 0 and time.monotonic() >= deadline:
+                raise StateCapacityError(
+                    "state_inventory_limit",
+                    "Project Brain state capacity scan budget exceeded; no data was changed",
+                )
+            logical = PurePosixPath(name) if isinstance(name, str) else PurePosixPath("..")
+            size = details.get("size") if isinstance(details, dict) else None
+            if (
+                not name or logical.is_absolute() or ".." in logical.parts
+                or isinstance(size, bool) or not isinstance(size, int) or size < 0
+                or total + size > MAX_GC_ACCOUNTED_BYTES
+            ):
+                return None
+            total += size
+        with _SNAPSHOT_CAPACITY_LOCK:
+            if len(_SNAPSHOT_CAPACITY_CACHE) >= 4_096:
+                _SNAPSHOT_CAPACITY_CACHE.clear()
+            _SNAPSHOT_CAPACITY_CACHE[key] = total
+        return total
+    except StateCapacityError:
+        raise
+    except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _directory_bytes(path: Path) -> int:
     if not path.exists():
         return 0
@@ -587,22 +671,33 @@ def _directory_bytes(path: Path) -> int:
     total = 0
     while pending:
         if scanned >= MAX_CAPACITY_SCAN_ENTRIES or time.monotonic() >= deadline:
-            raise OSError("Project Brain state capacity scan budget exceeded")
+            raise StateCapacityError(
+                "state_inventory_limit",
+                "Project Brain state capacity scan budget exceeded; no data was changed",
+            )
         directory = pending.pop()
         try:
             with os.scandir(directory) as iterator:
                 for entry in iterator:
                     scanned += 1
                     if scanned > MAX_CAPACITY_SCAN_ENTRIES or time.monotonic() >= deadline:
-                        raise OSError("Project Brain state capacity scan budget exceeded")
+                        raise StateCapacityError(
+                            "state_inventory_limit",
+                            "Project Brain state capacity scan budget exceeded; no data was changed",
+                        )
                     if entry.is_symlink():
                         continue
                     if entry.is_dir(follow_symlinks=False):
-                        pending.append(Path(entry.path))
+                        child = Path(entry.path)
+                        snapshot_bytes = _sealed_snapshot_bytes(path, child, deadline=deadline)
+                        if snapshot_bytes is None:
+                            pending.append(child)
+                        else:
+                            total += snapshot_bytes
                     elif entry.is_file(follow_symlinks=False):
                         total += entry.stat(follow_symlinks=False).st_size
         except OSError as error:
-            if "capacity scan budget" in str(error):
+            if isinstance(error, StateCapacityError):
                 raise
             raise OSError("Project Brain state capacity is unavailable") from error
     return total
@@ -659,9 +754,15 @@ def ensure_write_capacity(settings: Settings, projected_bytes: int = 0) -> None:
     current_bytes = _directory_bytes(settings.state_dir)
     usage = shutil.disk_usage(settings.root)
     if settings.max_state_gb and current_bytes + projected_bytes > settings.max_state_gb * _GIB:
-        raise OSError("Project Brain state quota would be exceeded; run 'brain gc --dry-run' or raise storage.max_state_gb")
+        raise StateCapacityError(
+            "state_quota_exceeded",
+            "Project Brain state quota would be exceeded; safely reclaim unpinned state or raise storage.max_state_gb",
+        )
     if settings.minimum_free_disk_gb and usage.free - projected_bytes < settings.minimum_free_disk_gb * _GIB:
-        raise OSError("Project Brain free-disk guard would be breached; run 'brain gc --dry-run' or lower storage.minimum_free_disk_gb")
+        raise StateCapacityError(
+            "free_disk_guard",
+            "Project Brain free-disk guard would be breached; safely reclaim unpinned state or free local disk space",
+        )
 
 
 def remaining_write_capacity(settings: Settings) -> int:
@@ -1000,16 +1101,23 @@ def _zoekt_shard_removals(
     return removable
 
 
-def _gc_path_bytes(path: Path, budget: _GcScanBudget) -> int:
+def _gc_path_bytes(settings: Settings, path: Path, budget: _GcScanBudget) -> int:
     if path.is_symlink():
         raise _GcScanIncomplete("GC target contains a symbolic link")
     if path.is_file():
         return budget.file_bytes(path.stat().st_size)
+    budget.consume()
+    snapshot_bytes = _sealed_snapshot_bytes(
+        settings.state_dir, path, deadline=budget.deadline,
+    )
+    if snapshot_bytes is not None:
+        return budget.account_bytes(snapshot_bytes)
     total = 0
     pending = [path]
     while pending:
         directory = pending.pop()
-        budget.consume()
+        if directory != path:
+            budget.consume()
         for item in directory.iterdir():
             if item.is_symlink():
                 raise _GcScanIncomplete("GC target contains a symbolic link")
@@ -1127,7 +1235,7 @@ def _gc(settings: Settings, *, dry_run: bool, keep_recent: int, budget: _GcScanB
     )
     budget.consume(len(targets) + len(lexical_removable))
     rows = [
-        {"kind": kind, "path": str(path), "bytes": _gc_path_bytes(path, budget)}
+        {"kind": kind, "path": str(path), "bytes": _gc_path_bytes(settings, path, budget)}
         for kind, path in targets
     ]
     rows.extend({"kind": "lexical_membership", "path": f"{repo}@{sha}", "bytes": 0} for repo, sha in lexical_removable)

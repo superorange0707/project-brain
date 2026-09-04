@@ -28,6 +28,7 @@ from brain.ui import (
     _sessions,
     project_status,
     serve_ui,
+    ui_instance,
 )
 
 
@@ -63,8 +64,87 @@ class OperationCoordinatorTest(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual("succeeded", coordinator.get(job["id"])["status"])
 
+    def test_interrupted_refresh_progress_is_restored_without_claiming_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            coordinator = _OperationCoordinator(state_dir=state)
+            release = threading.Event()
+            started = threading.Event()
+
+            def refresh(progress):
+                progress({"phase": "semantic_embeddings", "semantic_cards_total": 50, "new_embeddings_completed": 12})
+                coordinator._last_persist = 0
+                progress({"phase": "semantic_embeddings", "semantic_cards_total": 50, "new_embeddings_completed": 16})
+                started.set()
+                release.wait(3)
+                return {}
+
+            job = coordinator.start("refresh", refresh, resume={"fetch": True, "discover": False})
+            self.assertTrue(started.wait(3))
+            restored = _OperationCoordinator(state_dir=state).list()
+            self.assertEqual(1, len(restored))
+            self.assertEqual("interrupted", restored[0]["status"])
+            self.assertEqual(16, restored[0]["progress"]["new_embeddings_completed"])
+            self.assertEqual({"fetch": True, "discover": False}, restored[0]["resume"])
+            self.assertNotEqual("succeeded", restored[0]["status"])
+            resumed = _OperationCoordinator(state_dir=state)
+            resumed_job = resumed.start("refresh", lambda _progress: {})
+            for _ in range(100):
+                if resumed.get(resumed_job["id"])["status"] == "succeeded":
+                    break
+                time.sleep(0.01)
+            self.assertFalse(any(item["status"] == "interrupted" for item in resumed.list()))
+            release.set()
+            for _ in range(100):
+                if coordinator.get(job["id"])["status"] == "succeeded":
+                    break
+                time.sleep(0.01)
+
+    def test_capacity_failure_returns_a_safe_one_click_recovery(self) -> None:
+        from brain.ops import StateCapacityError
+
+        coordinator = _OperationCoordinator()
+
+        def fail(_progress):
+            raise StateCapacityError(
+                "state_inventory_limit",
+                "Project Brain state capacity scan budget exceeded; no data was changed",
+            )
+
+        started = coordinator.start("refresh", fail)
+        for _ in range(100):
+            job = coordinator.get(started["id"])
+            if job["status"] == "failed":
+                break
+            time.sleep(0.01)
+        self.assertEqual("failed", job["status"])
+        self.assertEqual("safe_gc", job["recovery"]["action"])
+        self.assertIn("no data was changed", job["error"])
+
 
 class SessionSummaryTest(unittest.TestCase):
+    def test_ui_refresh_reloads_repository_configuration_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "service-a").mkdir()
+            (root / "service-b").mkdir()
+            config = root / "brain.toml"
+            config.write_text(
+                '[project]\nname="ui-reload"\n[[repositories]]\nname="service-a"\npath="service-a"\n',
+                encoding="utf-8",
+            )
+            settings = load_settings(config)
+            server = object.__new__(_Server)
+            server.settings = settings
+            config.write_text(
+                config.read_text(encoding="utf-8")
+                + '[[repositories]]\nname="service-b"\npath="service-b"\n',
+                encoding="utf-8",
+            )
+            reloaded = server.reload_settings()
+            self.assertIs(settings, reloaded)
+            self.assertEqual({"service-a", "service-b"}, {repo.name for repo in settings.repositories})
+
     def test_project_status_never_reads_symlinked_graph_or_evaluation_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -250,6 +330,8 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("Detailed profiler", html)
         self.assertIn('id="refresh-progress"', html)
         self.assertIn('id="auto-refresh-mode"', html)
+        self.assertIn('id="storage-recover"', html)
+        self.assertIn("Safely reclaim unpinned state", html)
         self.assertIn('value="when_idle">When idle', html)
         self.assertIn("Reused published generation", html)
         self.assertIn("resumeActiveRefresh(data)", html)
@@ -271,7 +353,29 @@ class LocalUiTest(unittest.TestCase):
 
         _, status_data, _ = self.get("/api/status")
         self.assertEqual(0, status_data["data"]["summary"]["experience_cases"])
+        self.assertNotIn(str(self.root), json.dumps(status_data["data"]["retrieval"]["storage"]))
         self.assertIsInstance(self.server.auto_refresh, AutoRefreshService)
+
+    def test_storage_recovery_uses_reachability_gc_and_never_returns_paths(self) -> None:
+        private = str(self.root / "state/snapshots/private/sha")
+        report = {
+            "dry_run": False,
+            "pinned_generations": [1],
+            "pinned_snapshots": [str(self.root / "state/snapshots/pinned/sha")],
+            "remove": [{"kind": "snapshot", "path": private, "bytes": 4096}],
+            "reclaim_bytes": 4096,
+            "semantic_gc_blocked": [],
+            "reachability_gc_blocked": [],
+        }
+        with patch("brain.ops.gc", return_value=report) as collected:
+            code, requested, _ = self.post("/api/gc", {"apply": True})
+            self.assertEqual(202, code)
+            job = self.job(requested["data"]["id"])
+        collected.assert_called_once_with(self.settings, dry_run=False, keep_recent=2)
+        self.assertEqual("succeeded", job["status"])
+        self.assertTrue(job["result"]["applied"])
+        self.assertEqual({"snapshot": 1}, job["result"]["counts"])
+        self.assertNotIn(str(self.root), json.dumps(job))
 
     def test_auto_refresh_preference_api_exposes_only_safe_local_status(self) -> None:
         self.server.auto_refresh._detector = lambda _settings: FreshnessDecision.ready()
@@ -378,7 +482,7 @@ None beyond the stated boundary.
         self.assertEqual("final_solution", final["data"]["kind"])
         self.assertEqual("ready_to_implement", final["data"]["session"]["status"])
         self.assertTrue((self.root / ".runs/UI-1/current-handoff.md").is_file())
-        self.assertTrue((self.root / "generated/handoffs/UI-1-current.md").is_file())
+        self.assertTrue((self.root / "generated/handoffs/UI-1/current.md").is_file())
 
         _, feedback, _ = self.post(
             "/api/feedback",
@@ -640,21 +744,24 @@ None beyond the stated boundary.
             {"ticket": "UI-DELETE-OTHER", "ticket_text": "Keep this history.", "sync": False, "target": "m365"},
         )
         handoffs = self.root / "generated/handoffs"
+        for ticket in ("UI-DELETE", "UI-DELETE-OTHER"):
+            (handoffs / ticket).mkdir(parents=True, exist_ok=True)
         for suffix in ("checkpoint-001", "checkpoint-delta-001"):
-            (handoffs / f"UI-DELETE-{suffix}.md").write_text("private exact source", encoding="utf-8")
-            (handoffs / f"UI-DELETE-OTHER-{suffix}.md").write_text("keep", encoding="utf-8")
+            (handoffs / "UI-DELETE" / f"{suffix}.md").write_text("private exact source", encoding="utf-8")
+            (handoffs / "UI-DELETE-OTHER" / f"{suffix}.md").write_text("keep", encoding="utf-8")
+        (handoffs / "UI-DELETE-context-099.md").write_text("legacy delete", encoding="utf-8")
+        (handoffs / "UI-DELETE-OTHER-context-099.md").write_text("legacy keep", encoding="utf-8")
 
         _, deleted, _ = self.post("/api/session/delete", {"ticket": "UI-DELETE"})
         self.assertEqual("UI-DELETE", deleted["data"]["ticket"])
         self.assertFalse((self.root / ".runs/UI-DELETE").exists())
-        self.assertFalse((self.root / "generated/handoffs/UI-DELETE-current.md").exists())
-        self.assertFalse((self.root / "generated/handoffs/UI-DELETE-start.md").exists())
-        self.assertFalse((handoffs / "UI-DELETE-checkpoint-001.md").exists())
-        self.assertFalse((handoffs / "UI-DELETE-checkpoint-delta-001.md").exists())
+        self.assertFalse((self.root / "generated/handoffs/UI-DELETE").exists())
+        self.assertFalse((handoffs / "UI-DELETE-context-099.md").exists())
         self.assertTrue((self.root / ".runs/UI-DELETE-OTHER").is_dir())
-        self.assertTrue((self.root / "generated/handoffs/UI-DELETE-OTHER-current.md").is_file())
-        self.assertTrue((handoffs / "UI-DELETE-OTHER-checkpoint-001.md").is_file())
-        self.assertTrue((handoffs / "UI-DELETE-OTHER-checkpoint-delta-001.md").is_file())
+        self.assertTrue((self.root / "generated/handoffs/UI-DELETE-OTHER/current.md").is_file())
+        self.assertTrue((handoffs / "UI-DELETE-OTHER/checkpoint-001.md").is_file())
+        self.assertTrue((handoffs / "UI-DELETE-OTHER/checkpoint-delta-001.md").is_file())
+        self.assertTrue((handoffs / "UI-DELETE-OTHER-context-099.md").is_file())
         self.assertTrue((self.root / "service-a").is_dir())
 
     def test_delete_session_rejects_symlinked_handoff_root_before_session_mutation(self) -> None:
@@ -785,15 +892,79 @@ None beyond the stated boundary.
 
 
 class UiShutdownTest(unittest.TestCase):
+    def test_second_ui_command_reuses_instance_and_idle_stop_closes_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "service").mkdir()
+            config = root / "brain.toml"
+            config.write_text(
+                '[project]\nname="ui-reuse"\n[[repositories]]\nname="service"\npath="service"\n',
+                encoding="utf-8",
+            )
+            settings = load_settings(config)
+            output: list[str] = []
+
+            def run() -> None:
+                with patch("builtins.print", side_effect=lambda value="", **_kwargs: output.append(str(value))):
+                    serve_ui(settings, port=0, open_browser=False)
+
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            for _ in range(100):
+                if ui_instance(settings, "status")["running"]:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(ui_instance(settings, "status")["running"])
+            with patch("builtins.print") as printed, patch("brain.ui._Server") as server_type:
+                serve_ui(settings, port=8765, open_browser=False)
+            server_type.assert_not_called()
+            self.assertIn("already running", str(printed.call_args.args[0]))
+            self.assertTrue(ui_instance(settings, "stop")["stopping"])
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+            self.assertFalse(ui_instance(settings, "status")["running"])
+            self.assertTrue(any("Project Brain UI stopped" in line for line in output))
+
+    def test_ui_instance_status_and_stop_do_not_expose_the_private_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "service").mkdir()
+            config = root / "brain.toml"
+            config.write_text(
+                '[project]\nname="ui-instance"\n[[repositories]]\nname="service"\npath="service"\n',
+                encoding="utf-8",
+            )
+            settings = load_settings(config)
+            instance = {
+                "schema_version": 1,
+                "pid": 123,
+                "port": 8765,
+                "token": "a" * 43,
+            }
+            (settings.state_dir / "ui-instance.json").write_text(json.dumps(instance), encoding="utf-8")
+            with patch("brain.ui._probe_ui_instance", side_effect=[True, True]):
+                status = ui_instance(settings, "stop")
+            self.assertEqual({"running": True, "stopping": True, "port": 8765}, status)
+            self.assertNotIn(instance["token"], json.dumps(status))
+
     @patch("brain.ui._Server")
     def test_repeated_interrupt_during_shutdown_is_quiet(self, server_type) -> None:
-        server = server_type.return_value
-        server.server_address = ("127.0.0.1", 8765)
-        server.serve_forever.side_effect = KeyboardInterrupt
-        server.server_close.side_effect = KeyboardInterrupt
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "service").mkdir()
+            config = root / "brain.toml"
+            config.write_text(
+                '[project]\nname="ui-shutdown"\n[[repositories]]\nname="service"\npath="service"\n',
+                encoding="utf-8",
+            )
+            settings = load_settings(config)
+            server = server_type.return_value
+            server.server_address = ("127.0.0.1", 8765)
+            server.serve_forever.side_effect = KeyboardInterrupt
+            server.server_close.side_effect = KeyboardInterrupt
 
-        with patch("builtins.print") as printed:
-            serve_ui(object(), port=8765, open_browser=False)
+            with patch("builtins.print") as printed:
+                serve_ui(settings, port=8765, open_browser=False)
 
         server.server_close.assert_called_once_with()
         startup = [call for call in printed.call_args_list if "Project Brain UI:" in str(call.args[0])]

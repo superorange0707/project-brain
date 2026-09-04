@@ -33,15 +33,14 @@ brew upgrade project-brain
 ```
 
 This installs prebuilt executables and does not compile against the local Xcode
-toolchain. Apple Silicon receives v1.0.9; Intel remains on v1.0.7 until its
-native build is available. Homebrew maps `superorange0707/tap` to the separate
+toolchain. Homebrew maps `superorange0707/tap` to the separate
 [`homebrew-tap`](https://github.com/superorange0707/homebrew-tap) formula index.
 
 ### Linux installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.7/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.7
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.10/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.10
 ```
 
 This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
@@ -49,12 +48,11 @@ adjacent executables in `~/.local/bin` without changing Brain workspace state.
 
 ### Standalone macOS/Linux archive
 
-Apple Silicon uses the
-[v1.0.9 archive](https://github.com/superorange0707/project-brain/releases/tag/v1.0.9).
-macOS Intel and Linux remain on the fully verified
-[v1.0.7 archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.7)
-until hosted native builds are available. Keep `brain`, `codebase-memory-mcp`,
-`zoekt`, and `zoekt-index` in the same directory on `PATH`.
+Use the verified
+[v1.0.10 archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.10)
+for macOS arm64/amd64 or Linux arm64/amd64. Keep `brain`,
+`codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the same directory on
+`PATH`.
 
 ### Native Windows 11 x64 installer
 
@@ -62,9 +60,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.7 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.10 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.7
+.\scripts\install-project-brain.ps1 -Version 1.0.10
 brain.exe --version
 ```
 
@@ -84,14 +82,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.7-windows-amd64.zip` and the published
+Download `project-brain-v1.0.10-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.7-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.7-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.10-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.10-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -114,7 +112,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.9"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.10"
 ```
 
 Upgrade later with:
@@ -126,7 +124,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.9"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.10"
 ```
 
 ### From a source checkout
@@ -389,6 +387,21 @@ Semantic shard search. Values outside Brain's hard safe maxima are rejected.
   set `0` to disable this quota.
 - `minimum_free_disk_gb`: refuse a new index or model-pack write that would
   reduce free disk below this reserve; set `0` to disable the reserve.
+
+Brain accounts healthy immutable source snapshots from their validated snapshot
+seals, so large retained generations do not require a repeated per-file capacity
+walk before every managed write. A damaged or unsealed tree is never trusted as
+a shortcut and remains subject to the bounded fail-closed scan.
+
+The UI's **Storage & recovery** card provides both a preview and a guarded
+one-button cleanup. It calls the same reachability-aware GC as the CLI and can
+remove only unpinned old generations, snapshots, Semantic shards, Zoekt shards,
+and lexical memberships. Current state and every generation or snapshot pinned
+by a ticket are preserved. If the reachability proof is incomplete, the cleanup
+removes nothing and reports the blocker without exposing local paths.
+If a CLI operation encounters a recoverable state-capacity or free-disk guard,
+it points to this card instead of requiring users to find or delete internal
+directories manually.
 
 ### Model-pack installation settings
 
@@ -740,7 +753,10 @@ Configured/local golden evaluation stays CLI-only (`brain evaluate`) so no
 private evaluation data or file paths need to cross a browser surface.
 
 No AI model runs inside the page. It does not execute tests or edit code. Closing
-`brain ui` invalidates the random URL and stops the local server.
+the browser tab does not stop the local server, because doing so could kill a
+long refresh. Run `brain ui stop` (only accepted while idle) or press Ctrl+C in
+the server terminal. Running `brain ui` again reopens the existing private local
+instance instead of failing on its occupied port; `brain ui status` reports it.
 
 The remaining sections document the equivalent terminal workflow and are useful
 for automation, M365 file delivery, or troubleshooting.
@@ -770,17 +786,17 @@ brain start ABC-1234 --ticket-file ticket.md --target m365
 ```
 
 Upload the newly printed round-specific file, such as
-`generated/handoffs/ABC-1234-context-010.md`, to the dedicated M365 Agent. The
+`generated/handoffs/ABC-1234/context-010.md`, to the dedicated M365 Agent. The
 changing filename prevents a stale attachment cache. Brain creates it
-automatically, keeps `ABC-1234-current.md` as a stable local alias, and retains
+automatically, keeps `generated/handoffs/ABC-1234/current.md` as a stable local alias, and retains
 internal history under `.runs/`; you never create or rename a Markdown file.
 The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
-sent into Brain, while `ABC-1234-context-010.md` is Brain's evidence sent back to
+sent into Brain, while `generated/handoffs/ABC-1234/context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
-The v1.0.9 repository-discovery patch does not change Agent Kit v4 or Investigation
+The v1.0.10 operational patch does not change Agent Kit v4 or Investigation
 Protocol v5, so an existing M365 Agent does not need to be regenerated. If you
-choose to rerun `brain agent-kit m365`, `AGENT_KIT.json` records Brain 1.0.9;
+choose to rerun `brain agent-kit m365`, `AGENT_KIT.json` records Brain 1.0.10;
 replace the generated files only when you want that metadata refresh.
 
 ```bash
@@ -807,7 +823,7 @@ For M365, use:
 brain continue ABC-1234 --file ai-response.txt --target m365
 ```
 
-Then upload the newly printed `TICKET-context-NNN.md` handoff. Use the same M365 Agent
+Then upload the newly printed `generated/handoffs/TICKET/context-NNN.md` handoff. Use the same M365 Agent
 conversation so it retains earlier documents, human answers, and evidence. The
 `Request: NNN` header and filename must both show the new round. Pass the latest
 `context_id` as the next `base_context_id`; normal follow-ups are compact deltas.
@@ -1189,9 +1205,11 @@ GUI also provides a repair prompt that can be copied back to the AI.
 
 ### `brain ui` does not open
 
-Open the exact loopback URL printed by the command. Use `brain ui --port 0` if the
-default port is busy, or `brain ui --no-open` on a headless machine. Keep the
-terminal process running while using the page.
+Run `brain ui` again to reopen the registered local instance, or open the exact
+loopback URL printed by the command. Use `brain ui status` to check it and
+`brain ui stop` to stop it safely while idle. Use `brain ui --port 0` if an
+unrelated program owns the default port, or `brain ui --no-open` on a headless
+machine. Keep the terminal process running while using the page.
 
 ### Clipboard unavailable
 

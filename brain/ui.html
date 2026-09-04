@@ -263,6 +263,15 @@
             </div>
           </article>
           <article class="card wide">
+            <div class="row">
+              <div class="grow"><h2>Storage & recovery</h2><p class="help">Brain can safely reclaim only unpinned old generations, snapshots, and index shards. Current state and every ticket-pinned generation remain protected.</p></div>
+              <button class="button" id="storage-preview">Preview safe cleanup</button>
+              <button class="button danger" id="storage-recover">Safely reclaim unpinned state</button>
+            </div>
+            <div class="plan" id="storage-status"><div class="empty">Checking bounded local storage status…</div></div>
+            <div id="storage-recovery-message"></div>
+          </article>
+          <article class="card wide">
             <h2>Repository freshness</h2><div class="plan" id="freshness-status"></div>
           </article>
         </div>
@@ -430,7 +439,11 @@
       if (options.body) options.headers["Content-Type"] = "application/json";
       var response = await fetch(path, options);
       var payload = await response.json();
-      if (!response.ok || !payload.ok) throw new Error(payload.error || "Local request failed");
+      if (!response.ok || !payload.ok) {
+        var error = new Error(payload.error || "Local request failed");
+        error.recovery = payload.recovery || null;
+        throw error;
+      }
       return payload.data;
     }
     function showToast(message) {
@@ -458,6 +471,57 @@
     function elapsed(milliseconds) {
       var seconds = Math.max(0, Math.floor((milliseconds || 0) / 1000));
       return String(Math.floor(seconds / 60)).padStart(2, "0") + ":" + String(seconds % 60).padStart(2, "0");
+    }
+    function bytes(value) {
+      var amount = Math.max(0, Number(value) || 0);
+      var units = ["B", "KiB", "MiB", "GiB", "TiB"];
+      var unit = 0;
+      while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit += 1; }
+      return (unit ? amount.toFixed(amount < 10 ? 1 : 0) : String(Math.round(amount))) + " " + units[unit];
+    }
+    function renderStorage(storage) {
+      storage = storage || {};
+      var limits = storage.limits || {};
+      var measured = storage.complete ? bytes(storage.total_bytes) : "At least " + bytes(storage.total_bytes) + " (bounded estimate)";
+      document.getElementById("storage-status").innerHTML = [
+        ["Managed state", measured],
+        ["Free disk", bytes(storage.free_bytes)],
+        ["State quota", limits.max_state_gb ? String(limits.max_state_gb) + " GiB" : "Disabled"],
+        ["Free-disk reserve", String(limits.minimum_free_disk_gb || 0) + " GiB"]
+      ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
+    }
+    function renderRecovery(recovery, message) {
+      var target = document.getElementById("storage-recovery-message");
+      if (!target) return;
+      if (!recovery) {
+        if (message) target.innerHTML = '<div class="error">' + esc(message) + '</div>';
+        return;
+      }
+      target.innerHTML = '<div class="error"><strong>' + esc(recovery.title || "Action required") + '</strong><br>' +
+        esc(recovery.message || message || "Local storage needs attention.") +
+        (recovery.action === "safe_gc" ? '<br>Use “Safely reclaim unpinned state” above. Brain will preserve current and ticket-pinned evidence.' : "") + '</div>';
+    }
+    function renderGcResult(result) {
+      var target = document.getElementById("storage-recovery-message");
+      if (result.blocked) {
+        target.innerHTML = '<div class="error"><strong>Nothing was removed.</strong><br>' + esc(result.blocker) + '</div>';
+        return;
+      }
+      var action = result.applied ? "Safely reclaimed" : "Safe cleanup preview";
+      var detail = result.removable_count ? String(result.removable_count) + " unpinned items · " + bytes(result.reclaim_bytes) : "No unpinned old state is currently reclaimable";
+      target.innerHTML = '<div class="success"><strong>' + esc(action) + '</strong><br>' + esc(detail) +
+        '<br>Protected pins: ' + esc(result.pinned_generations) + ' generations · ' + esc(result.pinned_snapshots) + ' snapshots.' +
+        (result.semantic_blocked ? '<br>Some Semantic shards were retained because their reachability could not be proven.' : '') + '</div>';
+    }
+    async function runStorageRecovery(button, apply) {
+      if (apply && !window.confirm("Safely reclaim unpinned old Brain state? Current state and every ticket-pinned generation will be preserved.")) return;
+      busy(button, true, apply ? "Reclaiming…" : "Checking…");
+      try {
+        var job = await api("/api/gc", {method:"POST",body:JSON.stringify({apply:apply})});
+        var result = await waitForJob(job);
+        renderGcResult(result);
+        await loadStatus();
+      } catch (error) { report(error); } finally { busy(button, false); }
     }
     function renderRefreshProgress(job) {
       if (!job || job.name !== "refresh") return;
@@ -493,7 +557,10 @@
       }
       document.getElementById("refresh-counts").innerHTML = rows.map(function (row) { return "<span>" + esc(row) + "</span>"; }).join("");
       var error = document.getElementById("refresh-progress-error");
-      if (job.status === "failed") error.innerHTML = '<div class="error">' + esc(job.error || "Refresh failed. Check local configuration, then try again.") + "</div>";
+      if (job.status === "failed") {
+        error.innerHTML = '<div class="error">' + esc(job.error || "Refresh failed. Check local configuration, then try again.") + "</div>";
+        if (job.recovery) renderRecovery(job.recovery, job.error);
+      }
       else if (progress.semantic_status === "failed") error.innerHTML = '<div class="error">Core refresh completed, but Semantic indexing needs attention. Check model health and run Refresh Brain again.</div>';
       else error.innerHTML = "";
     }
@@ -511,14 +578,24 @@
         current = await api("/api/job?id=" + encodeURIComponent(current.id));
       }
       setJob(current);
-      if (current.status !== "succeeded") throw new Error(current.error || "Local operation failed");
+      if (current.status !== "succeeded") {
+        var error = new Error(current.error || "Local operation failed");
+        error.recovery = current.recovery || null;
+        throw error;
+      }
       return current.result || {};
     }
     function resumeActiveRefresh(data) {
       var job = (data.jobs || []).find(function (item) {
-        return item.name === "refresh" && (item.status === "pending" || item.status === "running");
+        return item.name === "refresh" && (item.status === "pending" || item.status === "running" || item.status === "interrupted");
       });
       if (!job || state.refreshJobId === job.id) return;
+      if (job.status === "interrupted") {
+        setView("brain");
+        setJob(job);
+        document.getElementById("refresh-progress-error").innerHTML = '<div class="error">The earlier UI process stopped. Click Refresh Brain to resume; completed immutable stages and cached embeddings will be reused.</div>';
+        return;
+      }
       state.refreshJobId = job.id;
       setView("brain");
       var buttons = [document.getElementById("sync-button"), document.getElementById("brain-refresh")];
@@ -571,6 +648,7 @@
       document.getElementById("auto-refresh-last-refresh").textContent = autoRefresh.last_refresh ? new Date(autoRefresh.last_refresh).toLocaleString() : "Never";
       document.getElementById("auto-refresh-status").textContent = autoRefresh.pending_reason || String(autoRefresh.status || "off").replaceAll("_", " ");
       renderBrain(brain);
+      renderStorage(data.retrieval && data.retrieval.storage);
       renderModels(brain.models || {official:[],installed:[]});
       var rows = data.repositories.map(function (repo) {
         var healthy = repo.status === "current" && repo.indexed;
@@ -738,9 +816,17 @@
         showToast("Current context part copied");
       });
     });
-    function report(error) { showToast(error.message || String(error)); }
+    function report(error) {
+      showToast(error.message || String(error));
+      if (error.recovery) {
+        setView("brain");
+        renderRecovery(error.recovery, error.message || String(error));
+      }
+    }
 
     document.getElementById("refresh-button").addEventListener("click", function () { loadStatus().then(function () { showToast("Status refreshed"); }).catch(report); });
+    document.getElementById("storage-preview").addEventListener("click", function () { runStorageRecovery(this, false); });
+    document.getElementById("storage-recover").addEventListener("click", function () { runStorageRecovery(this, true); });
     async function refreshBrain(button) {
       busy(button, true, "Refreshing…");
       try {

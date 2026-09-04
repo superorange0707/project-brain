@@ -33,11 +33,10 @@ in control and apply the resulting solution in your normal IDE.
 
 ## Install
 
-The current Apple Silicon release is **v1.0.9**. Its standalone download
-contains `brain`, `codebase-memory-mcp`, `zoekt`, and `zoekt-index`; model
-weights are never bundled. While hosted release builds are unavailable,
-macOS Intel, Linux, and Windows native packages remain on the fully verified
-**v1.0.7** release instead of being relabelled without a platform build.
+The current stable release is **v1.0.10**. Its standalone downloads contain
+`brain`, `codebase-memory-mcp`, `zoekt`, and `zoekt-index`; model weights are
+never bundled. The release workflow builds and verifies macOS arm64/amd64,
+Linux arm64/amd64, and native Windows 11 x64 packages before publication.
 
 ### macOS — Homebrew
 
@@ -54,9 +53,8 @@ brain --version
 ```
 
 Homebrew installs a prebuilt package; it does not compile Python or require
-Xcode. Apple Silicon receives v1.0.9; Intel remains on v1.0.7 until its native
-build is available. Existing workspaces, model packs, caches, Atlas generations,
-and ticket sessions are preserved during upgrades.
+Xcode. Existing workspaces, model packs, caches, Atlas generations, and ticket
+sessions are preserved during upgrades.
 
 ### Windows 11 x64
 
@@ -64,9 +62,9 @@ On managed machines that allow `git clone` but block direct `.ps1` downloads,
 get the installer from the tagged repository and run it directly:
 
 ```powershell
-git clone --depth 1 --branch v1.0.7 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.10 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.7
+.\scripts\install-project-brain.ps1 -Version 1.0.10
 ```
 
 Specifying `-Version` skips the GitHub API lookup. The installer downloads only
@@ -81,7 +79,7 @@ workspace. The clone is not needed after installation.
 
 If company policy also blocks PowerShell script execution, use the portable ZIP:
 
-**[Download `project-brain-v1.0.7-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.7/project-brain-v1.0.7-windows-amd64.zip)**
+**[Download `project-brain-v1.0.10-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.10/project-brain-v1.0.10-windows-amd64.zip)**
 
 Download the ZIP in a browser and extract its complete contents into
 `%LOCALAPPDATA%\ProjectBrain\bin` (or another folder you control) so the four
@@ -99,20 +97,20 @@ Windows is recommended when `brain refresh` needs to fetch remote refs and
 create immutable Git snapshots.
 
 Verify the download against
-[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.7/SHA256SUMS.txt):
+[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.10/SHA256SUMS.txt):
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.7-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\project-brain-v1.0.10-windows-amd64.zip -Algorithm SHA256
 ```
 
 On unrestricted machines, the same installer is also available directly from
-the [v1.0.7 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.7).
+the [v1.0.10 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.10).
 
 ### Linux — verified user-level installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.7/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.7
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.10/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.10
 brain --version
 ```
 
@@ -124,20 +122,17 @@ and installs the four executables in `~/.local/bin`.
 Python 3.11–3.14 is supported:
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.9"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.10"
 ```
 
 Or install the release wheel directly:
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.9/project_brain_context-1.0.9-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.10/project_brain_context-1.0.10-py3-none-any.whl
 ```
 
-The v1.0.9 macOS Apple Silicon archive, Python distributions, installer, and
-checksums are on the
-**[v1.0.9 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.9)**.
-Other native platforms remain available from the verified
-**[v1.0.7 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.7)**.
+All native archives, Python distributions, installers, and checksums are on the
+**[v1.0.10 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.10)**.
 
 ## Quick start
 
@@ -148,6 +143,16 @@ cd ~/code/payments-platform
 brain init --name payments-platform
 brain ui
 ```
+
+Closing the browser tab does not interrupt a long refresh. Run `brain ui` again
+to reopen the same local instance, `brain ui status` to inspect it, or
+`brain ui stop` to stop it safely while idle.
+
+The Brain view also includes **Storage & recovery**. It previews or safely
+reclaims only unpinned old generations, snapshots, and shards; current state and
+every ticket-pinned evidence generation remain protected. Capacity checks use
+the existing immutable snapshot seals instead of repeatedly walking every
+snapshot file.
 
 `brain init` recursively discovers Git repositories, fetches allowed remote
 refs, creates immutable snapshots, builds local intelligence, and writes Brain

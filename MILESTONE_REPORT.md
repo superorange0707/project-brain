@@ -124,6 +124,13 @@ brain model autotune PACK --latency-budget-ms 3000
   then the published config is re-parsed before the same refresh continues.
   Background Auto Refresh does not silently widen scope and instead waits for
   a user-started refresh.
+- The v1.0.10 patch removes the large-workspace capacity-scan cliff by using
+  existing immutable snapshot seals for bounded accounting, adds guarded UI
+  storage recovery, makes UI and refresh lifecycle state explicit, bounds
+  Auto Refresh remote probing across the whole workspace, preserves partial
+  config-write atomicity, and separates generated handoffs by ticket. These are
+  operational and presentation changes only: Atlas/Semantic identities,
+  generation pinning, and exact-source evidence authority are unchanged.
 - The v1 release gate permanently requires the complete Python 3.11–3.14 matrix.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.

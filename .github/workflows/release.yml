@@ -578,7 +578,7 @@ jobs:
           for asset in *; do
             gh attestation verify "$asset" --repo "$GH_REPO"
           done
-      - name: Publish only the verified release
+      - name: Publish and require anonymous asset availability
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -588,6 +588,27 @@ jobs:
           else
             gh release edit "$GITHUB_REF_NAME" --draft=false --latest
           fi
+          mkdir anonymous-release-verification
+          RELEASE_BASE="https://github.com/${GH_REPO}/releases/download/${GITHUB_REF_NAME}"
+          for source in dist/*; do
+            asset="$(basename "$source")"
+            available=false
+            for attempt in 1 2 3 4 5 6; do
+              if curl --fail --location --silent --show-error \
+                --output "anonymous-release-verification/$asset" "$RELEASE_BASE/$asset"; then
+                available=true
+                break
+              fi
+              sleep 5
+            done
+            if [[ "$available" != true ]]; then
+              gh release edit "$GITHUB_REF_NAME" --draft=true
+              echo "Anonymous release asset is unavailable: $asset" >&2
+              exit 1
+            fi
+          done
+          cd anonymous-release-verification
+          sha256sum -c SHA256SUMS.txt
 
   homebrew-tap:
     name: Verify and update Homebrew tap after final release

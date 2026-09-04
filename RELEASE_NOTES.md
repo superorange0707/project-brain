@@ -1,3 +1,63 @@
+# Project Brain v1.0.10 — Large-Workspace Reliability and Recovery
+
+Project Brain v1 turns the Workspace Intelligence Atlas into a bounded,
+generation-pinned investigation runtime. v1.0.10 focuses on reliable daily use
+in large enterprise workspaces and makes operational failures actionable from
+the local UI.
+
+## Highlights
+
+- Capacity accounting for healthy immutable source snapshots now uses their
+  existing bounded v3 seals. Large retained Atlas generations no longer require
+  hundreds of thousands of filesystem operations before each managed write.
+- The Brain UI adds **Storage & recovery** with a safe cleanup preview and a
+  guarded one-click reclaim action. It preserves current state and every
+  ticket-pinned generation; incomplete reachability proof removes nothing.
+- `brain ui` reopens an already-running local instance. `brain ui status` and
+  `brain ui stop` provide explicit lifecycle control, and refresh progress
+  survives browser reloads or an interrupted UI process without claiming false
+  completion.
+- Auto Refresh remote checks share one bounded 45-second workspace deadline,
+  preventing repository-count multiplication on slow corporate networks.
+- Repository discovery rolls back verified partial `brain.toml` appends and UI
+  refresh reloads the authoritative configuration before indexing.
+- M365 handoffs are organized as `generated/handoffs/<TICKET>/...`; existing
+  flat handoff references remain readable.
+- The stable release gate now confirms every uploaded asset is anonymously
+  downloadable and checksum-valid before the release remains public.
+
+## Downloads
+
+The official workflow builds and verifies:
+
+- `project-brain-v1.0.10-macos-arm64.tar.gz`
+- `project-brain-v1.0.10-macos-amd64.tar.gz`
+- `project-brain-v1.0.10-linux-arm64.tar.gz`
+- `project-brain-v1.0.10-linux-amd64.tar.gz`
+- `project-brain-v1.0.10-windows-amd64.zip`
+- `project_brain_context-1.0.10-py3-none-any.whl`
+- `project_brain_context-1.0.10.tar.gz`
+- `install-project-brain.sh`
+- `install-project-brain.ps1`
+- `SHA256SUMS.txt`
+
+Every asset is checksum-verified and receives GitHub build-provenance
+attestation. Model weights remain separate and are never bundled into Core.
+
+## Upgrade safety
+
+No Atlas/Semantic schema migration, rebuild, model reinstall, embedding-cache
+reset, configuration reset, or ticket-session reset is required solely for this
+patch. Existing immutable generations and pinned exact-source evidence remain
+authoritative. A normal refresh remains optional workspace maintenance, not an
+upgrade migration.
+
+Project Brain remains read-only with respect to target repositories. It does
+not upload source, use hosted inference, edit target code, execute target tests,
+or act as an autonomous coding agent.
+
+---
+
 # Project Brain v1.0.9 — Safe Automatic Repository Discovery
 
 Project Brain v1 turns the Workspace Intelligence Atlas into a bounded,

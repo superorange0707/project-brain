@@ -1530,7 +1530,7 @@ String docs = """
             start_session(self.settings, ticket, "Trace the production entry point atomically.")
 
             def fail_checkpoint_handoff(settings, path: Path, content: str) -> None:
-                if path.parent == self.settings.generated_dir / "handoffs" and "checkpoint-" in path.name:
+                if path.parent.parent == self.settings.generated_dir / "handoffs" and "checkpoint-" in path.name:
                     raise OSError("injected checkpoint handoff failure")
                 original_write(settings, path, content)
 
@@ -1545,7 +1545,7 @@ String docs = """
             state = session_state(self.settings, ticket)
             self.assertFalse(state.get("progressive_checkpoint"))
             self.assertFalse(list((self.settings.runs_dir / ticket).glob("checkpoint-[0-9][0-9][0-9].md")))
-            self.assertFalse(list((self.settings.generated_dir / "handoffs").glob(f"{ticket}-checkpoint-*.md")))
+            self.assertFalse(list((self.settings.generated_dir / "handoffs" / ticket).glob("checkpoint-*.md")))
 
         start_session(self.settings, "CHECKPOINT-CORRUPT", "Validate persisted checkpoint bytes.")
         with mock.patch("brain.investigation.build_ticket_runtime", side_effect=RuntimeError("stop after checkpoint")):
@@ -2707,7 +2707,7 @@ None.
             self.assertFalse(late_failed.get("investigation_runtime"))
             self.assertEqual("failed", late_failed["progressive_checkpoint"]["continuation_status"])
             self.assertFalse(list((self.settings.runs_dir / failure_ticket).glob("checkpoint-delta-*.md")))
-            self.assertFalse(list((self.settings.generated_dir / "handoffs").glob(f"{failure_ticket}-checkpoint-delta-*.md")))
+            self.assertFalse(list((self.settings.generated_dir / "handoffs" / failure_ticket).glob("checkpoint-delta-*.md")))
             create_context(self.settings, failure_ticket, failed_request)
             late_retried = session_state(self.settings, failure_ticket)
             self.assertEqual(1, late_retried["requests"])

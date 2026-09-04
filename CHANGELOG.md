@@ -2,6 +2,40 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.10] - 2026-09-04
+
+### Fixed
+
+- Large v1 workspaces no longer fail managed writes merely because capacity
+  accounting walks hundreds of thousands of files. Healthy immutable source
+  snapshots are accounted from their existing bounded v3 seals; damaged or
+  unsealed trees still fall back to the strict fail-closed physical scan.
+- The Brain UI now turns capacity, quota, and free-disk refusals into an
+  actionable **Storage & recovery** card with a preview and a guarded one-click
+  cleanup. It uses the existing reachability-aware GC, never removes current or
+  ticket-pinned evidence, removes nothing when reachability is incomplete, and
+  exposes no local paths to the browser.
+- Closing a browser tab no longer makes a running UI look lost. `brain ui`
+  reopens the registered instance, while `brain ui status` and `brain ui stop`
+  provide explicit lifecycle control. Interrupted refresh progress is restored
+  without falsely claiming completion.
+- Auto Refresh remote freshness probes now share one bounded 45-second
+  workspace deadline instead of multiplying a network timeout by repository.
+- Repository-discovery config appends roll back verified partial writes, and a
+  UI refresh reloads the authoritative `brain.toml` before indexing newly
+  discovered repositories.
+- Generated M365 handoffs are organized under one directory per ticket while
+  existing flat handoff references remain readable.
+- Stable release publication now verifies every asset through the anonymous
+  public download URL before allowing the release to remain published.
+
+### Upgrade safety
+
+- No Atlas or Semantic schema migration, rebuild, model reinstall, embedding
+  cache reset, or ticket-session reset is required solely for this patch.
+- Existing immutable generations and pinned ticket evidence remain authoritative
+  and compatible. The new handoff layout applies to newly published handoffs.
+
 ## [1.0.9] - 2026-09-04
 
 ### Fixed
@@ -630,6 +664,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.10]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.10
 [1.0.9]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.9
 [1.0.8]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.8
 [1.0.7]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.7

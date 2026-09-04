@@ -9,7 +9,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from brain.auto_refresh import AutoRefreshService, FreshnessDecision, detect_auto_refresh
+from brain.auto_refresh import (
+    MAX_FRESHNESS_PROBE_SECONDS,
+    AutoRefreshService,
+    FreshnessDecision,
+    _probe_repository,
+    detect_auto_refresh,
+)
 from brain.cli import main
 from brain.core import load_settings, session_state, start_session
 from brain.ui import _OperationCoordinator
@@ -317,6 +323,36 @@ class AutoRefreshServiceTests(unittest.TestCase):
         self.assertTrue(decision.check_failed)
         self.assertEqual(1, detector.call_count)
         refresh.assert_not_called()
+
+    def test_remote_probe_commands_share_one_bounded_deadline(self) -> None:
+        calls: list[float] = []
+
+        def git(_repo, *args, timeout=120, **_kwargs):
+            calls.append(float(timeout))
+            if args == ("remote",):
+                output = "origin\n"
+            elif args == ("remote", "get-url", "origin"):
+                output = "https://example.invalid/service-a.git\n"
+            elif args and args[0] == "ls-remote":
+                output = "ref: refs/heads/main\tHEAD\nnew-sha\trefs/heads/main\n"
+            else:
+                output = ".git\n"
+            return subprocess.CompletedProcess(["git", *args], 0, output, "")
+
+        with patch("brain.sync._git", side_effect=git), patch(
+            "brain.auto_refresh.time.monotonic", return_value=100.0,
+        ):
+            drift, failed = _probe_repository(
+                self.settings.repo("service-a"),
+                {"sha": "old-sha", "ref": "origin/main"},
+                ["main"],
+                101.0,
+            )
+        self.assertTrue(drift)
+        self.assertFalse(failed)
+        self.assertTrue(calls)
+        self.assertTrue(all(0 < timeout <= 1.0 for timeout in calls))
+        self.assertLessEqual(max(calls), MAX_FRESHNESS_PROBE_SECONDS)
 
     def test_cli_watch_uses_the_shared_detector_without_unconditional_refresh(self) -> None:
         detector = Mock(return_value=FreshnessDecision.ready())

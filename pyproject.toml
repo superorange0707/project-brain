@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "project-brain-context"
-version = "1.0.9"
+version = "1.0.10"
 description = "Give any chat AI read-only, multi-repository codebase exploration"
 readme = "README.md"
 requires-python = ">=3.11"
