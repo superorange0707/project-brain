@@ -90,6 +90,23 @@ class InstallerTests(unittest.TestCase):
                 [str(destination / "brain"), "--version"], text=True, encoding="utf-8",
             ))
 
+    def test_homebrew_release_verification_uses_the_installed_tap_path(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        job = release.split("  homebrew-tap:\n", 1)[1].split("  pypi:\n", 1)[0]
+        self.assertIn("brew tap superorange0707/tap", job)
+        self.assertIn(
+            'VERIFICATION_FORMULA="$(brew --repository superorange0707/tap)/Formula/$(basename "$FORMULA")"',
+            job,
+        )
+        self.assertIn('cp "$FORMULA" "$VERIFICATION_FORMULA"', job)
+        self.assertIn('VERIFICATION_NAME="superorange0707/tap/$(basename "$FORMULA" .rb)"', job)
+        self.assertIn('brew install --formula "$VERIFICATION_NAME"', job)
+        self.assertIn('brew test "$VERIFICATION_NAME"', job)
+        self.assertNotIn("HOMEBREW_NO_REQUIRE_TAP_TRUST", job)
+        self.assertNotIn("brew trust superorange0707/tap", job)
+        self.assertNotIn('brew install --formula "$FORMULA"', job)
+        self.assertNotIn('brew test "$FORMULA"', job)
+
     def test_release_workflow_publishes_and_smokes_native_installers(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         powershell = (ROOT / "scripts/install-project-brain.ps1").read_text(encoding="utf-8")
