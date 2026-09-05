@@ -299,6 +299,17 @@ class AutoRefreshServiceTests(unittest.TestCase):
         self.assertEqual("action_required", storage.kind)
         self.assertNotIn("private", json.dumps(storage.reasons))
 
+    def test_incomplete_quick_inventory_does_not_latch_large_workspace(self) -> None:
+        from brain.ops import StateCapacityError
+
+        self._initialize_git_state()
+        with patch("brain.ops.ensure_write_capacity", side_effect=StateCapacityError("state_inventory_limit", "quick probe incomplete")):
+            decision = detect_auto_refresh(self.settings)
+        self.assertEqual("ready", decision.kind)
+        with patch("brain.ops.ensure_write_capacity", side_effect=StateCapacityError("state_quota_exceeded", "full")):
+            decision = detect_auto_refresh(self.settings)
+        self.assertEqual("action_required", decision.kind)
+
     def test_git_probe_failure_becomes_safe_backed_off_action_required(self) -> None:
         self._initialize_git_state()
         subprocess.run(

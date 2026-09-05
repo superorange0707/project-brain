@@ -137,10 +137,17 @@ def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
     """Detect only drift that the authoritative refresh pipeline can recover."""
     from .core import discover_git_repositories, load_index_state, load_source_state
     from .editions import capabilities, current_edition
-    from .ops import ensure_write_capacity, semantic_status
+    from .ops import StateCapacityError, ensure_write_capacity, semantic_status
 
     try:
-        ensure_write_capacity(settings)
+        try:
+            ensure_write_capacity(settings, scan_seconds=0.05, scan_entries=5_000)
+        except StateCapacityError as error:
+            if error.code != "state_inventory_limit":
+                raise
+            # Detection is read-only. An incomplete quick inventory must not
+            # latch "action required" forever; the actual writer checks all
+            # state before any quota-governed publication.
         edition = current_edition(settings)
         available = capabilities(settings)
         if edition in {"semantic", "precision"} and not available.get("embedding"):

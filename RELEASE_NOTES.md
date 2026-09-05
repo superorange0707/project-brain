@@ -7,16 +7,35 @@ the local UI.
 
 ## Highlights
 
-- Capacity accounting for healthy immutable source snapshots now uses their
-  existing bounded v3 seals. Large retained Atlas generations no longer require
-  hundreds of thousands of filesystem operations before each managed write.
+- A ticket-first glass workspace with light/dark appearance, generation/wave
+  cards, persistent errors, configuration reload and safe recovery actions.
+  Switching tickets clears old previews and guards late asynchronous results.
+- Fixed the large-directory `state capacity scan budget exceeded` trap: full
+  write/cleanup inventory streams actual file sizes, independently of quick
+  status-probe limits. Quota, free disk, safe tree depth and pin-aware GC remain
+  enforced; no index deletion or quota-disable workaround is required.
+- Verified identical Semantic generations skip source rechunking and embedding.
+  Source parsing, bulk cache accounting and pinned context packaging avoid
+  repeated scans. Candidate fusion uses actual per-channel ranks, and evaluation
+  distinguishes metadata candidates from hydrated source evidence.
+- Windows supports both a version-pinned online install and a fully offline
+  `-ArchivePath` install using the downloaded ZIP and `SHA256SUMS.txt`. Both
+  paths validate before activation and preserve workspace/model/session state.
+  The script never changes Execution Policy or requests credentials.
+- Optional query-cache writes cannot make valid Semantic retrieval unavailable.
+  A bounded memory cache reuses queries in long-lived UI sessions, and cache
+  persistence has short inventory/SQL budgets. Capacity and GC accounting use
+  current file sizes, not potentially stale snapshot seal totals.
 - The Brain UI adds **Storage & recovery** with a safe cleanup preview and a
   guarded one-click reclaim action. It preserves current state and every
   ticket-pinned generation; incomplete reachability proof removes nothing.
 - `brain ui` reopens an already-running local instance. `brain ui status` and
   `brain ui stop` provide explicit lifecycle control, and refresh progress
-  survives browser reloads or an interrupted UI process without claiming false
-  completion.
+  and failed/completed outcomes survive browser reloads or UI restarts without
+  claiming false completion. Uncertain health checks preserve the instance;
+  local control bypasses proxies and refuses redirects.
+- M365 evidence-ID checks no longer credit prefix collisions such as `E00010`
+  when a response must cite `E0001`.
 - Auto Refresh remote checks share one bounded 45-second workspace deadline,
   preventing repository-count multiplication on slow corporate networks.
 - Repository discovery rolls back verified partial `brain.toml` appends and UI
@@ -51,6 +70,16 @@ reset, configuration reset, or ticket-session reset is required solely for this
 patch. Existing immutable generations and pinned exact-source evidence remain
 authoritative. A normal refresh remains optional workspace maintenance, not an
 upgrade migration.
+
+macOS: `brew update` then `brew upgrade project-brain`. Windows: use the tagged
+repository's `scripts/install-project-brain.ps1`; add `-Version 1.0.10` for an
+online install or `-ArchivePath` for a previously downloaded ZIP. Finish active
+work and stop an old UI process before upgrading, then reopen `brain ui`.
+Agent Kit v4/protocol v5 remain compatible; rerun `brain agent-kit m365 --json`
+to regenerate the kit if desired, without creating a new M365 Agent.
+
+Enterprise cold-build latency and private-ticket accuracy remain field
+measurements, not promises derived from the public regression fixtures.
 
 Project Brain remains read-only with respect to target repositories. It does
 not upload source, use hosted inference, edit target code, execute target tests,

@@ -9,7 +9,10 @@ import re
 import sqlite3
 import stat
 import tempfile
+import threading
 import time
+from collections import OrderedDict
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,6 +85,15 @@ SYMBOL = re.compile(r"(?m)^\s*(?:class|interface|record|enum|def|function|fun|fu
 _SHARD_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="brain-semantic-shard")
 _SERVING_STATE_CACHE: dict[tuple[object, ...], dict[str, object]] = {}
 _SHARD_HASH_CACHE: dict[tuple[object, ...], str] = {}
+# Query vectors are derived only from the exact query and pack/input identity,
+# not source generations. Bound both entries and dimensions (under 20 MiB of
+# Python float storage); result/evidence caches still require generation pins.
+_QUERY_VECTORS: OrderedDict[tuple[str, str], tuple[float, ...]] = OrderedDict()
+_QUERY_VECTORS_LOCK = threading.Lock()
+MAX_MEMORY_QUERY_VECTORS = 128
+MAX_MEMORY_QUERY_DIMENSION = 4096
+QUERY_CACHE_WRITE_SECONDS = 0.05
+QUERY_CACHE_SCAN_ENTRIES = 5_000
 
 
 @dataclass(frozen=True)
@@ -185,10 +197,13 @@ def chunk_source(repo: str, path: str, content: str, *, blob_sha: str | None = N
     lines = content.splitlines()
     blob_sha = blob_sha or hashlib.sha256(content.encode("utf-8")).hexdigest()
     markers = []
+    previous_offset, line_number = 0, 1
     for match in SYMBOL.finditer(content):
         if len(markers) >= MAX_SEMANTIC_CHUNKS_PER_FILE:
             raise SemanticEmbeddingError("Semantic source exceeds its per-file chunk limit")
-        markers.append((match.start() and content[:match.start()].count("\n") + 1 or 1, match.group(1)))
+        line_number += content.count("\n", previous_offset, match.start())
+        previous_offset = match.start()
+        markers.append((line_number, match.group(1)))
     if not markers:
         markers = [(1, "file")]
     chunks: list[Chunk] = []
@@ -384,10 +399,16 @@ def _cache_vectors(
     progress: SemanticProgress | None = None,
     pack_compatibility_identity: str | None = None,
     write_capacity: list[int] | None = None,
+    cache_usage: list[tuple[int, int]] | None = None,
 ) -> list[list[float]]:
     """Reuse vectors by stable chunk identity without persisting query/source text."""
     from .catalog import connect
 
+    if cache_usage is not None:
+        from .locks import workspace_lock_mode
+
+        if workspace_lock_mode(settings) != "exclusive":
+            cache_usage = None
     cards = [
         _bounded_semantic_card(
             chunk.card, document_instruction=document_instruction, input_suffix=input_suffix, dimension=dimension
@@ -435,8 +456,9 @@ def _cache_vectors(
             cached_payloads.update({
                 str(key): str(payload)
                 for key, payload in connection.execute(
-                    f"SELECT cache_key,vector_json FROM embedding_cache WHERE cache_key IN ({slots})",
-                    batch_keys,
+                    f"SELECT cache_key,vector_json FROM embedding_cache WHERE cache_key IN ({slots}) "
+                    "AND length(CAST(vector_json AS BLOB)) <= ?",
+                    [*batch_keys, dimension * 32 + 2],
                 )
             })
         touched: list[tuple[str, str]] = []
@@ -460,9 +482,13 @@ def _cache_vectors(
             connection.executemany("UPDATE embedding_cache SET last_used_at=? WHERE cache_key=?", touched)
         if invalid:
             connection.executemany("DELETE FROM embedding_cache WHERE cache_key=?", invalid)
-        cache_usage = _reserve_embedding_cache(connection, [])
+            if cache_usage is not None:
+                cache_usage.clear()
         report(remaining=len(missing))
         if missing:
+            usage = _reserve_embedding_cache(
+                connection, [], usage=cache_usage[0] if cache_usage else None,
+            )
             if write_capacity is None:
                 from .ops import remaining_write_capacity
 
@@ -502,9 +528,9 @@ def _cache_vectors(
                     payload_bytes = sum(len(payload.encode("utf-8")) for _, _, payload in payloads)
                     if payload_bytes > write_capacity[0]:
                         raise SemanticEmbeddingError("embedding cache exceeds the remaining managed write capacity")
-                    cache_usage = _reserve_embedding_cache(
+                    usage = _reserve_embedding_cache(
                         connection, [(keys[index], payload) for index, _, payload in payloads],
-                        usage=cache_usage,
+                        usage=usage,
                     )
                     for index, normalized, payload in payloads:
                         vectors[index] = normalized
@@ -523,10 +549,16 @@ def _cache_vectors(
                         uncommitted_successes = 0
                     write_capacity[0] -= payload_bytes
                     report(remaining=len(missing) - completed)
-            cache_usage = _reserve_embedding_cache(connection, [], usage=cache_usage)
+            usage = _reserve_embedding_cache(connection, [], usage=usage)
             connection.commit()
             uncommitted_successes = 0
+            if cache_usage is not None:
+                cache_usage[:] = [usage]
+        elif touched or invalid:
+            connection.commit()
     except Exception:
+        if cache_usage is not None:
+            cache_usage.clear()
         if uncommitted_successes:
             connection.commit()
         raise
@@ -988,6 +1020,90 @@ def _probe_embedding_dimension(
     raise AssertionError("unreachable")
 
 
+def _registered_build_reuse(
+    settings: Settings,
+    snapshots: dict[str, str],
+    atlas_cards: list[dict[str, object]] | None,
+    *,
+    backend: str,
+    pack_id: str,
+    pack_compatibility_identity: str,
+    dimension: int,
+) -> dict[str, object] | None:
+    """Reuse only an authoritative, validated, identical build input set.
+
+    Legacy/unregistered state still takes the managed construction path. No
+    new receipt, cache, schema or current-generation substitution is involved.
+    """
+    from .atlas import ATLAS_SCHEMA_VERSION
+    from .catalog import _content_hash, current_generation_ref
+    from .index import lexical_generation_ready, lexical_membership_projection
+
+    if atlas_cards is None or any(sha == "working-tree" for sha in snapshots.values()):
+        return None
+    generation = current_generation_ref(settings)
+    if generation is None or generation.snapshots != snapshots:
+        return None
+    cards_component = generation.component("semantic_cards")
+    if (
+        cards_component.get("status") != "ready"
+        or cards_component.get("schema_version") != ATLAS_SCHEMA_VERSION
+        or len(atlas_cards) > MAX_SEMANTIC_CHUNKS_TOTAL
+        or sum(len(str(card.get("content") or "").encode("utf-8")) for card in atlas_cards)
+        > MAX_SEMANTIC_METADATA_BYTES_TOTAL
+    ):
+        return None
+    if cards_component.get("content_hash") != _content_hash({
+        "cards": sorted(atlas_cards, key=lambda item: str(item.get("card_id") or "")),
+    }):
+        return None
+    # Verify the lexical snapshot against its existing registered membership,
+    # including blob integrity, before trusting identical source identities.
+    if not lexical_generation_ready(settings, generation):
+        return None
+    projection = lexical_membership_projection(settings, snapshots)
+    if projection is None or projection[0] != generation.component("lexical").get("content_hash"):
+        return None
+    state = _serving_state(settings, generation, require_active_pack=False)
+    if not _state_is_compatible(
+        state, backend=backend, pack_id=pack_id,
+        pack_compatibility_identity=pack_compatibility_identity,
+        dimension=dimension or int((state or {}).get("dimension") or 0),
+    ):
+        return None
+    valid, _ = semantic_state_compatibility(
+        settings, state, snapshots, component=generation.component("semantic"),
+        require_active_pack=False, verify_artifacts=True,
+    )
+    if not valid or state is None:
+        return None
+    # Older direct Semantic builds could be registered beside Atlas cards
+    # without actually embedding those cards. Registration alone cannot prove
+    # that linkage: compare the exact card-entry identities as well.
+    expected_cards = []
+    for card in atlas_cards:
+        metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
+        level = str(card.get("level") or "entity")
+        target = str(card.get("target_id") or level)
+        start = max(1, int(metadata.get("line_start") or 1))
+        expected_cards.append((
+            str(card.get("repo") or ""), str(card.get("path") or ""), start,
+            max(start, int(metadata.get("line_end") or start)),
+            str(card.get("card_id") or hashlib.sha256(str(card.get("content") or "").encode()).hexdigest()),
+            f"atlas_{level}_card", target, target or None,
+        ))
+    actual_cards = []
+    entry_groups = [(str(shard.get("repo") or ""), shard["entries"]) for shard in state["shards"]]
+    entry_groups.append(("", state["entries"]))
+    for repo, entries in entry_groups:
+        for entry in entries:
+            if str(entry.get("kind") or "").startswith("atlas_"):
+                actual_cards.append((repo or str(entry.get("repo") or ""), *(
+                    entry.get(key) for key in ("path", "line", "end_line", "chunk_id", "kind", "symbol", "target_id")
+                )))
+    return state if sorted(actual_cards) == sorted(expected_cards) else None
+
+
 @workspace_exclusive
 def build_semantic_index(
     settings: Settings,
@@ -1078,6 +1194,32 @@ def build_semantic_index(
             # unpinned working tree. Published Atlas generations are always
             # content-addressed before reaching this path.
             source_projection = None
+        reusable = _registered_build_reuse(
+            settings, snapshots, atlas_cards, backend=backend_name,
+            pack_id=pack_id, pack_compatibility_identity=pack_compatibility_identity,
+            dimension=dimension,
+        ) if source_projection is not None else None
+        if reusable is not None:
+            if manifest is not None:
+                _check_pack_integrity(manifest)
+            # Repair only the compatibility projection if interrupted/older
+            # tooling left it behind. Immutable registered artifacts stay put.
+            if _published_state(settings) != reusable:
+                from .ops import ensure_write_capacity
+
+                ensure_write_capacity(settings, len(json.dumps(reusable).encode("utf-8")))
+                _atomic_state_write(_state_path(settings), reusable)
+            reused_cards = int(_state_result(reusable)["chunks"])
+            reused_shards = len(reusable.get("shards") or [])
+            emit(
+                "semantic_reuse", semantic_cards_discovered=reused_cards,
+                semantic_cards_total=reused_cards, cached_embeddings_reused=reused_cards,
+                new_embeddings_completed=0, remaining_embeddings=0,
+                semantic_shards_total=reused_shards, semantic_shards_completed=reused_shards,
+                semantic_shards_reused=reused_shards, semantic_shards_rebuilt=0,
+                generation_state="reused",
+            )
+            return _state_result(reusable)
         legacy_walk_budget = None
         if source_projection is None:
             from .index import _WalkBudget
@@ -1199,6 +1341,9 @@ def build_semantic_index(
         from .ops import ensure_write_capacity, remaining_write_capacity
 
         semantic_cache_capacity = [remaining_write_capacity(settings)]
+        # Only the exclusive bulk build shares accounting. Standalone callers
+        # measure their own cache; this is not persisted or used for serving.
+        semantic_cache_usage: list[tuple[int, int]] = []
         prior_shards = {
             (str(shard.get("repo") or ""), str(shard.get("snapshot") or "")): shard
             for shard in (published.get("shards") or [] if _state_is_compatible(
@@ -1268,6 +1413,7 @@ def build_semantic_index(
                 progress=cache_progress,
                 pack_compatibility_identity=pack_compatibility_identity,
                 write_capacity=semantic_cache_capacity,
+                cache_usage=semantic_cache_usage,
             )
             cached_total += repo_progress["cached"]
             embedded_total += repo_progress["embedded"]
@@ -1386,6 +1532,7 @@ def _cosine(left: list[float], right: list[float]) -> float:
 def _query_vector(
     settings: Settings, query: str, *, pack_id: str, dimension: int,
     embed: Callable[[list[str]], list[list[float]]], pack_compatibility_identity: str | None = None,
+    trace: Any | None = None,
 ) -> list[float]:
     from .catalog import connect
     from datetime import UTC, datetime
@@ -1394,54 +1541,86 @@ def _query_vector(
     key = "query:" + hashlib.sha256(
         f"{pack_id}\0{pack_compatibility_identity}\0{dimension}\0{SEMANTIC_EMBEDDING_INPUT_VERSION}\0{query}".encode("utf-8")
     ).hexdigest()
+    memory_key = (str(settings.state_dir.resolve()), key)
+    with _QUERY_VECTORS_LOCK:
+        vector = _QUERY_VECTORS.get(memory_key)
+        if vector is not None:
+            _QUERY_VECTORS.move_to_end(memory_key)
+            return list(vector)
+
+    def remember(vector: list[float]) -> list[float]:
+        if len(vector) <= MAX_MEMORY_QUERY_DIMENSION:
+            with _QUERY_VECTORS_LOCK:
+                _QUERY_VECTORS[memory_key] = tuple(vector)
+                _QUERY_VECTORS.move_to_end(memory_key)
+                while len(_QUERY_VECTORS) > MAX_MEMORY_QUERY_VECTORS:
+                    _QUERY_VECTORS.popitem(last=False)
+        return vector
+
     used_at = datetime.now(UTC).isoformat()
-    connection = connect(settings)
     try:
-        row = connection.execute(
-            "SELECT vector_json FROM embedding_cache WHERE cache_key=? AND pack_id=? AND dimension=?",
-            (key, pack_id, dimension),
-        ).fetchone()
-        if row:
-            try:
-                cached_vector = json.loads(row[0])
-                vector = valid_embedding_vector(cached_vector, dimension=dimension)
+        with closing(connect(settings)) as connection:
+            connection.execute("PRAGMA busy_timeout=50")
+            row = connection.execute(
+                "SELECT vector_json FROM embedding_cache WHERE cache_key=? AND pack_id=? AND dimension=? "
+                "AND length(CAST(vector_json AS BLOB))<=?",
+                (key, pack_id, dimension, dimension * 32 + 2),
+            ).fetchone()
+            if row:
+                try:
+                    vector = valid_embedding_vector(json.loads(row[0]), dimension=dimension)
+                except (TypeError, ValueError):
+                    vector = None
                 if vector is not None:
-                    connection.execute(
-                        "UPDATE embedding_cache SET last_used_at=? WHERE cache_key=?", (used_at, key)
-                    )
-                    connection.commit()
-                    return vector
-            except (TypeError, ValueError, json.JSONDecodeError):
-                connection.execute("DELETE FROM embedding_cache WHERE cache_key=?", (key,))
+                    try:
+                        connection.execute(
+                            "UPDATE embedding_cache SET last_used_at=? WHERE cache_key=?", (used_at, key)
+                        )
+                        connection.commit()
+                    except (OSError, sqlite3.Error):
+                        if trace is not None:
+                            trace.fallback_reasons.append("semantic_query_cache_touch_unavailable")
+                    return remember(vector)
+    except (OSError, sqlite3.Error, ValueError):
+        if trace is not None:
+            trace.fallback_reasons.append("semantic_query_cache_read_unavailable")
 
-    finally:
-        connection.close()
-
+    # A cache is optional. Model failures and invalid vectors are not: keep the
+    # computation/validation outside the best-effort persistence boundary.
     computed = embed([query])
     normalized = valid_embedding_vector(computed[0], dimension=dimension) if len(computed) == 1 else None
     if normalized is None:
         raise RuntimeError("query embedding dimension does not match the active semantic index")
+    remember(normalized)
     payload = json.dumps(normalized, separators=(",", ":"))
     from .ops import remaining_write_capacity
 
-    if len(payload.encode("utf-8")) > remaining_write_capacity(settings):
-        raise SemanticEmbeddingError("query embedding cache exceeds the remaining managed write capacity")
-    connection = connect(settings)
     try:
-        _reserve_embedding_cache(connection, [(key, payload)])
-        connection.execute(
-            "INSERT OR REPLACE INTO embedding_cache(cache_key,pack_id,dimension,vector_json,created_at,last_used_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (key, pack_id, dimension, payload, used_at, used_at),
-        )
-        connection.execute(
-            "DELETE FROM embedding_cache WHERE cache_key LIKE ? AND cache_key NOT IN "
-            "(SELECT cache_key FROM embedding_cache WHERE cache_key LIKE ? ORDER BY last_used_at DESC LIMIT 256)",
-            ("query:%", "query:%"),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+        if len(payload.encode("utf-8")) > remaining_write_capacity(
+            settings, scan_seconds=QUERY_CACHE_WRITE_SECONDS, scan_entries=QUERY_CACHE_SCAN_ENTRIES,
+        ):
+            raise SemanticEmbeddingError("query embedding cache exceeds the remaining managed write capacity")
+        with closing(connect(settings)) as connection:
+            connection.execute("PRAGMA busy_timeout=50")
+            deadline = time.monotonic() + QUERY_CACHE_WRITE_SECONDS
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            # Roll back pruning as well as insertion if any cache write fails.
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                _reserve_embedding_cache(connection, [(key, payload)])
+                connection.execute(
+                    "INSERT OR REPLACE INTO embedding_cache(cache_key,pack_id,dimension,vector_json,created_at,last_used_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (key, pack_id, dimension, payload, used_at, used_at),
+                )
+                connection.execute(
+                    "DELETE FROM embedding_cache WHERE cache_key LIKE ? AND cache_key NOT IN "
+                    "(SELECT cache_key FROM embedding_cache WHERE cache_key LIKE ? ORDER BY last_used_at DESC LIMIT 256)",
+                    ("query:%", "query:%"),
+                )
+    except (OSError, sqlite3.Error, ValueError, SemanticEmbeddingError):
+        if trace is not None:
+            trace.fallback_reasons.append("semantic_query_cache_write_unavailable")
     return normalized
 
 
@@ -1617,6 +1796,7 @@ def search_semantic(
         vector = _query_vector(
             settings, query, pack_id=pack_id, dimension=dimension, embed=embed,
             pack_compatibility_identity=pack_compatibility_identity,
+            trace=trace,
         )
         if trace is not None:
             elapsed = (time.perf_counter() - embedding_started) * 1000

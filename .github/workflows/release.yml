@@ -483,6 +483,20 @@ jobs:
             foreach ($notice in "PROJECT_BRAIN_LICENSE","CODEBASE_MEMORY_THIRD_PARTY_NOTICES.md","ZOEKt_LICENSE","ZOEKt_WINDOWS_PATCH") {
               if (-not (Test-Path (Join-Path $installed $notice))) { throw "installed notice is missing: $notice" }
             }
+            # Offline installation/upgrade consumes the same published ZIP and
+            # checksum format, without GitHub API access or proxy credentials.
+            & scripts/install-project-brain.ps1 -ArchivePath (Join-Path $fixture $archive) -InstallDir $installed -NoPathUpdate
+            if ((& (Join-Path $installed "brain.exe") --version) -cne "brain $version") { throw "offline upgrade version mismatch" }
+            $badSums = Join-Path $fixture "bad-checksums.txt"
+            Set-Content -Path $badSums -Value (("0" * 64) + "  " + $archive) -Encoding ascii
+            $rejected = $false
+            try {
+              & scripts/install-project-brain.ps1 -ArchivePath (Join-Path $fixture $archive) -ChecksumPath $badSums -InstallDir $installed -NoPathUpdate
+            } catch {
+              if ($_.Exception.Message -notmatch "checksum mismatch") { throw }
+              $rejected = $true
+            }
+            if (-not $rejected -or (& (Join-Path $installed "brain.exe") --version) -cne "brain $version") { throw "bad-checksum rollback did not preserve installation" }
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }

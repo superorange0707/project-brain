@@ -17,7 +17,7 @@ def _path(settings: Settings) -> Path:
     return settings.state_dir / "edition.json"
 
 
-def capabilities(settings: Settings) -> dict[str, Any]:
+def capabilities(settings: Settings, *, semantic: dict[str, Any] | None = None) -> dict[str, Any]:
     packs = installed_packs(settings)
     pack_reports = [
         {
@@ -32,6 +32,8 @@ def capabilities(settings: Settings) -> dict[str, Any]:
     from .semantic import semantic_state_compatibility
 
     atlas = current_generation_ref(settings)
+    if semantic is not None and semantic.get("atlas_identity") != (atlas.identity if atlas is not None else None):
+        semantic = None
     component = atlas.component("semantic") if atlas is not None else {}
     semantic_path = settings.state_dir / "semantic-index.json"
     semantic_root = settings.state_dir
@@ -39,25 +41,31 @@ def capabilities(settings: Settings) -> dict[str, Any]:
     if component_ready:
         semantic_path = settings.state_dir / str(component["artifact_ref"])
         semantic_root = generation_root(settings)
-    try:
-        semantic_state = json.loads(read_managed_text(
-            semantic_root, semantic_path, max_bytes=64 * 1024 * 1024,
-        ))
-        if not isinstance(semantic_state, dict):
+    if semantic is None:
+        try:
+            semantic_state = json.loads(read_managed_text(
+                semantic_root, semantic_path, max_bytes=64 * 1024 * 1024,
+            ))
+            if not isinstance(semantic_state, dict):
+                semantic_state = {}
+        except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
             semantic_state = {}
-    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        snapshots = atlas.snapshots if atlas is not None else {
+            repo.name: repo.source_sha or "working-tree" for repo in settings.repositories
+        }
+        semantic_aligned, _ = semantic_state_compatibility(
+            settings,
+            semantic_state,
+            snapshots,
+            component=component if component_ready else None,
+            verify_artifacts=False,
+        )
+        semantic_aligned = semantic_aligned and bool(component_ready)
+    else:
+        # A dashboard operation passes its already validated status. This is
+        # request-local reuse, not a readiness cache or a serving authority.
         semantic_state = {}
-    snapshots = atlas.snapshots if atlas is not None else {
-        repo.name: repo.source_sha or "working-tree" for repo in settings.repositories
-    }
-    semantic_aligned, _ = semantic_state_compatibility(
-        settings,
-        semantic_state,
-        snapshots,
-        component=component if component_ready else None,
-        verify_artifacts=False,
-    )
-    semantic_aligned = semantic_aligned and bool(component_ready)
+        semantic_aligned = bool(semantic.get("aligned"))
     try:
         from .semantic import _usearch
 
@@ -70,6 +78,8 @@ def capabilities(settings: Settings) -> dict[str, Any]:
     semantic_chunks = len(semantic_state.get("entries") or []) + sum(
         len(item.get("entries") or []) for item in semantic_state.get("shards") or [] if isinstance(item, dict)
     )
+    if semantic is not None:
+        semantic_chunks = int(semantic.get("chunks") or 0)
     from .backends.zoekt import status as zoekt_status
 
     zoekt = zoekt_status()
@@ -83,9 +93,9 @@ def capabilities(settings: Settings) -> dict[str, Any]:
         "vector_backend": vector_backend,
         "reranker": reranker,
         "semantic_chunks": semantic_chunks,
-        "semantic_stale": bool(semantic_state.get("stale")),
+        "semantic_stale": bool((semantic if semantic is not None else semantic_state).get("stale")),
         "semantic_aligned": semantic_aligned,
-        "semantic_backend": semantic_state.get("backend"),
+        "semantic_backend": (semantic if semantic is not None else semantic_state).get("backend"),
         "zoekt": {"available": zoekt.available, "reason": zoekt.reason},
         "installed_packs": pack_reports,
     }

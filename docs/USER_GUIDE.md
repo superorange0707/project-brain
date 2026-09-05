@@ -12,7 +12,13 @@ ticket investigations, configuration, command reference, and troubleshooting.
 - `rg` (ripgrep) recommended for fast search
 - macOS, Linux, or Windows
 
-There are no Python package runtime dependencies. The prebuilt package includes
+Core standalone artifacts cover macOS Apple Silicon/Intel, Linux arm64/amd64,
+and Windows 11 x64. The current **official Semantic/Precision model packs** are
+separately qualified for Apple Silicon on macOS 15+ and native Windows x64;
+installing the Core executable on another platform does not imply an official
+model pack is available there. Core fallback remains usable without model packs.
+
+Standalone installs bundle their Python runtime and dependencies. The prebuilt package includes
 the tested structural engine and a pinned Zoekt command pair. When either engine
 or `rg` is unavailable, Project Brain uses its built-in scanner. Non-Git
 directories can still be searched.
@@ -75,6 +81,20 @@ scripts are already allowed. No WSL or Python runtime is required.
 Create this installer clone in a downloads or temporary directory, not inside
 the directory that contains repositories configured as a Brain workspace. The
 clone is not required after installation.
+
+For a ZIP already downloaded in a browser or transferred from another machine,
+put its published `SHA256SUMS.txt` in the same directory and run the same script:
+
+```powershell
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.10-windows-amd64.zip"
+```
+
+The version is read from the official filename. This path performs no network
+requests. If the checksum file is elsewhere, add `-ChecksumPath "C:\Downloads\SHA256SUMS.txt"`.
+Online and offline installs use the same checksum, staged executable version,
+activation rollback and user-PATH checks. No administrator or execution-policy
+change is needed. Finish active investigations and stop the old UI before
+replacing executables; a new terminal can then run `brain` from any workspace.
 
 If PowerShell reports that script execution is disabled by organization policy,
 do not bypass that policy; use the portable ZIP below or ask the organization to
@@ -151,6 +171,49 @@ brain ui
 ```
 
 The demo has four local Java/Spring repositories, no remote, and no credential.
+
+### Investigation workspace and recovery
+
+The local workspace starts with independent ticket cards. Each shows the
+generation pinned to that ticket, its wave, and its current investigation state.
+Open a ticket to inspect its artifacts and the separate history/handoff folder
+paths. Newly generated AI handoffs live in `generated/handoffs/<TICKET>/`; older
+flat handoff references remain readable. Selecting a ticket also selects it for
+the Continue and Review views, clears the previous preview/copyable context, and
+prevents a late response for another ticket from replacing the selected evidence.
+
+Use **Appearance** to switch light/dark surfaces. Only the color preference is
+stored in browser storage; ticket text and source stay in managed local state.
+The interface remains usable if browser storage is disabled. Motion and
+transparency preferences are respected, and no external font or asset request
+is required.
+
+In **Health & recovery**:
+
+- **Re-read brain.toml** validates and loads your configuration edit without
+  overwriting the file. An invalid edit leaves the previous running settings
+  intact. A managed-root change requires a safe UI restart, not an implicit move.
+- **Refresh Brain** includes changed/new repositories in a new generation;
+  existing tickets keep their old pins. Identical registered Semantic inputs
+  reuse their validated component without source rechunking or embedding.
+- **Run diagnostics** and **Verify local packs** help distinguish configuration,
+  model, alignment and permission problems. OS/company access policies must be
+  corrected outside Brain; it never bypasses them or recommends a blind reset.
+- **Preview safe cleanup** shows what existing reachability GC can reclaim.
+  Applying cleanup requires confirmation. If reachability is incomplete or all
+  state is pinned, Brain retains it; it does not silently relax your quota.
+
+Errors remain visible until dismissed. If the browser loses its connection, the
+job may still be running: use **Recheck connection & status** before resubmitting.
+The activity bar links back to progress even after navigating to another view.
+Local-ref status probes share a five-second budget; a slow/unreachable repository
+is labelled unverified rather than falsely current. This status check does not
+fetch remote code.
+
+Golden evaluation now includes `candidate_file_recall_at_limit` and
+`hydrated_file_recall_at_limit`. The latter counts verified source regions before
+context-byte trimming; neither metric alone establishes final AI-answer quality.
+Use local labelled tickets for enterprise accuracy and timing measurements.
 
 ## 3. Create a Brain workspace
 
@@ -388,10 +451,31 @@ Semantic shard search. Values outside Brain's hard safe maxima are rejected.
 - `minimum_free_disk_gb`: refuse a new index or model-pack write that would
   reduce free disk below this reserve; set `0` to disable the reserve.
 
-Brain accounts healthy immutable source snapshots from their validated snapshot
-seals, so large retained generations do not require a repeated per-file capacity
-walk before every managed write. A damaged or unsealed tree is never trusted as
-a shortcut and remains subject to the bounded fail-closed scan.
+When the state quota is explicitly disabled, quota inventory is skipped; the
+configured free-disk reserve still applies. Brain does not disable either guard
+automatically as a recovery action.
+
+Brain measures current file sizes without reading source contents. Snapshot
+seals describe publication-time content and are not used as a substitute for
+current disk accounting. Full managed-write inventory now streams the directory
+tree, so the former 500,000-entry/30-second quick-probe limit does not reject a
+legitimate large workspace. Memory and open directories are bounded by a
+128-level depth limit. The UI and optional query cache still use short probes;
+their incomplete estimates never authorize a write. Actual quota and free-disk
+limits remain enforced, and unreadable/replaced directories fail explicitly.
+
+GC separately bounds its session/generation reachability graph, then streams
+selected payload trees to measure their actual size before deleting anything.
+Source files within a selected snapshot do not consume the graph's item budget.
+An old `state capacity scan budget exceeded` error therefore needs a normal
+refresh after upgrading, not a model/cache reset or a quota setting change.
+
+Query-vector caching is optional: a cache capacity, scan-budget, or SQLite write
+failure does not discard a valid embedding or force Core fallback. Repeated
+queries can reuse a bounded in-memory cache while the UI process is running;
+this does not replace generation-pinned evidence or shard validation. The
+existing persistent embedding cache and model packs are preserved. If a query
+could not be cached on disk, a later process may need to embed it again.
 
 The UI's **Storage & recovery** card provides both a preview and a guarded
 one-button cleanup. It calls the same reachability-aware GC as the CLI and can
@@ -402,6 +486,24 @@ removes nothing and reports the blocker without exposing local paths.
 If a CLI operation encounters a recoverable state-capacity or free-disk guard,
 it points to this card instead of requiring users to find or delete internal
 directories manually.
+
+The latest refresh result, failed stage, completed counters, and storage recovery
+guidance remain visible after a browser reload or UI restart. After addressing
+the cause, click **Refresh Brain** to retry through the normal managed pipeline;
+Brain reuses compatible published state and cached embeddings. Cleanup is not
+guaranteed to free space when all retained state is current or ticket-pinned.
+
+If `brain ui status` cannot confirm the existing local instance, Brain preserves
+its private registration and does not start another server or stop a process.
+Retry `brain ui status`, then use `brain ui` to reopen the confirmed instance.
+UI control requests connect directly to loopback, ignore proxy settings, and
+never follow redirects with the session token.
+
+An executable upgrade does not replace a UI process that is already running.
+After its active work finishes, run `brain ui stop`, then `brain ui` to load the
+upgraded code. Closing or reloading the browser tab alone is not a process
+restart. This stability patch does not require a model reinstall, cache reset,
+or Atlas/Semantic rebuild solely because the executable changed.
 
 ### Model-pack installation settings
 

@@ -830,8 +830,8 @@ def _attach_source_snapshots(settings: Settings) -> None:
             repo.source_warning = "Ignored unsafe or invalid stored source snapshot; refresh is required"
 
 
-def git_head(repo: Repository, ref: str = "HEAD") -> str | None:
-    result = run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=repo.path)
+def git_head(repo: Repository, ref: str = "HEAD", *, timeout: float = 30.0) -> str | None:
+    result = run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=repo.path, timeout=timeout)
     return result.stdout.strip() if result.returncode == 0 else None
 
 
@@ -3393,12 +3393,15 @@ def pack_context(
         ]
     warnings = list(bundle.warnings)
     for repo in settings.repositories:
-        local = git_head(repo)
-        source = repo.source_sha or local
+        pinned = bundle.atlas_generation is not None
+        # Live HEAD is not evidence for a pinned investigation. Avoid an
+        # all-repository subprocess sweep every time a wave is packaged.
+        local = None if pinned else git_head(repo, timeout=1.0)
+        source = bundle.atlas_generation.snapshots.get(repo.name) if pinned else repo.source_sha or local
         output.append(
             f"- `{repo.name}` — analyzed `{(source or 'not a Git repository')[:12]}` "
             f"from `{repo.source_ref or 'working tree'}` ({repo.source_status}); "
-            f"local HEAD `{(local or 'n/a')[:12]}`"
+            f"local HEAD `{('not probed (pinned)' if pinned else (local or 'n/a')[:12])}`"
         )
         if repo.source_warning:
             warnings.append(f"{repo.name}: {repo.source_warning}")

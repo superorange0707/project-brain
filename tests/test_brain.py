@@ -1084,19 +1084,20 @@ path = "batch-service"
             connection.close()
         self.assertEqual(before, after)
 
-    def test_authoritative_capacity_scan_fails_closed_at_its_entry_budget(self) -> None:
+    def test_authoritative_capacity_scan_is_not_a_bounded_status_probe(self) -> None:
         from brain import ops as ops_module
 
         crowded = self.settings.state_dir / "capacity-crowded"
         crowded.mkdir(parents=True)
         for number in range(20):
             (crowded / f"{number:03d}.bin").write_bytes(b"x")
-        with mock.patch.object(ops_module, "MAX_CAPACITY_SCAN_ENTRIES", 10), self.assertRaisesRegex(
-            OSError, "capacity scan budget exceeded",
-        ):
+        with mock.patch.object(ops_module, "MAX_CAPACITY_SCAN_ENTRIES", 10):
             ops_module.ensure_write_capacity(self.settings)
+            self.assertGreater(ops_module.remaining_write_capacity(self.settings), 0)
+            with self.assertRaisesRegex(OSError, "Quick storage check is incomplete"):
+                ops_module.ensure_write_capacity(self.settings, scan_entries=10)
 
-    def test_capacity_and_gc_account_sealed_snapshots_without_walking_every_file(self) -> None:
+    def test_capacity_and_gc_measure_snapshot_members_not_stale_seal_totals(self) -> None:
         from brain import ops as ops_module
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1109,25 +1110,35 @@ path = "batch-service"
             seal_path = sync_module._snapshot_seal_path(snapshot.parent, snapshot.name)
             seal_path.write_text(json.dumps(seal), encoding="utf-8")
             expected = 40 * len(b"source") + seal_path.stat().st_size
-            ops_module._SNAPSHOT_CAPACITY_CACHE.clear()
-
-            with mock.patch.object(ops_module, "MAX_CAPACITY_SCAN_ENTRIES", 8):
+            with mock.patch.object(Path, "open", side_effect=AssertionError("capacity must not read file content")):
                 self.assertEqual(expected, ops_module._directory_bytes(state))
             budget = ops_module._GcScanBudget(
-                remaining_items=2,
+                remaining_items=100,
                 deadline=time.monotonic() + 5,
             )
             self.assertEqual(40 * len(b"source"), ops_module._gc_path_bytes(
                 replace(self.settings, state_dir=state), snapshot, budget,
             ))
 
-            seal["sha"] = "wrong"
+            nested = snapshot / "nested"
+            nested.mkdir()
+            member = nested / "grown.java"
+            member.write_bytes(b"old")
+            seal = sync_module._snapshot_seal(snapshot, snapshot.name)
             seal_path.write_text(json.dumps(seal), encoding="utf-8")
-            ops_module._SNAPSHOT_CAPACITY_CACHE.clear()
-            with mock.patch.object(ops_module, "MAX_CAPACITY_SCAN_ENTRIES", 8), self.assertRaisesRegex(
-                OSError, "capacity scan budget exceeded",
-            ):
-                ops_module._directory_bytes(state)
+            before = ops_module._directory_bytes(state)
+            member.write_bytes(b"x" * (4 * 1024 * 1024))
+            self.assertEqual(4 * 1024 * 1024 - 3, ops_module._directory_bytes(state) - before)
+            (nested / "unlisted.java").write_bytes(b"unlisted")
+            self.assertEqual(4 * 1024 * 1024 - 3 + 8, ops_module._directory_bytes(state) - before)
+            budget = ops_module._GcScanBudget(remaining_items=100, deadline=time.monotonic() + 5)
+            self.assertEqual(40 * len(b"source") + 4 * 1024 * 1024 + 8, ops_module._gc_path_bytes(
+                replace(self.settings, state_dir=state), snapshot, budget,
+            ))
+            seal["files"] = {}
+            seal_path.write_text(json.dumps(seal), encoding="utf-8")
+            with self.assertRaisesRegex(OSError, "Quick storage check is incomplete"):
+                ops_module._directory_bytes(state, scan_entries=8)
 
     def test_capacity_error_exposes_a_safe_recovery_without_local_paths(self) -> None:
         from brain.ops import StateCapacityError
@@ -1139,6 +1150,18 @@ path = "batch-service"
         recovery = error.recovery()
         self.assertEqual("safe_gc", recovery["action"])
         self.assertNotIn(str(self.root), json.dumps(recovery))
+
+    def test_disabled_state_quota_skips_inventory_but_keeps_free_disk_guard(self) -> None:
+        from brain import ops
+
+        settings = replace(self.settings, max_state_gb=0, minimum_free_disk_gb=1)
+        with mock.patch("brain.ops._directory_bytes", side_effect=AssertionError("disabled quota must not scan")), mock.patch(
+            "brain.ops.shutil.disk_usage", return_value=mock.Mock(free=2 * 1024 ** 3),
+        ):
+            ops.ensure_write_capacity(settings, 100)
+            self.assertEqual(1024 ** 3, ops.remaining_write_capacity(settings))
+            with self.assertRaisesRegex(ops.StateCapacityError, "free-disk guard"):
+                ops.ensure_write_capacity(settings, 2 * 1024 ** 3)
 
     def test_context_and_retrieval_config_cannot_disable_global_bounds(self) -> None:
         project = self.root / "oversized-config"

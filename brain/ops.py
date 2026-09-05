@@ -4,11 +4,13 @@ import json
 import re
 import shutil
 import sqlite3
+import stat
 import os
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from pathlib import Path, PurePosixPath
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from .catalog import (
@@ -36,11 +38,12 @@ MAX_STORAGE_STATUS_ENTRIES = 5_000
 MAX_STORAGE_STATUS_SECONDS = 0.05
 MAX_CAPACITY_SCAN_ENTRIES = 500_000
 MAX_CAPACITY_SCAN_SECONDS = 30.0
+MAX_INVENTORY_DEPTH = 128
 STORAGE_STATUS_TTL_SECONDS = 5.0
+MAX_FRESHNESS_PROBE_SECONDS = 5.0
+MAX_FRESHNESS_REPO_SECONDS = 1.0
 _STORAGE_STATUS_CACHE: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
 _STORAGE_STATUS_LOCK = threading.Lock()
-_SNAPSHOT_CAPACITY_CACHE: dict[tuple[object, ...], int] = {}
-_SNAPSHOT_CAPACITY_LOCK = threading.Lock()
 
 
 class StateCapacityError(OSError):
@@ -51,6 +54,11 @@ class StateCapacityError(OSError):
         self.code = code
 
     def recovery(self) -> dict[str, str]:
+        if self.code == "state_inventory_unsafe":
+            return {
+                "code": self.code, "title": "Storage inventory needs diagnosis",
+                "message": str(self), "action": "diagnostics", "action_label": "Run diagnostics",
+            }
         return {
             "code": self.code,
             "title": "Storage needs attention",
@@ -289,6 +297,7 @@ def semantic_status(settings: Settings) -> dict[str, Any]:
         "pack_id": state.get("pack_id"),
         "snapshots": semantic_snapshots(state) if state else {},
         "reason": reason,
+        "atlas_identity": atlas.identity if atlas is not None else None,
     }
 
 
@@ -562,8 +571,8 @@ def model_status(settings: Settings) -> dict[str, Any]:
 def dashboard_status(settings: Settings) -> dict[str, Any]:
     """One safe status calculation reused by the operations UI and CLI status."""
     requested = current_edition(settings)
-    available = capabilities(settings)
     semantic = semantic_status(settings)
+    available = capabilities(settings, semantic=semantic)
     repo_freshness = freshness(settings)
     core_ready = bool(available.get("lexical_index")) and all(item.get("current") for item in repo_freshness["repositories"])
     if requested == "precision" and available.get("reranker") and available.get("embedding") and semantic["aligned"]:
@@ -600,106 +609,71 @@ def dashboard_status(settings: Settings) -> dict[str, Any]:
     }
 
 
-def _sealed_snapshot_bytes(state_root: Path, snapshot: Path, *, deadline: float) -> int | None:
-    """Account for an immutable snapshot from its existing bounded seal."""
+def _directory_bytes(
+    path: Path, *, scan_seconds: float | None = None, scan_entries: int | None = None,
+    stop_after: int | None = None, reject_links: bool = False,
+) -> int:
+    """Stream physical sizes; only optional probes have a total work budget.
+
+    A complete managed write/cleanup is not a status probe. Its workspace may
+    legitimately contain millions of retained files. Memory/open directories
+    are bounded by depth, not width; no publication-time seal or cached total
+    can authorize a write. Early termination is allowed only above a byte limit.
+    """
     try:
-        relative = snapshot.relative_to(state_root)
-    except ValueError:
-        return None
-    if len(relative.parts) != 3 or relative.parts[0] != "snapshots":
-        return None
-    try:
-        from .sync import MAX_GIT_SNAPSHOT_ITEMS, MAX_GIT_SNAPSHOT_SEAL_BYTES, _snapshot_seal_path
-
-        seal = _snapshot_seal_path(snapshot.parent, snapshot.name)
-        seal_stat = seal.lstat()
-        snapshot_stat = snapshot.lstat()
-        if seal.is_symlink() or not seal.is_file() or snapshot.is_symlink() or not snapshot.is_dir():
-            return None
-        key = (
-            str(seal),
-            seal_stat.st_dev, seal_stat.st_ino, seal_stat.st_size,
-            seal_stat.st_mtime_ns, seal_stat.st_ctime_ns,
-            snapshot_stat.st_dev, snapshot_stat.st_ino,
-            snapshot_stat.st_mtime_ns, snapshot_stat.st_ctime_ns,
-        )
-        with _SNAPSHOT_CAPACITY_LOCK:
-            cached = _SNAPSHOT_CAPACITY_CACHE.get(key)
-        if cached is not None:
-            return cached
-        value = json.loads(read_managed_text(
-            state_root, seal, max_bytes=MAX_GIT_SNAPSHOT_SEAL_BYTES,
-        ))
-        files = value.get("files") if isinstance(value, dict) else None
-        if value.get("version") != 3 or value.get("sha") != snapshot.name or not isinstance(files, dict):
-            return None
-        if len(files) > MAX_GIT_SNAPSHOT_ITEMS:
-            return None
-        total = 0
-        for index, (name, details) in enumerate(files.items(), 1):
-            if index % 1024 == 0 and time.monotonic() >= deadline:
-                raise StateCapacityError(
-                    "state_inventory_limit",
-                    "Project Brain state capacity scan budget exceeded; no data was changed",
-                )
-            logical = PurePosixPath(name) if isinstance(name, str) else PurePosixPath("..")
-            size = details.get("size") if isinstance(details, dict) else None
-            if (
-                not name or logical.is_absolute() or ".." in logical.parts
-                or isinstance(size, bool) or not isinstance(size, int) or size < 0
-                or total + size > MAX_GC_ACCOUNTED_BYTES
-            ):
-                return None
-            total += size
-        with _SNAPSHOT_CAPACITY_LOCK:
-            if len(_SNAPSHOT_CAPACITY_CACHE) >= 4_096:
-                _SNAPSHOT_CAPACITY_CACHE.clear()
-            _SNAPSHOT_CAPACITY_CACHE[key] = total
-        return total
-    except StateCapacityError:
-        raise
-    except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-
-
-def _directory_bytes(path: Path) -> int:
-    if not path.exists():
+        path.lstat()
+    except FileNotFoundError:
         return 0
-    deadline = time.monotonic() + MAX_CAPACITY_SCAN_SECONDS
-    pending = [path]
+    deadline = time.monotonic() + min(MAX_CAPACITY_SCAN_SECONDS, max(0, scan_seconds)) if scan_seconds is not None else None
+    item_limit = min(MAX_CAPACITY_SCAN_ENTRIES, max(0, scan_entries)) if scan_entries is not None else None
     scanned = 0
     total = 0
-    while pending:
-        if scanned >= MAX_CAPACITY_SCAN_ENTRIES or time.monotonic() >= deadline:
-            raise StateCapacityError(
-                "state_inventory_limit",
-                "Project Brain state capacity scan budget exceeded; no data was changed",
-            )
-        directory = pending.pop()
+
+    def linked(info: os.stat_result) -> bool:
+        return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+    def visit(directory: Path, depth: int) -> bool:
+        nonlocal scanned, total
+        if depth > MAX_INVENTORY_DEPTH:
+            raise StateCapacityError("state_inventory_unsafe", "Managed state exceeds the safe directory-depth limit; run diagnostics")
+        before = directory.lstat()
+        if linked(before) or not stat.S_ISDIR(before.st_mode):
+            raise StateCapacityError("state_inventory_unsafe", "Managed inventory directory is not a direct directory; run diagnostics")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise StateCapacityError("state_inventory_limit", "Quick storage check is incomplete; a managed refresh performs the full inventory")
         try:
             with os.scandir(directory) as iterator:
                 for entry in iterator:
                     scanned += 1
-                    if scanned > MAX_CAPACITY_SCAN_ENTRIES or time.monotonic() >= deadline:
+                    if (item_limit is not None and scanned > item_limit) or (deadline is not None and time.monotonic() >= deadline):
                         raise StateCapacityError(
                             "state_inventory_limit",
-                            "Project Brain state capacity scan budget exceeded; no data was changed",
+                            "Quick storage check is incomplete; a managed refresh performs the full inventory",
                         )
-                    if entry.is_symlink():
+                    info = entry.stat(follow_symlinks=False)
+                    if linked(info):
+                        if reject_links:
+                            raise StateCapacityError("state_inventory_unsafe", "GC target contains a symbolic link or reparse point")
                         continue
-                    if entry.is_dir(follow_symlinks=False):
-                        child = Path(entry.path)
-                        snapshot_bytes = _sealed_snapshot_bytes(path, child, deadline=deadline)
-                        if snapshot_bytes is None:
-                            pending.append(child)
-                        else:
-                            total += snapshot_bytes
-                    elif entry.is_file(follow_symlinks=False):
-                        total += entry.stat(follow_symlinks=False).st_size
-        except OSError as error:
-            if isinstance(error, StateCapacityError):
-                raise
-            raise OSError("Project Brain state capacity is unavailable") from error
+                    if stat.S_ISDIR(info.st_mode):
+                        if visit(Path(entry.path), depth + 1):
+                            return True
+                    elif stat.S_ISREG(info.st_mode):
+                        total += info.st_size
+                    if stop_after is not None and total > stop_after:
+                        return True
+        finally:
+            after = directory.lstat()
+            if linked(after) or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+                raise StateCapacityError("state_inventory_unsafe", "Managed inventory directory changed during scanning; retry after other operations finish")
+        return False
+
+    try:
+        visit(path, 0)
+    except OSError as error:
+        if isinstance(error, StateCapacityError):
+            raise
+        raise OSError("Project Brain state capacity is unavailable") from error
     return total
 
 
@@ -748,26 +722,38 @@ def _bounded_storage_summary(roots: list[Path]) -> dict[str, Any]:
     }
 
 
-def ensure_write_capacity(settings: Settings, projected_bytes: int = 0) -> None:
+def ensure_write_capacity(
+    settings: Settings, projected_bytes: int = 0, *,
+    scan_seconds: float | None = None, scan_entries: int | None = None,
+) -> None:
     """Refuse index/model writes before exceeding the configured local disk guard."""
     projected_bytes = max(0, int(projected_bytes))
-    current_bytes = _directory_bytes(settings.state_dir)
     usage = shutil.disk_usage(settings.root)
-    if settings.max_state_gb and current_bytes + projected_bytes > settings.max_state_gb * _GIB:
-        raise StateCapacityError(
-            "state_quota_exceeded",
-            "Project Brain state quota would be exceeded; safely reclaim unpinned state or raise storage.max_state_gb",
-        )
     if settings.minimum_free_disk_gb and usage.free - projected_bytes < settings.minimum_free_disk_gb * _GIB:
         raise StateCapacityError(
             "free_disk_guard",
             "Project Brain free-disk guard would be breached; safely reclaim unpinned state or free local disk space",
         )
+    current_bytes = _directory_bytes(
+        settings.state_dir, scan_seconds=scan_seconds, scan_entries=scan_entries,
+        stop_after=settings.max_state_gb * _GIB - projected_bytes,
+    ) if settings.max_state_gb else 0
+    if settings.max_state_gb and current_bytes + projected_bytes > settings.max_state_gb * _GIB:
+        raise StateCapacityError(
+            "state_quota_exceeded",
+            "Project Brain state quota would be exceeded; safely reclaim unpinned state or raise storage.max_state_gb",
+        )
 
 
-def remaining_write_capacity(settings: Settings) -> int:
+def remaining_write_capacity(
+    settings: Settings, *, scan_seconds: float | None = None, scan_entries: int | None = None,
+) -> int:
     """Return the exact fail-closed byte budget available to managed writers."""
-    current_bytes = _directory_bytes(settings.state_dir)
+    current_bytes = (
+        _directory_bytes(settings.state_dir, scan_seconds=scan_seconds, scan_entries=scan_entries,
+                         stop_after=settings.max_state_gb * _GIB)
+        if settings.max_state_gb else 0
+    )
     usage = shutil.disk_usage(settings.root)
     limits = [max(0, usage.free - max(0, settings.minimum_free_disk_gb) * _GIB)]
     if settings.max_state_gb:
@@ -776,31 +762,43 @@ def remaining_write_capacity(settings: Settings) -> int:
 
 
 def freshness(settings: Settings) -> dict[str, Any]:
-    from .core import git_head, load_index_state
+    from .core import BrainError, git_head, load_index_state
 
     indexed = load_index_state(settings)
     atlas = current_generation_ref(settings)
-    rows = []
-    for repo in settings.repositories:
+    deadline = time.monotonic() + MAX_FRESHNESS_PROBE_SECONDS
+
+    def probe(repo: Any) -> dict[str, Any]:
         warning = repo.source_warning
         git_metadata = repo.path / ".git"
         if git_metadata.exists() or git_metadata.is_symlink():
             # Stored source_sha is the published snapshot, not a live freshness
             # probe. Resolve the selected local ref without fetching so status
             # cannot report G1 current after the same branch advances to G2.
-            source = git_head(repo, repo.source_ref or "HEAD")
+            remaining = deadline - time.monotonic()
+            try:
+                source = git_head(
+                    repo, repo.source_ref or "HEAD",
+                    timeout=min(MAX_FRESHNESS_REPO_SECONDS, remaining),
+                ) if remaining > 0 else None
+            except (BrainError, OSError):
+                source = None
             if source is None:
-                warning = warning or "Unable to verify the currently selected local Git ref"
+                warning = warning or "Local Git ref could not be verified within the status budget; recheck status or refresh"
         else:
             source = repo.source_sha
         index = atlas.snapshots.get(repo.name) if atlas is not None else (indexed.get(repo.name) or {}).get("sha")
-        rows.append({
+        return {
             "repo": repo.name,
             "source_sha": source,
             "index_sha": index,
             "current": bool(atlas is not None and index and source and index == source),
             "warning": warning,
-        })
+        }
+    # A status request must not turn 100 repositories into 100 × 30 seconds.
+    # Queued probes share the deadline and report unknown, never false-current.
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="brain-freshness") as executor:
+        rows = list(executor.map(probe, settings.repositories))
     from .backends.zoekt import status as zoekt_status
 
     zoekt = zoekt_status()
@@ -1107,27 +1105,16 @@ def _gc_path_bytes(settings: Settings, path: Path, budget: _GcScanBudget) -> int
     if path.is_file():
         return budget.file_bytes(path.stat().st_size)
     budget.consume()
-    snapshot_bytes = _sealed_snapshot_bytes(
-        settings.state_dir, path, deadline=budget.deadline,
-    )
-    if snapshot_bytes is not None:
-        return budget.account_bytes(snapshot_bytes)
-    total = 0
-    pending = [path]
-    while pending:
-        directory = pending.pop()
-        if directory != path:
-            budget.consume()
-        for item in directory.iterdir():
-            if item.is_symlink():
-                raise _GcScanIncomplete("GC target contains a symbolic link")
-            if item.is_dir():
-                pending.append(item)
-            elif item.is_file():
-                total += budget.file_bytes(item.stat().st_size)
-            else:
-                budget.consume()
-    return total
+    started = time.monotonic()
+    try:
+        # Reachability bounds count generations/memberships/targets, not every
+        # source file inside an already selected snapshot. Size checks still
+        # finish (and reject links) before the first deletion.
+        size = _directory_bytes(path, reject_links=True,
+                                stop_after=MAX_GC_ACCOUNTED_BYTES - budget.accounted_bytes)
+        return budget.account_bytes(size)
+    finally:
+        budget.deadline += time.monotonic() - started
 
 
 def _gc(settings: Settings, *, dry_run: bool, keep_recent: int, budget: _GcScanBudget) -> dict[str, Any]:

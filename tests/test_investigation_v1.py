@@ -3005,6 +3005,15 @@ None.
         self.assertTrue(hits)
         self.assertTrue(verify_pack(self.settings, "v1-test-pack")["verified"])
 
+    def test_m365_evidence_ids_require_exact_token_boundaries(self) -> None:
+        from brain.evaluation import evaluate_m365_response
+
+        for response in ("E00010", "prefixE0001", "E0001suffix", "OLD-E0001", "E0001-replaced"):
+            with self.subTest(response=response):
+                self.assertEqual(0.0, evaluate_m365_response(response, ["E0001"])["evidence_id_recall"])
+        self.assertEqual(1.0, evaluate_m365_response("Verified [E0001], `E0002`.", ["E0001", "E0002"])["evidence_id_recall"])
+        self.assertEqual(0.5, evaluate_m365_response("E0001, E0001", ["E0001", "E0002"])["evidence_id_recall"])
+
     def test_integrated_brain_and_m365_evaluation_metrics(self) -> None:
         self.publish("sha-g1", "G1_ONLY")
         suite = self.root / "v1-golden.json"

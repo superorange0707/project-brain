@@ -7,14 +7,16 @@
   <style>
     :root {
       color-scheme: dark;
-      --bg: #07110f;
-      --panel: #0d1b18;
-      --panel-2: #12241f;
-      --line: #244239;
-      --text: #ecf7f2;
-      --muted: #91aaa0;
-      --accent: #56e39f;
-      --accent-2: #7db8ff;
+      --bg: #0c1221;
+      --panel: #141e32;
+      --panel-2: #23324b;
+      --line: #41516b;
+      --text: #f0f4ff;
+      --muted: #b0bfd6;
+      --accent: #87e3ce;
+      --accent-2: #abcaff;
+      --glass: rgba(26,39,63,.82);
+      --inset: #101b2e;
       --warn: #ffc66d;
       --danger: #ff7f87;
       --shadow: 0 18px 60px rgba(0,0,0,.28);
@@ -26,16 +28,16 @@
       min-height: 100vh;
       color: var(--text);
       background:
-        radial-gradient(circle at 10% 0%, rgba(86,227,159,.10), transparent 34rem),
-        radial-gradient(circle at 90% 10%, rgba(125,184,255,.08), transparent 30rem),
+        radial-gradient(ellipse at 80% 0%, rgba(70,117,217,.22), transparent 60rem),
+        radial-gradient(ellipse at 0% 80%, rgba(72,155,150,.12), transparent 50rem),
         var(--bg);
     }
     button, input, textarea, select { font: inherit; }
     button { cursor: pointer; }
-    .shell { display: grid; grid-template-columns: 250px minmax(0,1fr); min-height: 100vh; }
+    .shell { display: grid; grid-template-columns: 224px minmax(0,1fr); min-height: 100vh; }
     aside {
       position: sticky; top: 0; height: 100vh; padding: 24px 18px;
-      border-right: 1px solid var(--line); background: rgba(7,17,15,.84);
+      border-right: 1px solid var(--line); background: var(--glass);
       backdrop-filter: blur(18px);
     }
     .brand { display: flex; align-items: center; gap: 12px; margin: 0 8px 30px; }
@@ -55,36 +57,37 @@
     .nav.active { color: var(--text); border-color: var(--line); background: var(--panel-2); }
     .aside-foot { position: absolute; bottom: 24px; left: 26px; right: 26px; color: var(--muted); font-size: 12px; line-height: 1.6; }
     .lock { color: var(--accent); }
-    main { width: min(1240px, 100%); margin: 0 auto; padding: 34px clamp(22px,4vw,58px) 70px; }
+    main { width: min(1480px, 100%); margin: 0 auto; padding: 34px clamp(20px,3vw,48px) 70px; min-width: 0; }
     .topbar { display: flex; justify-content: space-between; align-items: start; gap: 20px; margin-bottom: 28px; }
     h1 { margin: 0; font-size: clamp(26px,4vw,42px); letter-spacing: -.04em; }
     .subtitle { color: var(--muted); margin: 8px 0 0; }
-    .top-actions { display: flex; gap: 10px; }
+    .top-actions { display: flex; gap: 10px; flex-wrap: wrap; }
     .view { display: none; }
     .view.active { display: block; animation: appear .18s ease; }
     @keyframes appear { from { opacity: .4; transform: translateY(3px); } }
     .grid { display: grid; grid-template-columns: repeat(12,minmax(0,1fr)); gap: 16px; }
     .card {
       grid-column: span 4; padding: 20px; border: 1px solid var(--line);
-      border-radius: 16px; background: linear-gradient(145deg, rgba(18,36,31,.96), rgba(11,26,22,.96));
-      box-shadow: var(--shadow);
+      border-radius: 24px; background: var(--glass);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.08), var(--shadow);
+      backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px); min-width: 0;
     }
     .wide { grid-column: 1 / -1; }
     .metric-card { grid-column: span 3; }
     .two-thirds { grid-column: span 8; }
     .one-third { grid-column: span 4; }
-    .metric { font-size: 34px; font-weight: 750; letter-spacing: -.04em; margin: 10px 0 2px; }
-    .eyebrow { color: var(--muted); text-transform: uppercase; letter-spacing: .11em; font-size: 11px; font-weight: 700; }
+    .metric { font-size: clamp(24px,2.4vw,34px); font-weight: 700; letter-spacing: -.04em; margin: 10px 0 2px; overflow-wrap: anywhere; }
+    .eyebrow { color: var(--muted); text-transform: uppercase; letter-spacing: .09em; font-size: 12px; font-weight: 700; }
     .good { color: var(--accent); }
     .warn { color: var(--warn); }
     .bad { color: var(--danger); }
     .card h2 { margin: 0 0 6px; font-size: 18px; }
-    .help { margin: 0 0 18px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .help { margin: 0 0 18px; color: var(--muted); font-size: 14px; line-height: 1.6; }
     .row { display: flex; gap: 12px; align-items: center; }
     .row > .grow { flex: 1; }
-    label { display: block; color: var(--muted); font-size: 12px; margin: 0 0 7px; font-weight: 650; }
+    label { display: block; color: var(--muted); font-size: 14px; margin: 0 0 7px; font-weight: 650; }
     input, textarea, select {
-      width: 100%; color: var(--text); background: #081511; border: 1px solid var(--line);
+      width: 100%; color: var(--text); background: var(--inset); border: 1px solid var(--line);
       border-radius: 10px; padding: 11px 12px; outline: none; transition: .15s ease;
     }
     textarea { min-height: 150px; resize: vertical; line-height: 1.5; tab-size: 2; }
@@ -92,7 +95,7 @@
     input:focus, textarea:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(86,227,159,.08); }
     .field { margin-bottom: 15px; }
     .button {
-      border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px;
+      border: 1px solid var(--line); border-radius: 13px; padding: 11px 15px; min-height: 44px;
       color: var(--text); background: var(--panel-2); font-weight: 700;
     }
     .button:hover { border-color: #3c6658; transform: translateY(-1px); }
@@ -101,26 +104,26 @@
     .button.ghost { background: transparent; }
     .button.danger { color: #ffd4d7; border-color: rgba(255,127,135,.55); background: rgba(255,127,135,.08); }
     .button:disabled { opacity: .45; cursor: not-allowed; transform: none; }
-    .check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+    .check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
     .check input { width: auto; accent-color: var(--accent); }
     table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 11px 9px; text-align: left; border-bottom: 1px solid rgba(36,66,57,.72); font-size: 13px; }
+    th, td { padding: 12px 9px; text-align: left; border-bottom: 1px solid var(--line); font-size: 14px; }
     th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-    td code { color: #c4e9db; }
+    td code { color: var(--text); }
     .pill {
       display: inline-flex; border: 1px solid var(--line); color: var(--muted);
-      padding: 3px 8px; border-radius: 999px; font-size: 11px;
+      padding: 4px 9px; border-radius: 999px; font-size: 12px;
     }
     .pill.current { color: var(--accent); border-color: rgba(86,227,159,.35); }
     .pill.problem { color: var(--warn); border-color: rgba(255,198,109,.35); }
     .plan { display: grid; gap: 9px; margin-top: 14px; }
     .action {
       display: grid; grid-template-columns: 120px minmax(0,1fr); gap: 12px;
-      padding: 10px 12px; background: #091713; border: 1px solid rgba(36,66,57,.72); border-radius: 9px;
-      font-size: 12px;
+      padding: 12px; background: var(--inset); border: 1px solid var(--line); border-radius: 13px;
+      font-size: 14px; overflow-wrap: anywhere;
     }
-    .action strong { color: var(--accent-2); text-transform: uppercase; font-size: 10px; letter-spacing: .08em; }
-    .refresh-progress { margin-top: 16px; padding: 15px; border: 1px solid var(--line); border-radius: 11px; background: #091713; }
+    .action strong { color: var(--accent-2); font-size: 12px; letter-spacing: .02em; }
+    .refresh-progress { margin-top: 16px; padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--inset); }
     .refresh-phase { font-weight: 750; font-size: 16px; }
     .progress-track { height: 8px; margin: 12px 0 10px; overflow: hidden; border-radius: 999px; background: #06100d; }
     .progress-fill { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s ease; }
@@ -128,15 +131,15 @@
     .progress-counts span { white-space: nowrap; }
     pre.output {
       margin: 14px 0 0; padding: 16px; max-height: 520px; overflow: auto; white-space: pre-wrap;
-      background: #06100d; border: 1px solid var(--line); border-radius: 11px;
-      color: #cbe4da; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--inset); border: 1px solid var(--line); border-radius: 16px;
+      color: var(--text); font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     .deliverybar { display: none; justify-content: space-between; align-items: center; margin-top: 12px; gap: 10px; }
     .deliverybar.visible { display: flex; }
     .artifacts { display: grid; gap: 8px; }
     .artifact {
       display: flex; justify-content: space-between; align-items: center; gap: 12px;
-      width: 100%; border: 1px solid var(--line); color: var(--text); background: #091713;
+      width: 100%; border: 1px solid var(--line); color: var(--text); background: var(--inset);
       border-radius: 9px; padding: 10px 12px; text-align: left;
     }
     .artifact small { color: var(--muted); }
@@ -152,18 +155,49 @@
     #toast {
       position: fixed; right: 24px; bottom: 24px; max-width: min(420px,calc(100vw - 48px));
       opacity: 0; transform: translateY(10px); pointer-events: none; transition: .2s ease;
-      color: var(--text); background: #17362c; border: 1px solid #37765f; border-radius: 11px;
+      color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
       padding: 12px 15px; box-shadow: var(--shadow); z-index: 20;
     }
     #toast.show { opacity: 1; transform: translateY(0); }
     .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(0,0,0,.25); border-top-color: currentColor; border-radius: 50%; animation: spin .7s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    [hidden] { display: none !important; }
+    :focus-visible { outline: 3px solid var(--accent-2); outline-offset: 4px; }
+    .skip-link { position: absolute; left: 12px; top: -80px; z-index: 50; background: var(--panel); color: var(--text); padding: 14px; }
+    .skip-link:focus { top: 12px; }
+    .workspace-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 20px; padding: 14px 18px; border: 1px solid var(--line); border-radius: 20px; background: var(--glass); }
+    .workspace-bar .grow { flex: 1; min-width: 180px; }
+    .workspace-bar small { display: block; margin-top: 4px; color: var(--muted); }
+    #activity-button { text-align: left; width: 100%; margin-bottom: 20px; }
+    #global-error { margin: 0 0 20px; }
+    #global-error p { margin-top: 0; }
+    #investigation-board { display: grid; grid-template-columns: repeat(auto-fill,minmax(min(100%,260px),1fr)); gap: 12px; }
+    #investigation-board .artifact { flex-direction: column; align-items: start; padding: 20px; gap: 16px; border-radius: 18px; }
+    #investigation-board strong { font-size: 20px; }
+    #investigation-board small { line-height: 1.8; }
+    .folder-path { overflow-wrap: anywhere; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
+    .section-heading { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+    .section-heading .help { margin-bottom: 12px; }
+    #overview-investigations { order: -1; }
+    #view-overview .metric-card { box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+    html[data-theme="light"] {
+      color-scheme: light; --bg: #eaf0fa; --panel: #f9fbff; --panel-2: #e4edfb; --line: #b5c4da;
+      --text: #162940; --muted: #455b74; --accent: #126f60; --accent-2: #255dac;
+      --glass: rgba(255,255,255,.83); --inset: #f5f8fd; --warn: #8b5104; --danger: #b32437;
+      --shadow: 0 12px 40px rgba(44,68,115,.08);
+    }
+    html[data-theme="light"] .button.primary, html[data-theme="light"] .button.secondary { color: white; }
+    html[data-theme="light"] .error, html[data-theme="light"] .button.danger { color: var(--danger); }
+    html[data-theme="light"] .success { color: var(--accent); }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+    @media (prefers-reduced-transparency: reduce) { :root { --glass: var(--panel); } .card, aside { backdrop-filter: none; -webkit-backdrop-filter: none; } }
+    @media (forced-colors: active) { .card, .button, .nav, .workspace-bar { border: 1px solid CanvasText; } }
     @media (max-width: 900px) {
       .shell { grid-template-columns: 1fr; }
       aside { position: static; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
       .brand { margin-bottom: 16px; }
-      nav { grid-template-columns: repeat(5,1fr); }
-      .nav { text-align: center; font-size: 12px; padding: 9px 4px; }
+      nav { display: flex; overflow-x: auto; }
+      .nav { text-align: center; font-size: 14px; padding: 12px; white-space: nowrap; }
       .aside-foot { display: none; }
       .card, .two-thirds, .one-third { grid-column: 1 / -1; }
     }
@@ -172,19 +206,20 @@
       .topbar { display: block; }
       .top-actions { margin-top: 14px; }
       .row { align-items: stretch; flex-direction: column; }
-      th:nth-child(2), td:nth-child(2) { display: none; }
+      .action { grid-template-columns: 1fr; gap: 6px; }
     }
   </style>
 </head>
 <body>
+  <a class="skip-link" href="#workspace">Skip to workspace</a>
   <div class="shell">
     <aside>
       <div class="brand">
         <div class="brain">◆</div>
-        <div><strong>Project Brain</strong><span>Operations cockpit</span></div>
+        <div><strong>Project Brain</strong><span>Investigation workspace</span></div>
       </div>
-      <nav>
-        <button class="nav active" data-view="overview">Overview</button>
+      <nav aria-label="Workspace navigation">
+        <button class="nav active" data-view="overview" aria-current="page">Workspace</button>
         <button class="nav" data-view="brain">Brain</button>
         <button class="nav" data-view="models">Models</button>
         <button class="nav" data-view="ticket">Start ticket</button>
@@ -195,14 +230,25 @@
       </nav>
       <div class="aside-foot"><span class="lock">● Local only</span><br>No model API · no code execution</div>
     </aside>
-    <main>
+    <main id="workspace" tabindex="-1">
       <header class="topbar">
-        <div><h1 id="page-title">Project overview</h1><p class="subtitle" id="project-name">Loading local project…</p></div>
+        <div><span class="eyebrow" id="app-version">Project Brain · v1</span><h1 id="page-title">Your workspace</h1><p class="subtitle" id="project-name">Loading local project…</p></div>
         <div class="top-actions">
           <button class="button ghost" id="refresh-button">Refresh status</button>
           <button class="button" id="sync-button">Refresh Brain</button>
+          <button class="button ghost" id="theme-button" aria-label="Switch color theme">Appearance</button>
         </div>
       </header>
+      <div class="workspace-bar">
+        <div class="grow"><strong id="workspace-readiness">Checking serving state…</strong><small id="workspace-guidance">Exact pinned source stays authoritative in every investigation.</small></div>
+        <button class="button ghost" data-go="brain">Health & recovery</button>
+        <button class="button primary" data-go="ticket">New investigation</button>
+      </div>
+      <button class="button" id="activity-button" hidden><span id="activity-summary" role="status"></span> · View progress</button>
+      <div class="error" id="global-error" role="alert" hidden>
+        <p id="global-error-message"></p>
+        <div class="row"><button class="button" id="error-recheck">Recheck connection & status</button><button class="button" data-go="brain">Health & recovery</button><button class="button ghost" id="dismiss-error">Dismiss</button></div>
+      </div>
 
       <section class="view active" id="view-overview">
         <div class="grid">
@@ -217,11 +263,12 @@
             <div class="row"><div class="grow"><h2>Repository health</h2><p class="help">The exact source snapshot used for new ticket investigations.</p></div></div>
             <div style="overflow:auto"><table><thead><tr><th>Repository</th><th>Path</th><th>Branch / status</th><th>Commit</th><th>Index</th></tr></thead><tbody id="repo-table"></tbody></table></div>
           </article>
-          <article class="card wide">
-            <h2>Investigations</h2><p class="help">Independent tickets can retrieve concurrently; workspace refresh remains exclusive.</p>
+          <article class="card wide" id="overview-investigations">
+            <div class="section-heading"><div><h2>Investigations</h2><p class="help">One ticket, one folder, one pinned evidence history.</p></div><button class="button" data-go="request">Continue with AI →</button></div>
             <div id="investigation-board" class="artifacts" style="margin-bottom:14px"><div class="empty">No investigations yet.</div></div>
             <div class="row"><div class="grow"><select id="session-select"><option value="">No investigations yet</option></select></div><button class="button" id="open-session">Open</button><button class="button danger" id="delete-session" disabled>Delete history</button></div>
             <div id="artifact-list" class="artifacts" style="margin-top:14px"></div>
+            <div id="ticket-location" class="folder-path" style="margin-top:14px"></div>
           </article>
           <article class="card wide">
             <div class="row"><div class="grow"><h2>Selected history artifact</h2></div><button class="button secondary" data-copy-output>Copy for AI</button></div>
@@ -233,6 +280,12 @@
 
       <section class="view" id="view-brain">
         <div class="grid">
+          <article class="card wide">
+            <div class="section-heading"><div><h2>Recovery center</h2><p class="help" id="recovery-guidance">Check the cause, then run the matching safe operation. No reset or model reinstall is automatic.</p></div></div>
+            <div class="row"><button class="button" id="reload-config">Re-read brain.toml</button><button class="button" id="recovery-doctor">Run diagnostics</button><button class="button" data-go="models">Verify local packs</button></div>
+            <p class="help" style="margin-top:14px">Configuration changes are validated before use. New repositories require Refresh Brain; existing tickets retain their original source generation.</p>
+            <div id="recovery-message" role="status"></div>
+          </article>
           <article class="card two-thirds">
             <span class="eyebrow">Brain health</span><div class="metric" id="brain-health">—</div>
             <p class="help" id="brain-effective">Checking Core, Semantic, and Precision readiness…</p>
@@ -421,12 +474,24 @@
       </section>
     </main>
   </div>
-  <div id="toast"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
   <script>
     "use strict";
     var token = new URLSearchParams(location.search).get("token") || "";
     var state = { status: null, preview: null, ticket: "", deliveries: {}, refreshJobId: null };
-    var titles = { overview: "Project overview", brain: "Brain operations", models: "Local model packs", ticket: "Start a ticket", request: "Continue with AI", review: "Review implementation", agent: "M365 Agent setup", advanced: "Advanced operations" };
+    var titles = { overview: "Your workspace", brain: "Health & recovery", models: "Local model packs", ticket: "New investigation", request: "Continue with AI", review: "Review implementation", agent: "M365 Agent setup", advanced: "Advanced operations" };
+    var theme = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    try { theme = localStorage.getItem("brain-appearance") || theme; } catch (error) { /* storage is optional */ }
+    function setTheme(value) {
+      document.documentElement.dataset.theme = value === "light" ? "light" : "dark";
+      document.getElementById("theme-button").textContent = value === "light" ? "Dark appearance" : "Light appearance";
+    }
+    setTheme(theme);
+    document.getElementById("theme-button").addEventListener("click", function () {
+      theme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+      setTheme(theme);
+      try { localStorage.setItem("brain-appearance", theme); } catch (error) { /* preference need not persist */ }
+    });
 
     function esc(value) {
       return String(value == null ? "" : value).replace(/[&<>"']/g, function (char) {
@@ -437,8 +502,14 @@
       options = options || {};
       options.headers = Object.assign({}, options.headers || {}, {"X-Brain-Token": token});
       if (options.body) options.headers["Content-Type"] = "application/json";
-      var response = await fetch(path, options);
-      var payload = await response.json();
+      var response;
+      var payload;
+      try {
+        response = await fetch(path, options);
+        payload = await response.json();
+      } catch (cause) {
+        throw new Error("Cannot reach the local Brain UI. The operation may still be running. Recheck status before retrying; closing a tab does not stop a job. If the server stopped, run brain ui again.");
+      }
       if (!response.ok || !payload.ok) {
         var error = new Error(payload.error || "Local request failed");
         error.recovery = payload.recovery || null;
@@ -491,14 +562,14 @@
       ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
     }
     function renderRecovery(recovery, message) {
-      var target = document.getElementById("storage-recovery-message");
+      var target = document.getElementById(recovery && recovery.action === "safe_gc" ? "storage-recovery-message" : "recovery-message");
       if (!target) return;
       if (!recovery) {
         if (message) target.innerHTML = '<div class="error">' + esc(message) + '</div>';
         return;
       }
       target.innerHTML = '<div class="error"><strong>' + esc(recovery.title || "Action required") + '</strong><br>' +
-        esc(recovery.message || message || "Local storage needs attention.") +
+        esc(recovery.message || message || "Local operation needs attention.") +
         (recovery.action === "safe_gc" ? '<br>Use “Safely reclaim unpinned state” above. Brain will preserve current and ticket-pinned evidence.' : "") + '</div>';
     }
     function renderGcResult(result) {
@@ -526,7 +597,8 @@
     function renderRefreshProgress(job) {
       if (!job || job.name !== "refresh") return;
       var progress = job.progress || {};
-      var phase = progress.phase_label || job.phase || "Refreshing Brain";
+      var phase = (job.status === "failed" || job.status === "interrupted" || job.status === "succeeded") ? job.phase : progress.phase_label;
+      phase = phase || job.phase || "Refreshing Brain";
       document.getElementById("refresh-phase").textContent = phase;
       var total = progress.semantic_cards_total;
       var done = (progress.cached_embeddings_reused || 0) + (progress.new_embeddings_completed || 0);
@@ -557,7 +629,7 @@
       }
       document.getElementById("refresh-counts").innerHTML = rows.map(function (row) { return "<span>" + esc(row) + "</span>"; }).join("");
       var error = document.getElementById("refresh-progress-error");
-      if (job.status === "failed") {
+      if (job.status === "failed" || job.status === "interrupted") {
         error.innerHTML = '<div class="error">' + esc(job.error || "Refresh failed. Check local configuration, then try again.") + "</div>";
         if (job.recovery) renderRecovery(job.recovery, job.error);
       }
@@ -566,6 +638,12 @@
     }
     function setJob(job) {
       document.getElementById("job-status").textContent = job ? job.name + ": " + job.phase : "No operation running.";
+      var activity = document.getElementById("activity-button");
+      activity.hidden = !job;
+      if (job) {
+        activity.dataset.go = job.name === "retrieval" ? "request" : (job.name.startsWith("model-") ? "models" : "brain");
+        document.getElementById("activity-summary").textContent = (job.ticket ? job.ticket + " · " : "") + job.phase + " · " + job.status;
+      }
       renderRefreshProgress(job);
     }
     function pause(milliseconds) { return new Promise(function (resolve) { setTimeout(resolve, milliseconds); }); }
@@ -588,16 +666,13 @@
     function resumeActiveRefresh(data) {
       var job = (data.jobs || []).find(function (item) {
         return item.name === "refresh" && (item.status === "pending" || item.status === "running" || item.status === "interrupted");
-      });
+      }) || data.last_refresh;
       if (!job || state.refreshJobId === job.id) return;
-      if (job.status === "interrupted") {
-        setView("brain");
+      if (job.status !== "pending" && job.status !== "running") {
         setJob(job);
-        document.getElementById("refresh-progress-error").innerHTML = '<div class="error">The earlier UI process stopped. Click Refresh Brain to resume; completed immutable stages and cached embeddings will be reused.</div>';
         return;
       }
       state.refreshJobId = job.id;
-      setView("brain");
       var buttons = [document.getElementById("sync-button"), document.getElementById("brain-refresh")];
       buttons.forEach(function (button) { busy(button, true, "Refreshing…"); });
       waitForJob(job).then(function (result) {
@@ -620,11 +695,24 @@
       } catch (error) { report(error); } finally { busy(button, false); }
     }
     function setView(name) {
-      document.querySelectorAll(".nav").forEach(function (button) { button.classList.toggle("active", button.dataset.view === name); });
+      if (!titles[name]) return;
+      document.querySelectorAll(".nav").forEach(function (button) {
+        button.classList.toggle("active", button.dataset.view === name);
+        if (button.dataset.view === name) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+      });
       document.querySelectorAll(".view").forEach(function (view) { view.classList.toggle("active", view.id === "view-" + name); });
       document.getElementById("page-title").textContent = titles[name];
     }
     document.querySelectorAll(".nav").forEach(function (button) { button.addEventListener("click", function () { setView(button.dataset.view); }); });
+    document.querySelectorAll("[data-go]").forEach(function (button) { button.addEventListener("click", function () { setView(button.dataset.go); }); });
+    document.getElementById("activity-button").addEventListener("click", function () { setView(this.dataset.go); });
+    document.getElementById("dismiss-error").addEventListener("click", function () { document.getElementById("global-error").hidden = true; });
+    document.getElementById("error-recheck").addEventListener("click", async function () {
+      busy(this, true, "Checking…");
+      try { resumeActiveRefresh(await loadStatus()); document.getElementById("global-error").hidden = true; }
+      catch (error) { report(error); } finally { busy(this, false); }
+    });
 
     async function loadStatus() {
       var data = await api("/api/status");
@@ -632,6 +720,9 @@
       var brain = data.brain || {};
       var semantic = brain.semantic || {};
       var autoRefresh = data.auto_refresh || {};
+      document.getElementById("app-version").textContent = "Project Brain · " + (brain.version || "v1");
+      document.getElementById("workspace-readiness").textContent = brain.effective || "Checking serving state…";
+      document.getElementById("workspace-guidance").textContent = brain.reason || (brain.core && brain.core.ready ? "Ready for new investigations. Existing tickets keep their pinned generation." : "Open Health & recovery to prepare or repair the workspace.");
       document.getElementById("project-name").textContent = data.project.name + " · " + data.project.config;
       document.getElementById("repo-count").textContent = data.summary.repositories;
       document.getElementById("ready-count").textContent = data.summary.current;
@@ -659,16 +750,16 @@
       document.getElementById("investigation-board").innerHTML = data.sessions.map(function (session) {
         var job = session.job || {};
         var progress = job.progress || {};
-        var status = session.status === "retrieving" ? "● Retrieving · " + elapsed(progress.elapsed_ms || (Date.now() - (job.started_at_ms || Date.now()))) : (session.status === "ready_to_implement" ? "✓ Ready to implement" : "✓ Waiting for AI");
+        var status = session.status === "retrieving" ? "● Retrieving · " + elapsed(progress.elapsed_ms || (Date.now() - (job.started_at_ms || Date.now()))) : (session.status === "ready_to_implement" ? "✓ Ready to implement" : "Waiting for AI");
         var details = session.status === "retrieving" ? (progress.phase_label || "Queued") + " · ops " + String(progress.effective_operations || 0) + " · candidates " + String(progress.candidate_count || 0) : String(session.requests || 0) + " retrieval rounds";
-        return '<button class="artifact" data-board-ticket="' + esc(session.ticket) + '"><span><strong>' + esc(session.ticket) + '</strong><br><small>' + esc(status) + '</small></span><small>' + esc(details) + '</small></button>';
+        return '<button class="artifact" data-board-ticket="' + esc(session.ticket) + '"><span><strong>' + esc(session.ticket) + '</strong><br><small>' + esc(status) + '</small></span><small>' + esc(details) + ' · Wave ' + esc(session.wave || 0) + '<br>Generation ' + esc(session.atlas_generation == null ? "legacy" : session.atlas_generation) + '</small></button>';
       }).join("") || '<div class="empty">No investigations yet.</div>';
       document.querySelectorAll("[data-board-ticket]").forEach(function (button) {
         button.addEventListener("click", function () { document.getElementById("session-select").value = button.dataset.boardTicket; openSession().catch(report); });
       });
       ["session-select", "request-ticket", "review-ticket"].forEach(function (id) {
         var select = document.getElementById(id);
-        var selected = select.value || state.ticket || (data.sessions[0] && data.sessions[0].ticket) || "";
+        var selected = state.ticket || select.value || (data.sessions[0] && data.sessions[0].ticket) || "";
         var first = id === "session-select" ? "Select an investigation" : "Select a ticket";
         select.innerHTML = '<option value="">' + first + "</option>";
         data.sessions.forEach(function (session) {
@@ -688,6 +779,9 @@
     }
     function renderBrain(brain) {
       var semantic = brain.semantic || {};
+      document.getElementById("recovery-guidance").textContent = brain.health === "Healthy" ?
+        "No readiness issue detected. Diagnostics and safe storage cleanup remain available." :
+        (brain.reason || "Refresh Brain to build or align the configured source snapshots. If you edited brain.toml, re-read it first.");
       document.getElementById("brain-health").textContent = brain.health || "—";
       document.getElementById("brain-effective").textContent = brain.effective + (brain.reason ? " — " + brain.reason : "");
       document.getElementById("runtime-status").textContent = brain.managed_runtime || "Loopback direct transport enforced.";
@@ -702,7 +796,7 @@
       ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
       var freshness = brain.freshness && brain.freshness.repositories || [];
       document.getElementById("freshness-status").innerHTML = freshness.map(function (item) {
-        return '<div class="action"><strong>' + esc(item.repo) + '</strong><div>' + (item.current ? "Current" : "Remote or index ahead") + (item.warning ? '<br><span class="help">' + esc(item.warning) + '</span>' : "") + '</div></div>';
+        return '<div class="action"><strong>' + esc(item.repo) + '</strong><div>' + (item.current ? "Current" : (item.source_sha ? "Refresh needed" : "Freshness unverified")) + (item.warning ? '<br><span class="help">' + esc(item.warning) + '</span>' : "") + '</div></div>';
       }).join("") || '<div class="empty">No repository freshness data.</div>';
     }
     function renderModels(models) {
@@ -799,12 +893,29 @@
       view.querySelectorAll("[data-prev]").forEach(function (button) { button.disabled = delivery.current <= 1; });
       view.querySelectorAll("[data-next]").forEach(function (button) { button.disabled = delivery.current >= delivery.total; });
     }
+    function selectTicket(ticket) {
+      if (state.ticket !== ticket) {
+        state.ticket = ticket;
+        state.preview = null;
+        document.getElementById("run-request").disabled = true;
+        ["view-overview", "view-request", "view-review", "view-ticket"].forEach(function (id) { setDelivery(null, id); });
+        ["request-plan", "retrieval-status", "investigation-cockpit", "artifact-list", "ticket-location"].forEach(function (id) { document.getElementById(id).textContent = ""; });
+        document.getElementById("operation-count").textContent = "0";
+        document.getElementById("request-message").textContent = "Ticket changed. Classify the reply for this ticket before retrieving.";
+      }
+      ["session-select", "request-ticket", "review-ticket"].forEach(function (id) { document.getElementById(id).value = ticket; });
+    }
+    ["request-ticket", "review-ticket"].forEach(function (id) {
+      document.getElementById(id).addEventListener("change", function () { selectTicket(this.value); });
+    });
     async function moveDelivery(delta, button) {
       var viewId = button.closest(".view").id;
       var delivery = state.deliveries[viewId] || {current:0,total:0};
       if (!state.ticket || !delivery.total) return;
       var part = Math.max(1, Math.min(delivery.total, delivery.current + delta));
-      setDelivery(await api("/api/delivery?ticket=" + encodeURIComponent(state.ticket) + "&part=" + part), viewId);
+      var ticket = state.ticket;
+      var next = await api("/api/delivery?ticket=" + encodeURIComponent(ticket) + "&part=" + part);
+      if (state.ticket === ticket) setDelivery(next, viewId);
     }
     document.querySelectorAll("[data-prev]").forEach(function (button) { button.addEventListener("click", function () { moveDelivery(-1, button).catch(report); }); });
     document.querySelectorAll("[data-next]").forEach(function (button) { button.addEventListener("click", function () { moveDelivery(1, button).catch(report); }); });
@@ -818,24 +929,47 @@
     });
     function report(error) {
       showToast(error.message || String(error));
+      document.getElementById("global-error-message").textContent = error.message || String(error);
+      document.getElementById("global-error").hidden = false;
       if (error.recovery) {
         setView("brain");
         renderRecovery(error.recovery, error.message || String(error));
       }
     }
 
-    document.getElementById("refresh-button").addEventListener("click", function () { loadStatus().then(function () { showToast("Status refreshed"); }).catch(report); });
+    document.getElementById("refresh-button").addEventListener("click", async function () {
+      busy(this, true, "Checking…");
+      try { resumeActiveRefresh(await loadStatus()); showToast("Status refreshed"); }
+      catch (error) { report(error); } finally { busy(this, false); }
+    });
     document.getElementById("storage-preview").addEventListener("click", function () { runStorageRecovery(this, false); });
     document.getElementById("storage-recover").addEventListener("click", function () { runStorageRecovery(this, true); });
+    document.getElementById("reload-config").addEventListener("click", async function () {
+      busy(this, true, "Validating…");
+      try {
+        await api("/api/config/reload", {method:"POST", body:"{}"});
+        await loadStatus();
+        document.getElementById("recovery-message").textContent = "Configuration validated and re-read. No file was rewritten. Run Refresh Brain to include changed repositories in a new generation.";
+        document.getElementById("global-error").hidden = true;
+      } catch (error) { report(error); } finally { busy(this, false); }
+    });
+    document.getElementById("recovery-doctor").addEventListener("click", async function () {
+      busy(this, true, "Checking…");
+      try {
+        var diagnostic = await api("/api/diagnostics");
+        document.getElementById("recovery-message").textContent = diagnostic.summary + " Model-download trust: " + diagnostic.model_download_trust + ".";
+      } catch (error) { report(error); } finally { busy(this, false); }
+    });
     async function refreshBrain(button) {
       busy(button, true, "Refreshing…");
       try {
         var job = await api("/api/refresh", {method:"POST",body:JSON.stringify({fetch:document.getElementById("refresh-fetch").checked,discover:document.getElementById("refresh-discover").checked})});
+        state.refreshJobId = job.id;
         setView("brain"); setJob(job);
         var data = await waitForJob(job); state.status = data.status; await loadStatus();
         showToast(data.semantic && data.semantic.status === "failed" ? "Core refresh completed; Semantic needs attention" : "Brain refresh completed");
       }
-      catch (error) { report(error); } finally { busy(button, false); }
+      catch (error) { report(error); } finally { state.refreshJobId = null; busy(button, false); }
     }
     document.getElementById("sync-button").addEventListener("click", function () { refreshBrain(this); });
     document.getElementById("brain-refresh").addEventListener("click", function () { refreshBrain(this); });
@@ -862,7 +996,7 @@
           target: document.getElementById("ticket-target").value
         };
         var data = await api("/api/start", {method:"POST",body:JSON.stringify(body)});
-        state.ticket = data.ticket; setDelivery(data.delivery, "view-ticket"); await loadStatus();
+        selectTicket(data.ticket); setDelivery(data.delivery, "view-ticket"); await loadStatus();
         document.getElementById("request-ticket").value = data.ticket;
         document.getElementById("review-ticket").value = data.ticket;
         document.getElementById("request-target").value = body.target;
@@ -902,7 +1036,12 @@
     }
     document.getElementById("preview-request").addEventListener("click", async function () {
       var button = this; busy(button, true, "Validating…");
-      try { renderPreview(await api("/api/preview", {method:"POST",body:JSON.stringify({ticket:document.getElementById("request-ticket").value,text:document.getElementById("request-text").value})})); }
+      var ticket = document.getElementById("request-ticket").value;
+      var text = document.getElementById("request-text").value;
+      try {
+        var preview = await api("/api/preview", {method:"POST",body:JSON.stringify({ticket:ticket,text:text})});
+        if (document.getElementById("request-ticket").value === ticket && document.getElementById("request-text").value === text) renderPreview(preview);
+      }
       catch (error) { report(error); } finally { busy(button, false); }
     });
     document.getElementById("request-text").addEventListener("input", function () { state.preview = null; document.getElementById("run-request").disabled = true; });
@@ -927,16 +1066,22 @@
         var shownCheckpoint = "";
         var data = await waitForJob(job, async function (current) {
           var checkpoint = current.progress && current.progress.checkpoint_artifact || "";
-          if (!checkpoint || checkpoint === shownCheckpoint) return;
+          if (!checkpoint || checkpoint === shownCheckpoint || state.ticket !== body.ticket) return;
           shownCheckpoint = checkpoint;
           var early = await api("/api/artifact?ticket=" + encodeURIComponent(body.ticket) + "&name=" + encodeURIComponent(checkpoint));
+          if (state.ticket !== body.ticket) return;
           setDelivery({current:1,total:1,content:early.content,path:checkpoint}, "view-request");
           showToast("First useful checkpoint ready — you can copy it while the investigation continues");
         });
-        state.ticket = data.ticket;
+        if (state.ticket !== body.ticket) {
+          await loadStatus();
+          showToast(body.ticket + " completed. Open its history to retrieve the result.");
+          return;
+        }
         if (shownCheckpoint && data.progressive_delivery && data.progressive_delivery.continuation_artifact) {
           var continuationName = data.progressive_delivery.continuation_artifact;
           var continuation = await api("/api/artifact?ticket=" + encodeURIComponent(body.ticket) + "&name=" + encodeURIComponent(continuationName));
+          if (state.ticket !== body.ticket) return;
           setDelivery({current:1,total:1,content:continuation.content,path:continuationName}, "view-request");
           showToast("Checkpoint continuation ready — apply it to the first useful checkpoint");
         } else if (data.delivery) setDelivery(data.delivery, "view-request");
@@ -970,7 +1115,8 @@
           target: "claude"
         };
         var data = await api("/api/feedback", {method:"POST",body:JSON.stringify(body)});
-        state.ticket = data.ticket; setDelivery(data.delivery, "view-review"); await loadStatus();
+        if (state.ticket === body.ticket) setDelivery(data.delivery, "view-review");
+        await loadStatus();
         showToast("Review package ready");
       } catch (error) { report(error); } finally { busy(button, false); }
     });
@@ -978,8 +1124,10 @@
     async function openSession() {
       var ticket = document.getElementById("session-select").value;
       if (!ticket) return;
+      selectTicket(ticket);
       var detail = await api("/api/session?ticket=" + encodeURIComponent(ticket));
-      state.ticket = ticket;
+      if (state.ticket !== ticket) return;
+      document.getElementById("ticket-location").textContent = "Ticket files: " + detail.session_path + " · AI handoff folder: " + detail.handoff_path;
       renderRetrieval(detail.retrieval);
       renderCockpit(detail.cockpit);
       setDelivery({current:0,total:0,content:"Select a request or context artifact from the history above."}, "view-overview");
@@ -991,6 +1139,7 @@
         button.addEventListener("click", async function () {
           try {
             var data = await api("/api/artifact?ticket=" + encodeURIComponent(ticket) + "&name=" + encodeURIComponent(button.dataset.artifact));
+            if (state.ticket !== ticket) return;
             setDelivery({current:1,total:1,content:data.content,path:data.name}, "view-overview");
             showToast(data.name + " opened below");
           } catch (error) { report(error); }
@@ -1008,7 +1157,7 @@
       var button = this; busy(button, true, "Deleting…");
       try {
         await api("/api/session/delete", {method:"POST",body:JSON.stringify({ticket:ticket})});
-        state.ticket = "";
+        selectTicket("");
         document.getElementById("artifact-list").innerHTML = '<div class="empty">Ticket history deleted.</div>';
         setDelivery({current:0,total:0,content:"Ticket history deleted."}, "view-overview");
         await loadStatus();

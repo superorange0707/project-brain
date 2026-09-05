@@ -2,14 +2,53 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.10] - 2026-09-04
+## [1.0.10] - 2026-09-05
+
+### Workspace and performance
+
+- Reworked the local cockpit around ticket cards, pinned generations and waves,
+  shared job progress, persistent errors, and a recovery center. Added glass
+  surfaces, light/dark appearance, keyboard focus, responsive navigation, and
+  reduced-motion/transparency support without online assets or dependencies.
+- Ticket switches clear prior previews and copyable context; late artifact,
+  delivery and retrieval responses cannot replace another selected ticket's
+  evidence. Model progress links back to the Models view.
+- Added validated configuration reload without rewriting `brain.toml`; invalid
+  changes preserve the running configuration. Permission/storage failures point
+  to safe diagnostics or existing reachability-aware cleanup, never a reset.
+- Identical registered Semantic builds validate lexical content, card membership,
+  schemas, pack identity and shard artifacts before skipping source rechunking
+  and embedding. Stale compatibility projections can be repaired from the
+  immutable registered artifact; source-only legacy builds still rebuild cards.
+- Removed repeated source-prefix scans and nested Java brace rescans while
+  preserving entity/card identities. Bulk embedding-cache accounting is shared
+  across repositories only under the exclusive workspace lease.
+- Bounded local freshness probes to four workers sharing five seconds. Unknown
+  probes remain explicitly unverified. Pinned context packaging no longer runs
+  live-HEAD subprocesses for every repository on every wave.
+- Corrected fusion to use each candidate's rank within each channel without
+  mutating input hits. Golden evaluation shares protocol validation and reports
+  metadata-candidate recall separately from hydrated-source recall.
+- Added offline Windows ZIP installation through the same checksum-verified
+  staging/rollback/PATH pipeline, without API access or execution-policy changes.
 
 ### Fixed
 
-- Large v1 workspaces no longer fail managed writes merely because capacity
-  accounting walks hundreds of thousands of files. Healthy immutable source
-  snapshots are accounted from their existing bounded v3 seals; damaged or
-  unsealed trees still fall back to the strict fail-closed physical scan.
+- Full managed-write inventory streams large directory trees instead of
+  treating the quick-probe 500,000-entry/30-second budget as a hard workspace
+  size limit. Fast status/query probes remain bounded; incomplete probes never
+  authorize writes or permanently latch Auto Refresh. GC bounds reachability
+  metadata separately from streaming payload sizes; quota, free disk, link,
+  depth, and ticket-pin protections remain enforced.
+
+- Query-cache failures no longer discard valid embeddings or force Core
+  fallback. Cache persistence has bounded inventory/SQL work, while a bounded
+  pack/input-scoped memory cache avoids repeated work in long-lived UI sessions.
+- Capacity and GC accounting measure actual snapshot member sizes, including
+  files changed or added after sealing. Publication-time seal totals are not
+  trusted as current physical usage; incomplete scans still fail closed.
+  Explicitly disabling the state quota skips its inventory without disabling
+  the separate free-disk reserve.
 - The Brain UI now turns capacity, quota, and free-disk refusals into an
   actionable **Storage & recovery** card with a preview and a guarded one-click
   cleanup. It uses the existing reachability-aware GC, never removes current or
@@ -17,8 +56,12 @@ All notable changes are documented here. This project follows Semantic Versionin
   exposes no local paths to the browser.
 - Closing a browser tab no longer makes a running UI look lost. `brain ui`
   reopens the registered instance, while `brain ui status` and `brain ui stop`
-  provide explicit lifecycle control. Interrupted refresh progress is restored
-  without falsely claiming completion.
+  provide explicit lifecycle control. Failed and completed refresh results as
+  well as interrupted progress survive reload/restart without false success.
+  Transient health-check failures preserve the instance record; loopback control
+  bypasses proxies and refuses redirects.
+- M365 evidence-ID evaluation requires exact token boundaries rather than
+  crediting a longer or prefixed ID as a match.
 - Auto Refresh remote freshness probes now share one bounded 45-second
   workspace deadline instead of multiplying a network timeout by repository.
 - Repository-discovery config appends roll back verified partial writes, and a

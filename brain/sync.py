@@ -437,7 +437,7 @@ def _sealed_snapshot_is_intact(
         cache_key = (
             str(target.resolve()), seal_stat.st_dev, seal_stat.st_ino, seal_stat.st_size,
             seal_stat.st_mtime_ns, seal_stat.st_ctime_ns,
-            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+            hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")).digest(),
         )
         # On POSIX, ctime makes a same-size/restored-mtime mutation observable.
         # Windows ctime is creation time, so it must recheck content hashes.

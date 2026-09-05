@@ -8,6 +8,7 @@ all candidate locations are exact-verified by the existing hydration path.
 from __future__ import annotations
 
 import ast
+from bisect import bisect_left
 import hashlib
 import hmac
 import json
@@ -235,6 +236,7 @@ def _generic_entities(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     line_count = max(1, content.count("\n") + 1)
+    previous_offset, start = 0, 1
     for match in _GENERIC_DEFINITION.finditer(content):
         token, name = match.group(1).lower(), match.group(2)
         kind = {
@@ -244,7 +246,8 @@ def _generic_entities(
         }.get(token, "unknown")
         if is_test_path(path) or name.lower().startswith("test"):
             kind = "test"
-        start = content[:match.start()].count("\n") + 1
+        start += content.count("\n", previous_offset, match.start())
+        previous_offset = match.start()
         _append_derived(
             rows,
             _entity(repo, path, blob, module_id, line_start=start,
@@ -262,22 +265,26 @@ def _java_entities(
     line_count = max(1, structural.count("\n") + 1)
     structural_search = structural.rstrip()
     code_search = code_only.rstrip()
+    newlines = [match.start() for match in re.finditer("\n", structural)]
 
     def line(position: int) -> int:
-        return structural.count("\n", 0, position) + 1
+        return bisect_left(newlines, position) + 1
+
+    # Parse braces once. Nested classes/methods used to rescan the same body
+    # for every declaration, multiplying work on large Java files.
+    closings: dict[int, int] = {}
+    openings: list[int] = []
+    for count, match in enumerate(re.finditer(r"[{}]", code_search)):
+        if count % 4_096 == 0 and time.monotonic() >= deadline:
+            raise AtlasCapacityError("Atlas per-file parse time budget exceeded")
+        position, char = match.start(), match.group()
+        if char == "{":
+            openings.append(position)
+        elif char == "}" and openings:
+            closings[openings.pop()] = position
 
     def closing_position(opening: int) -> int:
-        depth = 0
-        for position in range(opening, len(code_only)):
-            if position % 4_096 == 0 and time.monotonic() >= deadline:
-                raise AtlasCapacityError("Atlas per-file parse time budget exceeded")
-            if code_only[position] == "{":
-                depth += 1
-            elif code_only[position] == "}":
-                depth -= 1
-                if depth == 0:
-                    return position
-        return len(code_only) - 1
+        return closings.get(opening, len(code_only) - 1)
 
     classes: list[tuple[int, int, dict[str, Any]]] = []
     for match in re.finditer(r"\b(class|interface|record|enum)\s+([A-Za-z_$][\w$]*)", structural_search):
@@ -347,9 +354,11 @@ def _special_entities(
         ("table", re.compile(r"(?im)\b(?:from|join|into|update|table)\s+[`\"]?([A-Za-z_][A-Za-z0-9_.]*)")),
     ]
     for kind, pattern in patterns:
+        previous_offset, line = 0, 1
         for match in pattern.finditer(content):
             name = next((group for group in reversed(match.groups()) if group), match.group(0))
-            line = content[:match.start()].count("\n") + 1
+            line += content.count("\n", previous_offset, match.start())
+            previous_offset = match.start()
             _append_derived(
                 rows,
                 _entity(repo, path, blob, module_id, line_start=line, line_end=line,

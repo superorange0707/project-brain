@@ -40,7 +40,123 @@ from brain.semantic import (
 
 
 class SemanticRobustnessTest(unittest.TestCase):
+    def test_symbol_line_scan_preserves_card_identity_without_prefix_copies(self) -> None:
+        class MeasuredText(str):
+            copied_prefixes = 0
+
+            def __getitem__(self, key):
+                if isinstance(key, slice) and key.start is None:
+                    self.copied_prefixes += 1
+                return super().__getitem__(key)
+
+        text = MeasuredText("\n".join(f"def symbol_{i}():\n    return {i}\n" for i in range(1000)))
+        chunks = chunk_source("demo", "a.py", text)
+        self.assertEqual(0, text.copied_prefixes)
+        self.assertEqual(1000, len(chunks))
+        from brain.semantic import CARD_VERSION, CHUNK_SCHEMA_VERSION, SEMANTIC_CHILD_LINES, SEMANTIC_CARD_CODE_CHARS, SYMBOL
+        legacy_starts = [str(text)[:match.start()].count("\n") + 1 for match in SYMBOL.finditer(text)]
+        for i, chunk in enumerate(chunks):
+            start = legacy_starts[i]
+            end = legacy_starts[i + 1] - 1 if i + 1 < len(legacy_starts) else len(text.splitlines())
+            identity = f"{chunk.blob_sha}\0{CHUNK_SCHEMA_VERSION}\0{start}\0{end}\0symbol_{i}\0{SEMANTIC_CHILD_LINES}\0{SEMANTIC_CARD_CODE_CHARS}\0{CARD_VERSION}"
+            self.assertEqual(hashlib.sha256(identity.encode()).hexdigest(), chunk.chunk_id)
+            self.assertEqual((start, end), (chunk.start_line, chunk.end_line))
+
+    def test_bulk_cache_accounting_is_shared_only_under_exclusive_lease(self) -> None:
+        from brain.locks import workspace_operation
+        from brain.semantic import _reserve_embedding_cache
+
+        measurements = []
+
+        def reserve(connection, entries, *, usage=None):
+            if usage is None:
+                measurements.append(1)
+            return _reserve_embedding_cache(connection, entries, usage=usage)
+
+        with workspace_operation(self.settings), mock.patch("brain.semantic._reserve_embedding_cache", side_effect=reserve):
+            usage = []
+            for i in range(10):
+                _cache_vectors(self.settings, f"pack-{i}", self._chunks(2), dimension=2,
+                               embed=self._vectors, write_capacity=[1_000_000], cache_usage=usage)
+            self.assertEqual(1, len(measurements))
+            self.assertEqual(20, usage[0][0])
+            _cache_vectors(self.settings, "pack-0", self._chunks(2), dimension=2,
+                           embed=mock.Mock(side_effect=AssertionError("cached")))
+            self.assertEqual(1, len(measurements))
+        with mock.patch("brain.semantic._reserve_embedding_cache", side_effect=reserve):
+            _cache_vectors(self.settings, "outside-lease", self._chunks(2), dimension=2,
+                           embed=self._vectors, write_capacity=[1_000_000], cache_usage=[(0, 0)])
+        self.assertEqual(2, len(measurements))
+
+    def test_registered_noop_reuse_skips_chunking_and_repairs_only_projection(self) -> None:
+        from brain.atlas import build_atlas
+        from brain.catalog import publish_current_components, current_generation_ref
+        from brain.locks import workspace_operation
+
+        with workspace_operation(self.settings):
+            indexed, _ = snapshot_indexes(self.settings)
+            payload = build_atlas(self.settings, indexed)
+            first = build_semantic_index(self.settings, embed=self._vectors, pack_id="registered", atlas_cards=payload["cards"])
+            publish_current_components(self.settings, atlas_payload=payload)
+            generation = current_generation_ref(self.settings)
+            artifact = self.settings.state_dir / generation.component("semantic")["artifact_ref"]
+            before = artifact.read_bytes()
+            projection = self.settings.state_dir / "semantic-index.json"
+            projection.write_text('{"stale": true}', encoding="utf-8")
+            with mock.patch("brain.semantic._chunk_groups", side_effect=AssertionError("no rechunking")):
+                result = build_semantic_index(self.settings, embed=mock.Mock(side_effect=AssertionError("no embedding")),
+                                              pack_id="registered", atlas_cards=payload["cards"])
+            self.assertEqual(first, result)
+            self.assertEqual(json.loads(before), json.loads(projection.read_text()))
+            self.assertEqual(before, artifact.read_bytes())
+            with mock.patch("brain.semantic._chunk_groups", side_effect=RuntimeError("managed rebuild")):
+                with self.assertRaisesRegex(SemanticEmbeddingError, "bounded repository"):
+                    build_semantic_index(self.settings, embed=self._vectors, pack_id="changed-pack", atlas_cards=payload["cards"])
+
+    def test_registered_reuse_rejects_changed_cards_and_corrupt_lexical_blobs(self) -> None:
+        from brain.atlas import build_atlas
+        from brain.catalog import publish_current_components, current_generation_ref
+        from brain.semantic import _registered_build_reuse, _injected_pack_identity
+
+        indexed, _ = snapshot_indexes(self.settings)
+        payload = build_atlas(self.settings, indexed)
+        build_semantic_index(self.settings, embed=self._vectors, pack_id="safe-reuse", atlas_cards=payload["cards"])
+        publish_current_components(self.settings, atlas_payload=payload)
+        generation = current_generation_ref(self.settings)
+        kwargs = dict(backend="exact-mock", pack_id="safe-reuse",
+                      pack_compatibility_identity=_injected_pack_identity("safe-reuse"), dimension=2)
+        changed = [dict(item) for item in payload["cards"]]
+        changed[0]["content"] += " changed card input"
+        self.assertIsNone(_registered_build_reuse(self.settings, generation.snapshots, changed, **kwargs))
+        artifact = self.settings.state_dir / generation.component("semantic")["artifact_ref"]
+        original = artifact.read_bytes()
+        connection = sqlite3.connect(self.settings.state_dir / "search.sqlite3")
+        try:
+            with connection:
+                connection.execute("UPDATE blobs SET content=replace(content,'initial','corrupt')")
+        finally:
+            connection.close()
+        self.assertIsNone(_registered_build_reuse(self.settings, generation.snapshots, payload["cards"], **kwargs))
+        self.assertEqual(original, artifact.read_bytes())
+
+    def test_registered_legacy_component_without_atlas_inputs_takes_managed_rebuild(self) -> None:
+        from brain.atlas import build_atlas
+        from brain.catalog import publish_current_components
+        from brain.semantic import _chunk_groups
+
+        indexed, _ = snapshot_indexes(self.settings)
+        payload = build_atlas(self.settings, indexed)
+        build_semantic_index(self.settings, embed=self._vectors, pack_id="legacy-source-only")
+        publish_current_components(self.settings, atlas_payload=payload)
+        with mock.patch("brain.semantic._chunk_groups", wraps=_chunk_groups) as chunks:
+            result = build_semantic_index(self.settings, embed=self._vectors, pack_id="legacy-source-only", atlas_cards=payload["cards"])
+        self.assertEqual(len(self.settings.repositories), chunks.call_count)
+        self.assertGreater(result["chunks"], len(payload["cards"]))
+
     def setUp(self) -> None:
+        from brain.semantic import _QUERY_VECTORS
+
+        _QUERY_VECTORS.clear()
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.repository = self.root / "workload"
@@ -260,6 +376,9 @@ class SemanticRobustnessTest(unittest.TestCase):
         finally:
             connection.close()
         query_calls: list[list[str]] = []
+        from brain.semantic import _QUERY_VECTORS
+
+        _QUERY_VECTORS.clear()  # Exercise corrupt persistent cache on a cold process.
 
         def query_embed(values: list[str]) -> list[list[float]]:
             query_calls.append(values)
@@ -283,12 +402,11 @@ class SemanticRobustnessTest(unittest.TestCase):
             connection.commit()
         finally:
             connection.close()
-        with mock.patch("brain.ops.remaining_write_capacity", return_value=0), self.assertRaisesRegex(
-            SemanticEmbeddingError, "query embedding cache",
-        ):
-            _query_vector(
+        with mock.patch("brain.ops.remaining_write_capacity", return_value=0):
+            vector = _query_vector(
                 self.settings, "disk-full-query", pack_id="query-pack", dimension=2, embed=self._vectors,
             )
+        self.assertEqual([1.0, 1.0], vector)
         connection = connect(self.settings)
         try:
             self.assertEqual(
@@ -325,6 +443,123 @@ class SemanticRobustnessTest(unittest.TestCase):
             )
         finally:
             connection.close()
+
+    def test_optional_query_cache_failures_preserve_valid_vectors(self) -> None:
+        from brain.ops import StateCapacityError
+
+        for failure in (StateCapacityError("state_inventory_limit", "scan budget exceeded"), OSError("unavailable")):
+            with self.subTest(failure=type(failure).__name__):
+                trace = SimpleNamespace(fallback_reasons=[])
+                embed = mock.Mock(return_value=[[1.0, 2.0]])
+                with mock.patch("brain.ops.remaining_write_capacity", side_effect=failure):
+                    result = _query_vector(
+                        self.settings, "cache failure " + type(failure).__name__, pack_id="pack", dimension=2, embed=embed, trace=trace,
+                    )
+                self.assertEqual([1.0, 2.0], result)
+                embed.assert_called_once()
+                self.assertEqual(["semantic_query_cache_write_unavailable"], trace.fallback_reasons)
+        with mock.patch("brain.catalog.connect", side_effect=sqlite3.OperationalError("database locked")):
+            self.assertEqual([1.0, 2.0], _query_vector(
+                self.settings, "busy", pack_id="pack", dimension=2, embed=lambda _: [[1.0, 2.0]],
+            ))
+        with self.assertRaisesRegex(RuntimeError, "model unavailable"):
+            _query_vector(self.settings, "bad runtime", pack_id="pack", dimension=2,
+                          embed=mock.Mock(side_effect=RuntimeError("model unavailable")))
+        for invalid in ([], [[1.0]], [[float("nan"), 1.0]]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(RuntimeError, "dimension"):
+                _query_vector(self.settings, "invalid", pack_id="pack", dimension=2,
+                              embed=mock.Mock(return_value=invalid))
+
+    def test_query_cache_hit_does_not_require_a_writable_catalog(self) -> None:
+        from brain.catalog import connect
+        from brain.semantic import _QUERY_VECTORS
+
+        expected = _query_vector(self.settings, "read only", pack_id="pack", dimension=2, embed=self._vectors)
+        _QUERY_VECTORS.clear()
+        connection = connect(self.settings)
+        connection.execute("PRAGMA query_only=ON")
+        trace = SimpleNamespace(fallback_reasons=[])
+        embed = mock.Mock(side_effect=AssertionError("cached query must not invoke the model"))
+        with mock.patch("brain.catalog.connect", return_value=connection):
+            actual = _query_vector(self.settings, "read only", pack_id="pack", dimension=2, embed=embed, trace=trace)
+        self.assertEqual(expected, actual)
+        embed.assert_not_called()
+        self.assertEqual(["semantic_query_cache_touch_unavailable"], trace.fallback_reasons)
+
+    def test_query_cache_failed_write_rolls_back_pruning(self) -> None:
+        from brain.catalog import connect
+
+        _query_vector(self.settings, "retained", pack_id="pack", dimension=2, embed=self._vectors)
+
+        def fail_after_pruning(connection, _entries):
+            connection.execute("DELETE FROM embedding_cache")
+            raise sqlite3.OperationalError("disk full")
+
+        with mock.patch("brain.semantic._reserve_embedding_cache", side_effect=fail_after_pruning):
+            self.assertEqual([1.0, 1.0], _query_vector(
+                self.settings, "new", pack_id="pack", dimension=2, embed=self._vectors,
+            ))
+        connection = connect(self.settings)
+        try:
+            self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM embedding_cache").fetchone()[0])
+        finally:
+            connection.close()
+
+    def test_oversized_persistent_query_vector_is_rejected_before_json_decode(self) -> None:
+        from brain.catalog import connect
+        from brain.semantic import _QUERY_VECTORS
+
+        _query_vector(self.settings, "oversized cache", pack_id="pack", dimension=2, embed=self._vectors)
+        _QUERY_VECTORS.clear()
+        connection = connect(self.settings)
+        try:
+            connection.execute("UPDATE embedding_cache SET vector_json=?", ("[" + " " * 10000 + "1.0,2.0]",))
+            connection.commit()
+        finally:
+            connection.close()
+        embed = mock.Mock(return_value=[[2.0, 1.0]])
+        with mock.patch("brain.semantic.json.loads", side_effect=AssertionError("oversize must not be decoded")):
+            self.assertEqual([2.0, 1.0], _query_vector(
+                self.settings, "oversized cache", pack_id="pack", dimension=2, embed=embed,
+            ))
+        embed.assert_called_once()
+
+    def test_large_workspace_query_cache_has_a_short_budget_and_memory_reuse(self) -> None:
+        from brain.semantic import _QUERY_VECTORS
+
+        crowded = self.settings.state_dir / "crowded"
+        crowded.mkdir()
+        for number in range(20):
+            (crowded / str(number)).write_bytes(b"fixture")
+        embed = mock.Mock(return_value=[[1.0, 2.0]])
+        trace = SimpleNamespace(fallback_reasons=[])
+        with mock.patch("brain.semantic.QUERY_CACHE_SCAN_ENTRIES", 4):
+            vector = _query_vector(self.settings, "repeat", pack_id="pack", dimension=2, embed=embed, trace=trace)
+        self.assertEqual(["semantic_query_cache_write_unavailable"], trace.fallback_reasons)
+        vector[0] = 999.0
+        with mock.patch("brain.catalog.connect", side_effect=AssertionError("warm query must not open SQLite")), mock.patch(
+            "brain.ops.remaining_write_capacity", side_effect=AssertionError("warm query must not scan state"),
+        ):
+            self.assertEqual([1.0, 2.0], _query_vector(self.settings, "repeat", pack_id="pack", dimension=2, embed=embed))
+        embed.assert_called_once()
+        self.assertEqual(1, len(_QUERY_VECTORS))
+
+    def test_memory_query_cache_is_bounded_and_pack_input_scoped(self) -> None:
+        from brain.semantic import _QUERY_VECTORS
+
+        embed = mock.Mock(return_value=[[1.0, 2.0]])
+        with mock.patch("brain.ops.remaining_write_capacity", return_value=0), mock.patch("brain.semantic.MAX_MEMORY_QUERY_VECTORS", 2):
+            for identity in ("pack-input-1", "pack-input-2", "pack-input-3"):
+                _query_vector(self.settings, "same query", pack_id="pack", dimension=2,
+                              pack_compatibility_identity=identity, embed=embed)
+            self.assertEqual(2, len(_QUERY_VECTORS))
+            self.assertEqual(3, embed.call_count)
+            _query_vector(self.settings, "same query", pack_id="pack", dimension=2,
+                          pack_compatibility_identity="pack-input-3", embed=embed)
+            self.assertEqual(3, embed.call_count)
+        with mock.patch("brain.ops.remaining_write_capacity", return_value=0), mock.patch("brain.semantic.MAX_MEMORY_QUERY_DIMENSION", 1):
+            _query_vector(self.settings, "too large for memory", pack_id="pack", dimension=2, embed=embed)
+        self.assertEqual(2, len(_QUERY_VECTORS))
 
     def test_bulk_embedding_cache_uses_one_capacity_scan_and_bounded_commits(self) -> None:
         from brain.catalog import connect

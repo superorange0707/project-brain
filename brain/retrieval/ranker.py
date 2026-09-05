@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from copy import copy
 from typing import Protocol, TypeVar
 
 
@@ -19,13 +20,21 @@ T = TypeVar("T", bound=Hit)
 def fuse_and_rank(hits: list[T]) -> list[T]:
     """Deterministic reciprocal-rank fusion plus explainable source features."""
     groups: dict[tuple[str, str, int], list[T]] = defaultdict(list)
+    channel_scores: dict[str, dict[tuple[str, str, int], float]] = defaultdict(dict)
     for hit in hits:
-        groups[(hit.repo, hit.path, hit.line)].append(hit)
+        key = (hit.repo, hit.path, hit.line)
+        groups[key].append(hit)
+        for channel in hit.found_by:
+            channel_scores[channel][key] = max(channel_scores[channel].get(key, float("-inf")), float(hit.score))
+    ranks = {
+        channel: {key: rank for rank, key in enumerate(sorted(scores, key=lambda key: (-scores[key], key)), 1)}
+        for channel, scores in channel_scores.items()
+    }
     fused: list[T] = []
-    for values in groups.values():
-        primary = max(values, key=lambda item: (item.score, item.kind, item.found_by))
+    for key, values in groups.items():
+        primary = copy(max(values, key=lambda item: (item.score, item.kind, item.found_by)))
         channels = sorted({channel for item in values for channel in item.found_by})
-        rrf = sum(1 / (60 + rank) for rank, _ in enumerate(channels, 1))
+        rrf = sum(1 / (60 + ranks[channel][key]) for channel in channels)
         feature = 0
         if "definition" in primary.kind:
             feature += 14

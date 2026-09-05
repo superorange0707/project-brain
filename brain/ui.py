@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import secrets
 import shutil
+import sqlite3
 import threading
 import time
 import webbrowser
@@ -17,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .platforms import atomic_managed_text_write, read_managed_text
 
@@ -54,11 +56,45 @@ MAX_UI_ARTIFACT_BYTES = 4 * 1024 * 1024
 UI_INSTANCE_FILE = "ui-instance.json"
 
 
+class _NoUiRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Local session tokens must never travel through a corporate HTTP proxy.
+_UI_LOOPBACK_OPENER = build_opener(ProxyHandler({}), _NoUiRedirect())
+
+
 def _display_path(settings: Settings, path: Path) -> str:
     try:
         return str(path.relative_to(settings.root)) or "."
     except ValueError:
         return path.name
+
+
+def _recovery(error: Exception) -> dict[str, str] | None:
+    """Offer existing safe operations, never infer a destructive reset."""
+    if isinstance(error, StateCapacityError):
+        return error.recovery()
+    if isinstance(error, PermissionError):
+        return {
+            "code": "permission_denied", "title": "Local access was denied",
+            "message": "Check access to the workspace in your OS or company policy, then recheck status. Brain cannot override permissions. Do not delete indexes or run a reset.",
+            "action": "diagnostics", "action_label": "Run diagnostics",
+        }
+    if isinstance(error, sqlite3.Error):
+        return {
+            "code": "state_unavailable", "title": "Local state could not be read or written",
+            "message": "Finish other Brain operations and run diagnostics. Existing generations and tickets have not been reset. Do not remove a database to clear this error.",
+            "action": "diagnostics", "action_label": "Run diagnostics",
+        }
+    if isinstance(error, (BrainError, ValueError)):
+        return {
+            "code": "validation_failed", "title": "An operation needs attention",
+            "message": "For configuration changes, re-read brain.toml below. For a retrieval request, correct the AI reply using Classify reply. Neither action deletes existing state.",
+            "action": "check_config", "action_label": "Re-read configuration",
+        }
+    return None
 
 
 def _session_artifacts(settings: Settings, ticket: str) -> list[dict[str, Any]]:
@@ -192,6 +228,7 @@ def project_status(
     brain = dashboard_status(settings)
     sessions = _sessions(settings)
     active_jobs = [item for item in (jobs or []) if item.get("status") in {"pending", "running", "interrupted"}]
+    latest_refresh = next((item for item in (jobs or []) if item.get("name") == "refresh"), None)
     by_ticket = {str(item.get("ticket")): item for item in active_jobs if item.get("ticket")}
     for session in sessions:
         job = by_ticket.get(str(session["ticket"]))
@@ -215,6 +252,7 @@ def project_status(
         "repositories": repositories,
         "sessions": sessions,
         "jobs": active_jobs,
+        "last_refresh": latest_refresh,
         "retrieval": {
             "edition": brain["edition"],
             "generation": (current_generation(settings) or {}).get("generation"),
@@ -264,6 +302,8 @@ def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
     latest = history[-1] if history else {}
     return {
         "ticket": ticket,
+        "session_path": _display_path(settings, directory),
+        "handoff_path": _display_path(settings, settings.generated_dir / "handoffs" / directory.name),
         "ticket_text": (
             _read_session_artifact(settings, ticket, ticket_path, MAX_START_TICKET_BYTES)
             if ticket_path.exists() else ""
@@ -380,23 +420,29 @@ class _OperationCoordinator:
             job = value.get("refresh") if isinstance(value, dict) else None
             if not isinstance(job, dict) or job.get("name") != "refresh":
                 return
-            if job.get("status") not in {"pending", "running"}:
+            status = job.get("status")
+            if status not in {"pending", "running", "interrupted", "failed", "succeeded"}:
                 return
             job_id = str(job.get("id") or "")
             progress = job.get("progress")
             if not job_id or not isinstance(progress, dict):
                 return
+            interrupted = status in {"pending", "running", "interrupted"}
             job = {
                 "id": job_id,
                 "name": "refresh",
                 "kind": "mutation",
                 "ticket": None,
-                "status": "interrupted",
-                "phase": "Interrupted — ready to resume",
+                "status": "interrupted" if interrupted else status,
+                "phase": "Interrupted — ready to resume" if interrupted else str(job.get("phase") or status)[:280],
                 "progress": progress,
                 "started_at_ms": int(job.get("started_at_ms") or 0),
                 "result": None,
-                "error": "The UI process stopped. Run Refresh Brain to resume from reusable published state and embedding cache.",
+                "error": (
+                    "The UI process stopped. Run Refresh Brain to resume from reusable published state and embedding cache."
+                    if interrupted else str(job.get("error") or "")[:280] or None
+                ),
+                "recovery": job.get("recovery") if isinstance(job.get("recovery"), dict) else None,
                 "resume": job.get("resume") if isinstance(job.get("resume"), dict) else {},
                 "_started": time.perf_counter(),
             }
@@ -418,7 +464,7 @@ class _OperationCoordinator:
             return
         payload = {
             key: value for key, value in refresh.items()
-            if key in {"id", "name", "kind", "status", "phase", "progress", "started_at_ms", "resume"}
+            if key in {"id", "name", "kind", "status", "phase", "progress", "started_at_ms", "resume", "error", "recovery"}
         }
         try:
             self._state_dir.mkdir(parents=True, exist_ok=True)
@@ -505,11 +551,14 @@ class _OperationCoordinator:
                 )
                 job.update({
                     "status": "failed",
-                    "phase": "Failed",
-                    "progress": progress_event("failed", elapsed_ms=(time.perf_counter() - float(job["_started"])) * 1000),
+                    "phase": "Failed during " + str(job.get("phase") or "refresh"),
+                    "progress": {
+                        **(job.get("progress") or {}),
+                        **progress_event("failed", elapsed_ms=(time.perf_counter() - float(job["_started"])) * 1000),
+                    },
                     "result": None,
                     "error": message if safe_validation else f"Operation failed ({type(error).__name__}).",
-                    "recovery": error.recovery() if isinstance(error, StateCapacityError) else None,
+                    "recovery": _recovery(error),
                 })
             if job.get("kind") == "mutation" and self._active_mutation == job_id:
                 self._active_mutation = None
@@ -591,7 +640,7 @@ class _OperationCoordinator:
         with self._lock:
             return [
                 {key: value for key, value in job.items() if not key.startswith("_")}
-                for job in sorted(self._jobs.values(), key=lambda item: int(item["started_at_ms"]), reverse=True)
+                for job in sorted(reversed(self._jobs.values()), key=lambda item: int(item["started_at_ms"]), reverse=True)
             ]
 
     def is_idle(self) -> bool:
@@ -682,8 +731,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _error(self, exc: Exception, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
         payload: dict[str, Any] = {"ok": False, "error": str(exc)}
-        if isinstance(exc, StateCapacityError):
-            payload["recovery"] = exc.recovery()
+        recovery = _recovery(exc)
+        if recovery:
+            payload["recovery"] = recovery
         self._json(payload, status)
 
     def _authorized(self) -> bool:
@@ -793,7 +843,12 @@ class _Handler(BaseHTTPRequestHandler):
                     daemon=True,
                 ).start()
                 return
-            if parsed.path in {"/api/refresh", "/api/model", "/api/edition", "/api/gc"}:
+            if parsed.path == "/api/config/reload":
+                data = self.server.operations.foreground(
+                    "config-reload", lambda: project_status(self.server.reload_settings()),
+                )
+                self._json({"ok": True, "data": data})
+            elif parsed.path in {"/api/refresh", "/api/model", "/api/edition", "/api/gc"}:
                 self._start_operation(parsed.path, body)
             elif parsed.path == "/api/retrieval":
                 self._start_retrieval(body)
@@ -1129,11 +1184,26 @@ def _probe_ui_instance(instance: dict[str, Any], *, stop: bool = False) -> bool:
         method="POST" if stop else "GET",
     )
     try:
-        with urlopen(request, timeout=2) as response:
+        with _UI_LOOPBACK_OPENER.open(request, timeout=2) as response:
             payload = json.loads(response.read(64 * 1024))
-        return bool(isinstance(payload, dict) and payload.get("ok"))
-    except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError):
-        return False
+        if isinstance(payload, dict) and payload.get("ok") is True:
+            return True
+    except HTTPError as error:
+        error.close()
+        if stop and error.code == HTTPStatus.CONFLICT:
+            raise BrainError("The UI is busy and cannot stop until its refresh or investigation completes") from None
+    except (URLError, OSError) as error:
+        reason = error.reason if isinstance(error, URLError) else error
+        if isinstance(reason, OSError) and (
+            reason.errno == errno.ECONNREFUSED or getattr(reason, "winerror", None) == 10061
+        ):
+            return False
+    except (ValueError, json.JSONDecodeError):
+        pass
+    raise BrainError(
+        "Could not confirm the existing local UI. Its instance record was preserved; "
+        "retry brain ui status, then brain ui to reopen it. No process was stopped."
+    )
 
 
 def _forget_ui_instance(settings: Settings, instance: dict[str, Any] | None = None) -> None:

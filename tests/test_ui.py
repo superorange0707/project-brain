@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import errno
+import io
 import json
 import sqlite3
 import tempfile
@@ -8,7 +10,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -21,6 +23,8 @@ from brain.ui import (
     MAX_SESSION_ARTIFACT_RESULTS,
     MAX_SESSION_RESULTS,
     _OperationCoordinator,
+    _NoUiRedirect,
+    _probe_ui_instance,
     _Server,
     _artifact,
     _session_artifacts,
@@ -33,6 +37,15 @@ from brain.ui import (
 
 
 class OperationCoordinatorTest(unittest.TestCase):
+    def test_latest_refresh_wins_when_jobs_start_in_the_same_millisecond(self) -> None:
+        coordinator = _OperationCoordinator()
+        with patch("brain.ui.time.time", return_value=1.0):
+            old = coordinator._claim("refresh")
+            coordinator._finish(old, error=BrainError("old failure"))
+            new = coordinator._claim("refresh")
+            coordinator._finish(new, result={})
+        self.assertEqual([new, old], [job["id"] for job in coordinator.list()])
+
     def test_two_tickets_run_concurrently_but_same_ticket_and_mutation_are_blocked(self) -> None:
         coordinator = _OperationCoordinator(max_retrievals=2)
         entered = [threading.Event(), threading.Event()]
@@ -120,6 +133,47 @@ class OperationCoordinatorTest(unittest.TestCase):
         self.assertEqual("failed", job["status"])
         self.assertEqual("safe_gc", job["recovery"]["action"])
         self.assertIn("no data was changed", job["error"])
+
+    def test_refresh_terminal_state_survives_reload_and_restart(self) -> None:
+        from brain.ops import StateCapacityError
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "service").mkdir()
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='recovery'\n[graph]\nenabled=false\n"
+                              "[[repositories]]\nname='service'\npath='service'\n", encoding="utf-8")
+            settings = load_settings(config)
+            coordinator = _OperationCoordinator(state_dir=settings.state_dir)
+            job_id = coordinator._claim("refresh", resume={"fetch": False, "discover": False})
+            coordinator._progress(job_id, {"phase": "semantic_embeddings", "new_embeddings_completed": 16})
+            coordinator._finish(job_id, error=StateCapacityError("state_quota_exceeded", "State quota exceeded"))
+            before = coordinator.get(job_id)
+            restarted = _OperationCoordinator(state_dir=settings.state_dir)
+            after = restarted.get(job_id)
+            for key in ("status", "phase", "error", "recovery", "progress", "resume"):
+                self.assertEqual(before[key], after[key], key)
+            self.assertEqual(16, after["progress"]["new_embeddings_completed"])
+            self.assertTrue(restarted.is_idle())
+            status = project_status(settings, jobs=restarted.list())
+            self.assertEqual([], status["jobs"])
+            self.assertEqual(job_id, status["last_refresh"]["id"])
+            self.assertEqual("safe_gc", status["last_refresh"]["recovery"]["action"])
+            next_id = restarted._claim("refresh")
+            restarted._finish(next_id, result={})
+            completed = _OperationCoordinator(state_dir=settings.state_dir)
+            self.assertEqual("succeeded", completed.get(next_id)["status"])
+            self.assertIsNone(completed.get(next_id)["error"])
+            self.assertEqual(next_id, project_status(settings, jobs=completed.list())["last_refresh"]["id"])
+
+    def test_persisted_refresh_does_not_include_private_runtime_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            coordinator = _OperationCoordinator(state_dir=state)
+            job_id = coordinator._claim("refresh")
+            coordinator._finish(job_id, error=RuntimeError("private-source http://internal/token=secret"))
+            self.assertNotIn("private-source", (state / "ui-refresh.json").read_text(encoding="utf-8"))
+            self.assertEqual("Operation failed (RuntimeError).", _OperationCoordinator(state_dir=state).get(job_id)["error"])
 
 
 class SessionSummaryTest(unittest.TestCase):
@@ -248,6 +302,45 @@ class SessionSummaryTest(unittest.TestCase):
 
 
 class LocalUiTest(unittest.TestCase):
+    def test_config_reload_validates_without_rewriting_or_discarding_settings(self) -> None:
+        original = self.config.read_text()
+        updated = original.replace('name="ui-demo"', 'name="renamed-demo"')
+        self.config.write_text(updated)
+        _, result, _ = self.post("/api/config/reload", {})
+        self.assertEqual("renamed-demo", result["data"]["project"]["name"])
+        self.assertEqual(updated, self.config.read_text())
+        self.config.write_text("[project\ninvalid")
+        with self.assertRaises(HTTPError) as raised:
+            self.post("/api/config/reload", {})
+        error = raised.exception
+        try:
+            payload = json.loads(error.read())
+        finally:
+            error.close()
+        self.assertEqual("check_config", payload["recovery"]["action"])
+        self.assertEqual("renamed-demo", self.server.settings.name)
+        self.assertEqual("[project\ninvalid", self.config.read_text())
+
+    def test_ticket_detail_exposes_separate_folder_and_glass_workspace_controls(self) -> None:
+        start_session(self.settings, "UI-FOLDER-A", "First ticket")
+        start_session(self.settings, "UI-FOLDER-B", "Second ticket")
+        _, first, _ = self.get("/api/session?ticket=UI-FOLDER-A")
+        _, second, _ = self.get("/api/session?ticket=UI-FOLDER-B")
+        self.assertNotEqual(first["data"]["handoff_path"], second["data"]["handoff_path"])
+        self.assertTrue(first["data"]["handoff_path"].endswith("handoffs/UI-FOLDER-A"))
+        _, html, _ = self.get("/", authorized=False)
+        for value in ("prefers-reduced-motion", "prefers-reduced-transparency", "aria-current", "Recovery center", "activity-button", "global-error", "theme-button"):
+            self.assertIn(value, html)
+
+    def test_permission_recovery_never_suggests_reset_or_leaks_private_paths(self) -> None:
+        coordinator = self.server.operations
+        identifier = coordinator._claim("refresh")
+        coordinator._finish(identifier, error=PermissionError("private-corporate-source"))
+        job = coordinator.get(identifier)
+        self.assertEqual("permission_denied", job["recovery"]["code"])
+        self.assertEqual("diagnostics", job["recovery"]["action"])
+        self.assertNotIn("private-corporate-source", json.dumps(job))
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -324,7 +417,7 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("Retrieval plan", html)
         self.assertIn("M365 agent", html)
         self.assertIn("Refresh Brain", html)
-        self.assertIn("Operations cockpit", html)
+        self.assertIn("Investigation workspace", html)
         self.assertIn("Local model packs", html)
         self.assertIn("Retrieval transparency", html)
         self.assertIn("Detailed profiler", html)
@@ -892,6 +985,42 @@ None beyond the stated boundary.
 
 
 class UiShutdownTest(unittest.TestCase):
+    def test_uncertain_probe_preserves_instance_and_never_starts_another_server(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "service").mkdir()
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='probe'\n[[repositories]]\nname='service'\npath='service'\n", encoding="utf-8")
+            settings = load_settings(config)
+            record = settings.state_dir / "ui-instance.json"
+            instance = {"schema_version": 1, "port": 8765, "token": "a" * 43}
+            record.write_text(json.dumps(instance), encoding="utf-8")
+            for failure in (
+                URLError(TimeoutError("timed out")),
+                HTTPError("http://127.0.0.1", 403, "Forbidden", {}, None),
+            ):
+                with self.subTest(failure=type(failure).__name__), patch("brain.ui._UI_LOOPBACK_OPENER.open", side_effect=failure), patch("brain.ui._Server") as server:
+                    with self.assertRaisesRegex(BrainError, "record was preserved"):
+                        ui_instance(settings, "status")
+                    with self.assertRaisesRegex(BrainError, "record was preserved"):
+                        serve_ui(settings, open_browser=False)
+                    self.assertEqual(instance, json.loads(record.read_text(encoding="utf-8")))
+                    server.assert_not_called()
+            with patch("brain.ui._UI_LOOPBACK_OPENER.open", side_effect=URLError(ConnectionRefusedError(errno.ECONNREFUSED, "refused"))):
+                self.assertFalse(ui_instance(settings, "status")["running"])
+            self.assertFalse(record.exists())
+
+    def test_probe_uses_direct_loopback_and_rejects_redirects_and_false_health(self) -> None:
+        from brain.ui import _UI_LOOPBACK_OPENER
+
+        self.assertFalse(any(getattr(handler, "proxies", {}) for handler in _UI_LOOPBACK_OPENER.handlers))
+        redirect = next(handler for handler in _UI_LOOPBACK_OPENER.handlers if isinstance(handler, _NoUiRedirect))
+        self.assertIsNone(redirect.redirect_request(None, None, 302, "", {}, "https://external.invalid"))
+        instance = {"port": 8765, "token": "a" * 43}
+        for payload in (b'{"ok": false}', b'{"ok": "true"}', b'not-json'):
+            with patch("brain.ui._UI_LOOPBACK_OPENER.open", return_value=io.BytesIO(payload)), self.assertRaisesRegex(BrainError, "preserved"):
+                _probe_ui_instance(instance)
+
     def test_second_ui_command_reuses_instance_and_idle_stop_closes_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

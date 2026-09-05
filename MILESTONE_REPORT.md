@@ -13,6 +13,67 @@ paths. It records only claims supported by local/public-synthetic verification.
 coverage. `DEFERRED TO TARGET MACHINE` and `DEFERRED TO PRIVATE LOCAL DATA` are
 intentional local-only validation steps, not engineering blockers.
 
+## 2026-09-05 v1.0.10 workspace refinement and release qualification
+
+The integrated refinement retains the existing catalog, Semantic shards and
+ticket session as authorities; it introduces no schema, dependency or migration.
+The shipped-in-source UI is a ticket-first local workspace with glass cards,
+light/dark themes, accessible focus/reduced motion, shared progress, persistent
+errors, folder visibility, and validated non-writing configuration reload.
+Ticket changes clear previous previews and deliveries; asynchronous responses
+must still belong to the selected ticket before being displayed or copied.
+
+Performance changes are bounded and testable:
+
+| Path | Change | Check |
+| --- | --- | --- |
+| Registered no-op Semantic refresh | Validate original component, lexical blobs, card input membership, pack/schema and shards before skipping rechunking/embedding | No chunk/model calls; stale projection repaired; corrupt blobs/changed cards/legacy cardless component rejected |
+| Source and Java extraction | Disjoint newline counting, indexed line positions and one brace pass | Same card hashes, entity identities, nested ownership and line ranges |
+| Bulk embedding cache | One measured usage carried across repositories under the exclusive lease | Ten repository-like batches require one full measurement; unlocked calls cannot trust it |
+| Large-directory inventory | Full streaming inventory separated from bounded optional probes; payload sizing separated from GC reachability metadata | More than 500,000 synthetic entries counted; depth/quota checks retained; incomplete quick probes do not latch Auto Refresh |
+| Windows installer | Version-pinned online or offline ZIP+checksum input, same validated staging/rollback | Official Windows artifact workflow exercises both modes and rejects corrupt checksums |
+| Context packaging | No live-HEAD sweep for pinned generations | A HEAD probe raises in the regression fixture; packaging still succeeds using the pin |
+| Dashboard | Reuse validated Semantic status in the operation; four local-ref workers with a shared five-second budget | Exhausted probes do not run and never claim current |
+| Ranking/evaluation | True per-channel candidate ranks; immutable input hits; shared protocol validation; separate candidate/hydrated metrics | Deterministic fusion and three public cross-repository/config/test cases, including a constrained hydration run |
+
+The first concurrent matrix exposed unnecessary scanning of a masked Java
+comment tail on Python 3.11. Brace extraction now scans brace matches in the
+existing trimmed search input instead of every character. The original parse
+deadline, complete line-position mapping and identity regression are preserved.
+
+The preceding refinement matrix used `PYTHONWARNINGS=error::ResourceWarning`
+with the repository's full unittest discovery command:
+
+| Python | Result | Duration |
+| --- | --- | --- |
+| 3.11 | 471 discovered; 466 passed, 5 native-Windows-only skips | 214.023 s |
+| 3.12 | 471 discovered; 466 passed, 5 native-Windows-only skips | 216.758 s |
+| 3.13 | 471 discovered; 466 passed, 5 native-Windows-only skips | 217.322 s |
+| 3.14 (repository `.venv`) | 471 discovered; 466 passed, 5 native-Windows-only skips | 214.834 s |
+
+Source compilation passed on all four interpreters; `git diff --check` passed.
+The full suites include 10/50/100-repository synthetic refresh/retrieval bounds,
+generation isolation, corruption/rollback, pin-aware GC and local UI endpoints.
+Narrow optimization, Semantic and UI tests were run before the broad checks.
+The expanded pre-release suites each discovered 475 tests (470 passed, five
+native-Windows-only skips), again with ResourceWarning errors enabled:
+Python 3.11 262.726 s; 3.12 270.417 s; 3.13 260.823 s; 3.14 261.092 s.
+The final inventory permission check also passed the narrow optimization suite
+on 3.11 and 3.14; the tagged native CI reruns full discovery before publication.
+`uv lock --check --offline`, `uv build`, wheel CRC/RECORD and sdist integrity,
+version/Requires-Python metadata, bundled UI/prompt resources, and exclusion of
+model weights/private state passed locally. Official artifacts must still be
+built and verified from the release tag by the native workflow; these local
+working-tree artifacts are not publication inputs.
+
+These are synthetic/local checks, not a 160-minute-to-five-minute enterprise
+benchmark. Cold model inference, full inventory duration and private ticket
+accuracy still require representative workspaces. Full inventory no longer
+fails just for exceeding the old total-item/time ceiling; depth, real capacity
+and GC reachability remain guarded. No automatic state deletion, quota
+relaxation or cloud hosting is introduced. The UI JavaScript has a runtime smoke
+test; visual browser qualification is not claimed for this local pass.
+
 ## Completed delivery slices
 
 | Milestone | Status | Delivered and locally covered |
@@ -124,13 +185,22 @@ brain model autotune PACK --latency-budget-ms 3000
   then the published config is re-parsed before the same refresh continues.
   Background Auto Refresh does not silently widen scope and instead waits for
   a user-started refresh.
-- The v1.0.10 patch removes the large-workspace capacity-scan cliff by using
-  existing immutable snapshot seals for bounded accounting, adds guarded UI
+- The v1.0.10 patch bounds optional query-cache persistence and preserves valid
+  embeddings on cache failure, measures actual snapshot file sizes rather than
+  trusting publication-time seal totals, adds guarded UI
   storage recovery, makes UI and refresh lifecycle state explicit, bounds
   Auto Refresh remote probing across the whole workspace, preserves partial
   config-write atomicity, and separates generated handoffs by ticket. These are
   operational and presentation changes only: Atlas/Semantic identities,
   generation pinning, and exact-source evidence authority are unchanged.
+  The follow-up stability review also preserves failed/completed refresh state
+  across reloads, retains UI registration on uncertain health probes, rejects
+  loopback redirects, and fixes evidence-ID prefix collisions in evaluation.
+  Full managed-write inventory now streams beyond quick-probe item/time limits,
+  and GC payload files do not spend the reachability graph's item budget. This
+  removes the large-directory budget trap without trusting stale totals or
+  weakening quota/pin protection; it does not establish enterprise cold-refresh
+  performance. Windows can install the downloaded ZIP/checksum entirely offline.
 - The v1 release gate permanently requires the complete Python 3.11–3.14 matrix.
 - The local development host is Apple Silicon with 32 GB memory, not the stated
   M3 Pro / 36 GB target. Its measurements are development evidence only.

@@ -4,6 +4,8 @@ param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "ProjectBrain\bin"),
     [string]$Repository = "superorange0707/project-brain",
     [string]$ReleaseBaseUrl = "",
+    [Alias("ZipPath")][string]$ArchivePath = "",
+    [string]$ChecksumPath = "",
     [switch]$NoPathUpdate
 )
 
@@ -12,6 +14,20 @@ $ErrorActionPreference = "Stop"
 
 if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne "X64") {
     throw "Project Brain currently supports native Windows x64 only"
+}
+if ($ArchivePath) {
+    if ($ReleaseBaseUrl) { throw "-ArchivePath cannot be combined with -ReleaseBaseUrl" }
+    $ArchivePath = (Resolve-Path -LiteralPath $ArchivePath).Path
+    if (-not $Version) {
+        if ([IO.Path]::GetFileName($ArchivePath) -notmatch '^project-brain-v(\d+\.\d+\.\d+)-windows-amd64\.zip$') {
+            throw "Use the official ZIP filename or supply -Version X.Y.Z"
+        }
+        $Version = $Matches[1]
+    }
+    if (-not $ChecksumPath) { $ChecksumPath = Join-Path (Split-Path -Parent $ArchivePath) "SHA256SUMS.txt" }
+    $ChecksumPath = (Resolve-Path -LiteralPath $ChecksumPath).Path
+} elseif ($ChecksumPath) {
+    throw "-ChecksumPath requires -ArchivePath"
 }
 if (-not $Version) {
     if ($ReleaseBaseUrl) { throw "-Version is required with -ReleaseBaseUrl" }
@@ -37,14 +53,19 @@ $activated = $false
 
 New-Item -ItemType Directory -Path $temporary | Out-Null
 try {
-    Invoke-WebRequest -UseBasicParsing -Uri "$base/$archiveName" -OutFile $archive
-    Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.txt" -OutFile $checksums
+    if ($ArchivePath) {
+        Copy-Item -LiteralPath $ArchivePath -Destination $archive
+        Copy-Item -LiteralPath $ChecksumPath -Destination $checksums
+    } else {
+        Invoke-WebRequest -UseBasicParsing -Uri "$base/$archiveName" -OutFile $archive
+        Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.txt" -OutFile $checksums
+    }
     $expected = $null
     foreach ($line in Get-Content -LiteralPath $checksums) {
         if ($line -match '^([0-9a-fA-F]{64})\s+\*?(.*)$' -and
-            [IO.Path]::GetFileName($Matches[2]) -eq $archiveName) {
+            $Matches[2] -ceq $archiveName) {
+            if ($expected) { throw "published checksum contains duplicate entries for $archiveName" }
             $expected = $Matches[1].ToLowerInvariant()
-            break
         }
     }
     if (-not $expected) { throw "published checksum is missing $archiveName" }
@@ -83,6 +104,9 @@ try {
     $backup = Join-Path $parent (".project-brain-backup-" + [Guid]::NewGuid())
     New-Item -ItemType Directory -Path $stage | Out-Null
     if (Test-Path -LiteralPath $InstallDir) {
+        if ((Get-Item -LiteralPath $InstallDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "install directory is a reparse point; refusing to replace it"
+        }
         $allowed = @($managed + $notices)
         foreach ($entry in Get-ChildItem -LiteralPath $InstallDir -Force) {
             if ($entry.Name -notin $allowed -or $entry.PSIsContainer -or
@@ -138,7 +162,9 @@ try {
         }
     }
     Write-Host "Installed Project Brain $Version in $InstallDir"
-    Write-Host "Run: brain.exe --version"
+    Write-Host "Open a new terminal and run: brain --version"
+    Write-Host "Workspace configuration, model packs, caches and ticket sessions were not changed."
+    Write-Host "From your workspace: brain ui (first installation: brain init)"
 } finally {
     if ($stage -and (Test-Path -LiteralPath $stage)) {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue

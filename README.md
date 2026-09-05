@@ -77,6 +77,18 @@ Run this installer clone from a downloads or temporary directory, not inside the
 directory that contains the repositories you will configure as a Brain
 workspace. The clone is not needed after installation.
 
+Already downloaded the ZIP? Put the release's `SHA256SUMS.txt` beside it and,
+from the installer clone, run:
+
+```powershell
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.10-windows-amd64.zip"
+```
+
+This path is fully offline: no API call, credentials, administrator access, or
+execution-policy change. It verifies the ZIP and uses the same staged install
+and PATH update as the online installer. `-ChecksumPath` can point to a checksum
+file in another directory. Close a running Brain UI before upgrading its tools.
+
 If company policy also blocks PowerShell script execution, use the portable ZIP:
 
 **[Download `project-brain-v1.0.10-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.10/project-brain-v1.0.10-windows-amd64.zip)**
@@ -150,9 +162,27 @@ to reopen the same local instance, `brain ui status` to inspect it, or
 
 The Brain view also includes **Storage & recovery**. It previews or safely
 reclaims only unpinned old generations, snapshots, and shards; current state and
-every ticket-pinned evidence generation remain protected. Capacity checks use
-the existing immutable snapshot seals instead of repeatedly walking every
-snapshot file.
+every ticket-pinned evidence generation remain protected. Capacity checks measure
+actual file sizes without reading source contents. Optional query-cache writes
+have a short scan budget and never make valid Semantic retrieval unavailable.
+Full write/cleanup inventory streams large directories instead of failing at
+the quick-probe item/time ceiling. Quota and free-disk checks still apply;
+status remains a bounded estimate, not permission to write from a partial sum.
+The latest refresh result, including failures and recovery guidance, survives
+browser reloads and UI restarts. A temporary UI health-check failure preserves
+the registered instance instead of starting a competing server.
+
+The investigation workspace puts tickets first: each card shows its pinned
+generation and wave, and opening it exposes that ticket's history and handoff
+folder. Light/dark glass surfaces are bundled locally, with keyboard and
+reduced-motion support. **Health & recovery** provides configuration reload,
+diagnostics, model verification and safe cleanup. Configuration reload validates
+your edit without rewriting the file; it does not retarget an existing ticket.
+
+An unchanged, compatible registered Semantic generation is validated and reused
+without rechunking source or calling the embedding model. Changed inputs still
+use the managed incremental build and compatible embedding cache. This is not a
+promise that a cold enterprise workspace can be embedded in five minutes.
 
 `brain init` recursively discovers Git repositories, fetches allowed remote
 refs, creates immutable snapshots, builds local intelligence, and writes Brain

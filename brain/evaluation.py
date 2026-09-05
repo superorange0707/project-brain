@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import time
 import tempfile
 from dataclasses import replace
@@ -67,13 +68,11 @@ def _request(value: object) -> dict[str, Any]:
     request = {str(key): item for key, item in value.items()}
     if not str(request.get("objective") or "").strip():
         raise ValueError("every golden request needs an objective")
-    for key in ("searches", "paths", "symbols", "files", "history"):
-        request.setdefault(key, [])
-    request.setdefault("expand", [])
     request.setdefault("version", 2)
-    if len(json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > MAX_EVALUATION_REQUEST_BYTES:
+    encoded = json.dumps(request, separators=(",", ":"), ensure_ascii=False)
+    if len(encoded.encode("utf-8")) > MAX_EVALUATION_REQUEST_BYTES:
         raise ValueError("golden evaluation request exceeds its byte limit")
-    return request
+    return parse_context_request(encoded)
 
 
 def _ranking(bundle: Any) -> list[str]:
@@ -209,7 +208,7 @@ def _runtime_metrics(runtime: dict[str, Any], expect: dict[str, Any]) -> dict[st
 def evaluate_m365_response(response: str, required_evidence_ids: Iterable[str] = ()) -> dict[str, Any]:
     """Deterministically score an attached M365 response without invoking a model."""
     required = {str(value) for value in required_evidence_ids}
-    present = {value for value in required if value in response}
+    present = {value for value in required if re.search(r"(?<![\w-])" + re.escape(value) + r"(?![\w-])", response)}
     final_sections = (
         "Ticket interpretation", "Verified current behavior", "Root cause", "Exact repository",
         "Tests", "Validation", "Edge cases", "Implementation order",
@@ -331,7 +330,7 @@ def evaluate_golden(
         if split and case_split != split:
             continue
         request = _request(item.get("request"))
-        raw_waves = item.get("waves") or [request]
+        raw_waves = item.get("waves") or [item.get("request")]
         if not isinstance(raw_waves, list) or not raw_waves:
             raise ValueError(f"golden case {identifier} waves must be a non-empty list")
         if len(raw_waves) > MAX_EVALUATION_WAVES_PER_CASE:
@@ -394,6 +393,10 @@ def evaluate_golden(
         production = _files(expect.get("production_files") or expect.get("required_production_files"))
         tests = _files(expect.get("test_config_files") or expect.get("required_test_config_files"))
         required = production | tests | _files(expect.get("required_files"))
+        hydrated_ranking = list(dict.fromkeys(
+            f"{item.repo}:{item.path}" for item in bundle.evidence
+            if item.repo not in {"external", "knowledge"}
+        ))
         required_repos = {item.split(":", 1)[0] for item in required}
         required_modules = _values(expect.get("required_modules"))
         required_entities = _values(expect.get("required_entities"))
@@ -433,6 +436,11 @@ def evaluate_golden(
             "graph_edge_recall": _recall({edge for edge in required_edges if edge in relationship_text}, required_edges),
             "evidence_recall_at_18": _recall(set(ranking[:18]), required),
             "file_recall_at_limit": _recall(set(top), required),
+            "candidate_file_recall_at_limit": _recall(set(top), required),
+            "hydrated_file_recall_at_limit": _recall(set(hydrated_ranking[:limit]), required),
+            "hydrated_precision_at_10": _precision(hydrated_ranking, required, 10),
+            "required_files_only_in_candidates": len((set(ranking) & required) - set(hydrated_ranking)),
+            "ranking_scope": "legacy file metrics include metadata candidates; hydrated metrics count verified source regions only (before context byte trimming)",
             "file_recall_at_5": _recall(set(ranking[:5]), required),
             "file_recall_at_10": _recall(set(ranking[:10]), required),
             "file_recall_at_20": _recall(set(ranking[:20]), required),
@@ -516,6 +524,10 @@ def evaluate_golden(
             "graph_edge_recall": average("graph_edge_recall"),
             "evidence_recall_at_18": average("evidence_recall_at_18"),
             "file_recall_at_limit": average("file_recall_at_limit"),
+            "candidate_file_recall_at_limit": average("candidate_file_recall_at_limit"),
+            "hydrated_file_recall_at_limit": average("hydrated_file_recall_at_limit"),
+            "hydrated_precision_at_10": average("hydrated_precision_at_10"),
+            "required_files_only_in_candidates": average("required_files_only_in_candidates"),
             "file_recall_at_5": average("file_recall_at_5"),
             "file_recall_at_10": average("file_recall_at_10"),
             "file_recall_at_20": average("file_recall_at_20"),
