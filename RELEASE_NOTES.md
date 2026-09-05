@@ -39,7 +39,9 @@ the local UI.
 - Auto Refresh remote checks share one bounded 45-second workspace deadline,
   preventing repository-count multiplication on slow corporate networks.
 - Repository discovery rolls back verified partial `brain.toml` appends and UI
-  refresh reloads the authoritative configuration before indexing.
+  refresh reloads the authoritative configuration before indexing. Config
+  appends verify exact bounded bytes through the same handle, avoiding Windows
+  timestamp mismatches without accepting concurrent content changes.
 - M365 handoffs are organized as `generated/handoffs/<TICKET>/...`; existing
   flat handoff references remain readable.
 - The stable release gate now confirms every uploaded asset is anonymously

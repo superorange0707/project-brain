@@ -4298,6 +4298,61 @@ class InitTest(unittest.TestCase):
             self.assertIn("# in-place editor save", config.read_text(encoding="utf-8"))
             self.assertEqual({"repo-a", "repo-b"}, {repo.name for repo in settings.repositories})
 
+    def test_repository_discovery_checks_bytes_not_cross_api_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo-a/.git").mkdir(parents=True)
+            (root / "repo-b/.git").mkdir(parents=True)
+            config = root / "brain.toml"
+            config.write_text(
+                '[project]\nname="discovery-timestamps"\n[graph]\nenabled=false\n'
+                '[[repositories]]\nname="repo-a"\npath="repo-a"\n', encoding="utf-8",
+            )
+            settings = load_settings(config)
+            real_fstat = os.fstat
+
+            def handle_metadata(descriptor):
+                metadata = real_fstat(descriptor)
+                value = mock.Mock(wraps=metadata)
+                for field in ("st_mode", "st_dev", "st_ino", "st_size"):
+                    setattr(value, field, getattr(metadata, field))
+                value.st_mtime_ns = metadata.st_mtime_ns + 100
+                value.st_ctime_ns = metadata.st_ctime_ns + 100
+                return value
+
+            with mock.patch("brain.core.os.fstat", side_effect=handle_metadata):
+                additions = discover_and_configure_repositories(settings)
+            self.assertEqual(["repo-b"], [repo.name for repo in additions])
+
+    def test_repository_discovery_rejects_same_size_edit_at_append_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo-a/.git").mkdir(parents=True)
+            (root / "repo-b/.git").mkdir(parents=True)
+            config = root / "brain.toml"
+            config.write_text(
+                '[project]\nname="discovery-edit"\n[graph]\nenabled=false\n'
+                '[[repositories]]\nname="repo-a"\npath="repo-a"\n', encoding="utf-8",
+            )
+            settings = load_settings(config)
+            original = config.read_bytes()
+            edited = original.replace(b"discovery-edit", b"discovery-save")
+            before = config.stat()
+            real_open = os.open
+
+            def edit_before_open(path, flags, *args, **kwargs):
+                if Path(path).resolve() == config.resolve() and flags & os.O_APPEND:
+                    config.write_bytes(edited)
+                    os.utime(config, ns=(before.st_atime_ns, before.st_mtime_ns))
+                return real_open(path, flags, *args, **kwargs)
+
+            with mock.patch("brain.core.os.open", side_effect=edit_before_open), self.assertRaisesRegex(
+                BrainError, "changed during repository discovery",
+            ):
+                discover_and_configure_repositories(settings)
+            self.assertEqual(edited, config.read_bytes())
+            self.assertEqual(["repo-a"], [repo.name for repo in settings.repositories])
+
     def test_repository_discovery_does_not_use_a_predictable_config_temp_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

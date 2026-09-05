@@ -34,6 +34,9 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Repository discovery verifies the bounded config bytes through its append
+  handle, avoiding Windows path/handle timestamp mismatches while rejecting
+  same-size concurrent edits and preserving partial-write rollback.
 - Full managed-write inventory streams large directory trees instead of
   treating the quick-probe 500,000-entry/30-second budget as a hard workspace
   size limit. Fast status/query probes remain bounded; incomplete probes never

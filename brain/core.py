@@ -343,7 +343,7 @@ def discover_and_configure_repositories(settings: Settings) -> list[Repository]:
     appended = 0
     try:
         flags = (
-            os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0)
+            os.O_RDWR | os.O_APPEND | getattr(os, "O_BINARY", 0)
             | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         )
         descriptor = os.open(settings.config_path, flags)
@@ -353,10 +353,29 @@ def discover_and_configure_repositories(settings: Settings) -> list[Repository]:
             settings.config_path.is_symlink()
             or not stat.S_ISREG(opened.st_mode)
             or (opened.st_dev, opened.st_ino) != (path_metadata.st_dev, path_metadata.st_ino)
-            or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
-            != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (current.st_dev, current.st_ino, current.st_size)
         ):
             raise OSError("brain.toml identity changed while opening")
+        # Windows path and handle timestamp observations can differ. Verify the
+        # exact bounded input through the same descriptor that will append it.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = len(raw) + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after_read = settings.config_path.lstat()
+        if (
+            b"".join(chunks) != raw
+            or not stat.S_ISREG(after_read.st_mode)
+            or (after_read.st_dev, after_read.st_ino, after_read.st_size)
+            != (opened.st_dev, opened.st_ino, opened.st_size)
+        ):
+            raise OSError("brain.toml content changed while opening")
         view = memoryview(payload)
         while view:
             written = os.write(descriptor, view)

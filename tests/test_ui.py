@@ -327,7 +327,7 @@ class LocalUiTest(unittest.TestCase):
         _, first, _ = self.get("/api/session?ticket=UI-FOLDER-A")
         _, second, _ = self.get("/api/session?ticket=UI-FOLDER-B")
         self.assertNotEqual(first["data"]["handoff_path"], second["data"]["handoff_path"])
-        self.assertTrue(first["data"]["handoff_path"].endswith("handoffs/UI-FOLDER-A"))
+        self.assertEqual(("handoffs", "UI-FOLDER-A"), Path(first["data"]["handoff_path"]).parts[-2:])
         _, html, _ = self.get("/", authorized=False)
         for value in ("prefers-reduced-motion", "prefers-reduced-transparency", "aria-current", "Recovery center", "activity-button", "global-error", "theme-button"):
             self.assertIn(value, html)
