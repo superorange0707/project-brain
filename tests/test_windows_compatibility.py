@@ -513,10 +513,22 @@ class WindowsCompatibilityTest(unittest.TestCase):
                     locks._acquire(writer)
                     self.assertEqual((0, locks._WINDOWS_READER_SLOTS), fake.ranges[writer.fileno()])
                     locks._release(writer)
+                    self.assertEqual(0, lock_path.stat().st_size)
             finally:
                 first.close()
                 second.close()
                 writer.close()
+
+    def test_windows_model_lane_never_initializes_locked_bytes(self) -> None:
+        fake = _FakeMsvcrt()
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = Path(temporary)
+            settings = SimpleNamespace(state_dir=state_dir)
+            with mock.patch.object(locks, "fcntl", None), mock.patch.object(locks, "msvcrt", fake):
+                with locks.model_lane(settings):
+                    self.assertEqual(1, len(fake.ranges))
+                    self.assertEqual(0, (state_dir / "model-lane.lock").stat().st_size)
+            self.assertEqual({}, fake.ranges)
 
     def test_windows_official_pack_catalog_pins_verified_native_descriptors(self) -> None:
         expected = [
@@ -806,6 +818,7 @@ class WindowsCompatibilityTest(unittest.TestCase):
                 ]
                 self.assertTrue(all(signal.is_file() for signal in signals), diagnostics)
                 settings = load_settings(config)
+                self.assertEqual(0, (settings.state_dir / "operations.lock").stat().st_size)
                 with self.assertRaises(locks.WorkspaceOperationBusy):
                     with locks.workspace_operation(settings):
                         pass
@@ -815,6 +828,8 @@ class WindowsCompatibilityTest(unittest.TestCase):
                         terminate_process_tree(reader, graceful_timeout=0)
                     if reader.stderr is not None:
                         reader.stderr.close()
+            with locks.workspace_operation(load_settings(config)):
+                pass
 
 
 if __name__ == "__main__":

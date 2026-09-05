@@ -13,7 +13,16 @@ paths. It records only claims supported by local/public-synthetic verification.
 coverage. `DEFERRED TO TARGET MACHINE` and `DEFERRED TO PRIVATE LOCAL DATA` are
 intentional local-only validation steps, not engineering blockers.
 
-## 2026-09-05 v1.0.10 workspace refinement and release qualification
+## 2026-09-05 v1.0.11 workspace refinement and release qualification
+
+The unpublished v1.0.10 tag is preserved. Its native release validation caught
+a concurrent first-use Windows lock-file prefill race: a buffered initialization
+write could collide with an already acquired byte range, then fail again on
+close. v1.0.11 removes prefill from workspace/ticket/slot and model lanes; native
+`msvcrt.locking` supports ranges past EOF. Existing lock identities/ranges and
+cross-process exclusions are unchanged. Empty-file and model-lane regressions
+now assert that acquisition does not write, and native shared-reader tests
+require writer exclusion and recovery after reader processes exit.
 
 The integrated refinement retains the existing catalog, Semantic shards and
 ticket session as authorities; it introduces no schema, dependency or migration.
@@ -185,7 +194,7 @@ brain model autotune PACK --latency-budget-ms 3000
   then the published config is re-parsed before the same refresh continues.
   Background Auto Refresh does not silently widen scope and instead waits for
   a user-started refresh.
-- The v1.0.10 patch bounds optional query-cache persistence and preserves valid
+- The v1.0.11 patch bounds optional query-cache persistence and preserves valid
   embeddings on cache failure, measures actual snapshot file sizes rather than
   trusting publication-time seal totals, adds guarded UI
   storage recovery, makes UI and refresh lifecycle state explicit, bounds

@@ -1,12 +1,15 @@
-# Project Brain v1.0.10 — Large-Workspace Reliability and Recovery
+# Project Brain v1.0.11 — Large-Workspace Reliability and Recovery
 
 Project Brain v1 turns the Workspace Intelligence Atlas into a bounded,
-generation-pinned investigation runtime. v1.0.10 focuses on reliable daily use
+generation-pinned investigation runtime. v1.0.11 focuses on reliable daily use
 in large enterprise workspaces and makes operational failures actionable from
 the local UI.
 
 ## Highlights
 
+- Fixed a Windows first-use lock race discovered by native release validation.
+  Locks no longer write initialization bytes into another handle's locked range;
+  reader concurrency and writer/model exclusion keep the same lock identities.
 - A ticket-first glass workspace with light/dark appearance, generation/wave
   cards, persistent errors, configuration reload and safe recovery actions.
   Switching tickets clears old previews and guards late asynchronous results.
@@ -51,13 +54,13 @@ the local UI.
 
 The official workflow builds and verifies:
 
-- `project-brain-v1.0.10-macos-arm64.tar.gz`
-- `project-brain-v1.0.10-macos-amd64.tar.gz`
-- `project-brain-v1.0.10-linux-arm64.tar.gz`
-- `project-brain-v1.0.10-linux-amd64.tar.gz`
-- `project-brain-v1.0.10-windows-amd64.zip`
-- `project_brain_context-1.0.10-py3-none-any.whl`
-- `project_brain_context-1.0.10.tar.gz`
+- `project-brain-v1.0.11-macos-arm64.tar.gz`
+- `project-brain-v1.0.11-macos-amd64.tar.gz`
+- `project-brain-v1.0.11-linux-arm64.tar.gz`
+- `project-brain-v1.0.11-linux-amd64.tar.gz`
+- `project-brain-v1.0.11-windows-amd64.zip`
+- `project_brain_context-1.0.11-py3-none-any.whl`
+- `project_brain_context-1.0.11.tar.gz`
 - `install-project-brain.sh`
 - `install-project-brain.ps1`
 - `SHA256SUMS.txt`
@@ -67,6 +70,10 @@ attestation. Model weights remain separate and are never bundled into Core.
 
 ## Upgrade safety
 
+The earlier v1.0.10 tag was not published as a GitHub Release after its native
+lock regression failed. It remains unchanged; v1.0.11 carries the corrected
+implementation and the complete workspace refinement release.
+
 No Atlas/Semantic schema migration, rebuild, model reinstall, embedding-cache
 reset, configuration reset, or ticket-session reset is required solely for this
 patch. Existing immutable generations and pinned exact-source evidence remain
@@ -74,7 +81,7 @@ authoritative. A normal refresh remains optional workspace maintenance, not an
 upgrade migration.
 
 macOS: `brew update` then `brew upgrade project-brain`. Windows: use the tagged
-repository's `scripts/install-project-brain.ps1`; add `-Version 1.0.10` for an
+repository's `scripts/install-project-brain.ps1`; add `-Version 1.0.11` for an
 online install or `-ArchivePath` for a previously downloaded ZIP. Finish active
 work and stop an old UI process before upgrading, then reopen `brain ui`.
 Agent Kit v4/protocol v5 remain compatible; rerun `brain agent-kit m365 --json`

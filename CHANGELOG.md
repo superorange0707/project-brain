@@ -2,7 +2,11 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.10] - 2026-09-05
+## [1.0.11] - 2026-09-05
+
+Includes the workspace refinements prepared under the unpublished v1.0.10 tag.
+That tag is retained unchanged: native release validation caught a Windows
+first-use lock race before GitHub Release publication.
 
 ### Workspace and performance
 
@@ -34,6 +38,10 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ### Fixed
 
+- Windows workspace, retrieval-slot, ticket and model locks no longer prefill
+  bytes before acquiring a range. Native byte-range locks work past EOF;
+  removing those writes prevents concurrent first-use permission/flush errors
+  while preserving existing lock names, ranges and cross-process exclusion.
 - Repository discovery verifies the bounded config bytes through its append
   handle, avoiding Windows path/handle timestamp mismatches while rejecting
   same-size concurrent edits and preserving partial-write rollback.
@@ -710,7 +718,7 @@ All notable changes are documented here. This project follows Semantic Versionin
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
-[1.0.10]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.10
+[1.0.11]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.11
 [1.0.9]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.9
 [1.0.8]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.8
 [1.0.7]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.7

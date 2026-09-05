@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import hashlib
 import threading
 import time
@@ -70,11 +69,8 @@ def _acquire(handle: Any, *, shared: bool = False) -> None:
         fcntl.flock(handle.fileno(), mode | fcntl.LOCK_NB)
         return
     if msvcrt is not None:  # pragma: no cover - Windows-only fallback
-        handle.seek(0, os.SEEK_END)
-        missing = _WINDOWS_READER_SLOTS - handle.tell()
-        if missing > 0:
-            handle.write(b"0" * missing)
-            handle.flush()
+        # msvcrt can lock past EOF. Prefilling bytes races with another handle
+        # already locking that range and can leave an unflushable buffer.
         if shared:
             last_error: OSError | None = None
             for offset in range(_WINDOWS_READER_SLOTS):
@@ -131,10 +127,6 @@ def model_lane(settings: Settings) -> Iterator[None]:
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             elif msvcrt is not None:  # pragma: no cover - Windows-only fallback
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() == 0:
-                    handle.write(b"0")
-                    handle.flush()
                 while True:
                     handle.seek(0)
                     try:

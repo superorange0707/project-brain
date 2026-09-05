@@ -45,8 +45,8 @@ toolchain. Homebrew maps `superorange0707/tap` to the separate
 ### Linux installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.10/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.10
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.11/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.11
 ```
 
 This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
@@ -55,7 +55,7 @@ adjacent executables in `~/.local/bin` without changing Brain workspace state.
 ### Standalone macOS/Linux archive
 
 Use the verified
-[v1.0.10 archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.10)
+[v1.0.11 archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.11)
 for macOS arm64/amd64 or Linux arm64/amd64. Keep `brain`,
 `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the same directory on
 `PATH`.
@@ -66,9 +66,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.10 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.11 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.10
+.\scripts\install-project-brain.ps1 -Version 1.0.11
 brain.exe --version
 ```
 
@@ -86,7 +86,7 @@ For a ZIP already downloaded in a browser or transferred from another machine,
 put its published `SHA256SUMS.txt` in the same directory and run the same script:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.10-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.11-windows-amd64.zip"
 ```
 
 The version is read from the official filename. This path performs no network
@@ -102,14 +102,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.10-windows-amd64.zip` and the published
+Download `project-brain-v1.0.11-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.10-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.10-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.11-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.11-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -132,7 +132,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.10"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.11"
 ```
 
 Upgrade later with:
@@ -144,7 +144,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.10"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.11"
 ```
 
 ### From a source checkout
@@ -896,9 +896,9 @@ The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
 sent into Brain, while `generated/handoffs/ABC-1234/context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
-The v1.0.10 operational patch does not change Agent Kit v4 or Investigation
+The v1.0.11 operational patch does not change Agent Kit v4 or Investigation
 Protocol v5, so an existing M365 Agent does not need to be regenerated. If you
-choose to rerun `brain agent-kit m365`, `AGENT_KIT.json` records Brain 1.0.10;
+choose to rerun `brain agent-kit m365`, `AGENT_KIT.json` records Brain 1.0.11;
 replace the generated files only when you want that metadata refresh.
 
 ```bash
