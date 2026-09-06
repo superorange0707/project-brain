@@ -33,7 +33,7 @@ in control and apply the resulting solution in your normal IDE.
 
 ## Install
 
-The current stable release is **v1.0.12**. Its standalone downloads contain
+The current stable release is **v1.0.13**. Its standalone downloads contain
 `brain`, `codebase-memory-mcp`, `zoekt`, and `zoekt-index`; model weights are
 never bundled. The release workflow builds and verifies macOS arm64/amd64,
 Linux arm64/amd64, and native Windows 11 x64 packages before publication.
@@ -62,9 +62,9 @@ On managed machines that allow `git clone` but block direct `.ps1` downloads,
 get the installer from the tagged repository and run it directly:
 
 ```powershell
-git clone --depth 1 --branch v1.0.12 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.13 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.12
+.\scripts\install-project-brain.ps1 -Version 1.0.13
 ```
 
 Specifying `-Version` skips the GitHub API lookup. The installer downloads only
@@ -81,7 +81,7 @@ Already downloaded the ZIP? Put the release's `SHA256SUMS.txt` beside it and,
 from the installer clone, run:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.12-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.13-windows-amd64.zip"
 ```
 
 This path is fully offline: no API call, credentials, administrator access, or
@@ -91,7 +91,7 @@ file in another directory. Close a running Brain UI before upgrading its tools.
 
 If company policy also blocks PowerShell script execution, use the portable ZIP:
 
-**[Download `project-brain-v1.0.12-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.12/project-brain-v1.0.12-windows-amd64.zip)**
+**[Download `project-brain-v1.0.13-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.13/project-brain-v1.0.13-windows-amd64.zip)**
 
 Download the ZIP in a browser and extract its complete contents into
 `%LOCALAPPDATA%\ProjectBrain\bin` (or another folder you control) so the four
@@ -109,20 +109,20 @@ Windows is recommended when `brain refresh` needs to fetch remote refs and
 create immutable Git snapshots.
 
 Verify the download against
-[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.12/SHA256SUMS.txt):
+[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.13/SHA256SUMS.txt):
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.12-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\project-brain-v1.0.13-windows-amd64.zip -Algorithm SHA256
 ```
 
 On unrestricted machines, the same installer is also available directly from
-the [v1.0.12 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.12).
+the [v1.0.13 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.13).
 
 ### Linux — verified user-level installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.12/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.12
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.13/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.13
 brain --version
 ```
 
@@ -134,17 +134,17 @@ and installs the four executables in `~/.local/bin`.
 Python 3.11–3.14 is supported:
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.12"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.13"
 ```
 
 Or install the release wheel directly:
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.12/project_brain_context-1.0.12-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.13/project_brain_context-1.0.13-py3-none-any.whl
 ```
 
 All native archives, Python distributions, installers, and checksums are on the
-**[v1.0.12 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.12)**.
+**[v1.0.13 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.13)**.
 
 ## Quick start
 
@@ -180,9 +180,25 @@ diagnostics, model verification and safe cleanup. Configuration reload validates
 your edit without rewriting the file; it does not retarget an existing ticket.
 
 An unchanged, compatible registered Semantic generation is validated and reused
-without rechunking source or calling the embedding model. Changed inputs still
-use the managed incremental build and compatible embedding cache. This is not a
-promise that a cold enterprise workspace can be embedded in five minutes.
+without rechunking source or calling the embedding model. During an incremental
+refresh, unchanged repositories reuse their validated shards. Changed repositories
+first reuse the compatible embedding cache, then recover identical model inputs'
+vectors from the registered parent shard—even after cache eviction. Recovery
+validates the pack/input contract, pinned source, card identities and shard hash;
+only new/changed inputs or inputs that cannot be validated need model work.
+This also works with compatible v1.0.7 state, without a schema migration, model
+reinstall, cache reset or prerequisite full rebuild. Recovery is repo-scoped and
+bounded; unavailable/corrupt prior data or an exhausted recovery budget falls back
+explicitly to the managed cache/model pipeline. Old ticket generations remain
+immutable and protected by existing reachability GC.
+
+Refresh progress separates intact-shard/cache reuse, recovered old vectors and
+new embeddings, with the current repository's reuse/rebuild reason. Overall
+embedding ETA is shown only after the remaining repository reuse checks; it uses
+model time, not cached-card counts or Git time. Git freshness being unverified
+does not mean the published index is broken: automatic checks retry with backoff,
+while actual missing/incompatible components still require attention. This is not
+a promise that a cold enterprise workspace can be embedded in five minutes.
 
 `brain init` recursively discovers Git repositories, fetches allowed remote
 refs, creates immutable snapshots, builds local intelligence, and writes Brain

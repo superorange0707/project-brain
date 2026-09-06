@@ -310,7 +310,7 @@ class AutoRefreshServiceTests(unittest.TestCase):
             decision = detect_auto_refresh(self.settings)
         self.assertEqual("action_required", decision.kind)
 
-    def test_git_probe_failure_becomes_safe_backed_off_action_required(self) -> None:
+    def test_git_probe_failure_is_unverified_and_backs_off_without_invalidating_index(self) -> None:
         self._initialize_git_state()
         subprocess.run(
             ["git", "remote", "add", "origin", str(self.root / "missing-origin")],
@@ -330,7 +330,9 @@ class AutoRefreshServiceTests(unittest.TestCase):
         self.clock.advance(1)
         service.poll()
 
-        self.assertEqual("action_required", decision.kind)
+        self.assertEqual("unverified", decision.kind)
+        self.assertEqual("unverified", service.status()["status"])
+        self.assertNotIn("Action Required", service.status()["pending_reason"])
         self.assertTrue(decision.check_failed)
         self.assertEqual(1, detector.call_count)
         refresh.assert_not_called()

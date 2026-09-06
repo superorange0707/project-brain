@@ -136,11 +136,19 @@ _PROGRESS_COUNTS = {
     "semantic_repository_current", "semantic_repository_total", "semantic_cards_discovered", "semantic_cards_total",
     "cached_embeddings_reused", "new_embeddings_completed", "remaining_embeddings", "embedding_batch_size",
     "embedding_batches_completed", "semantic_shards_completed", "semantic_shards_total",
+    "semantic_shards_reused", "semantic_shards_rebuilt", "shard_vectors_reused", "embedding_elapsed_ms",
+    "remaining_embeddings_known", "repository_embeddings_remaining",
     "requested_operations", "effective_operations", "physical_operations_completed",
     "repo_current", "repo_total", "candidate_count", "pruned_candidate_count", "evidence_count",
     "wave", "execution_steps", "integration_steps",
 }
-_PROGRESS_STATES = {"generation_state", "semantic_status"}
+_PROGRESS_STATES = {"generation_state", "semantic_status", "semantic_rebuild_reason", "semantic_vector_reuse_reason"}
+_SAFE_SEMANTIC_REASONS = {
+    "checking", "unchanged_shard", "snapshot_changed", "inputs_changed", "no_compatible_prior_shard",
+    "reuse_budget_exhausted", "prior_shard_invalid", "prior_inputs_unavailable", "no_matching_prior_inputs",
+    "validated_prior_inputs",
+    "initial_build", "prior_registration_unavailable", "input_schema_changed", "model_contract_changed", "repository_added",
+}
 _SAFE_GENERATION_STATES = {"not-required", "checking", "rebuilding", "rebuilt", "reused", "failed"}
 _SAFE_SEMANTIC_STATUSES = {"not-required", "ready", "failed"}
 _ADDITIONAL_SAFE_PROGRESS_LABELS = {
@@ -179,6 +187,8 @@ def progress_event(
         if key == "generation_state" and text in _SAFE_GENERATION_STATES:
             event[key] = text
         elif key == "semantic_status" and text in _SAFE_SEMANTIC_STATUSES:
+            event[key] = text
+        elif key in {"semantic_rebuild_reason", "semantic_vector_reuse_reason"} and text in _SAFE_SEMANTIC_REASONS:
             event[key] = text
     context_id = str(details.get("context_id") or "")
     if re.fullmatch(r"CTX-[0-9]{3,}(?:-P[0-9]+)?", context_id):
@@ -233,8 +243,15 @@ def format_refresh_progress(event: dict[str, Any]) -> str:
         details.append(f"cached {event['cached_embeddings_reused']}")
     if "new_embeddings_completed" in event:
         details.append(f"embedded {event['new_embeddings_completed']}")
-    if "remaining_embeddings" in event:
+    if "shard_vectors_reused" in event:
+        details.append(f"old vectors {event['shard_vectors_reused']}")
+    if "semantic_shards_reused" in event:
+        details.append(f"shards reused {event['semantic_shards_reused']} rebuilt {event.get('semantic_shards_rebuilt', 0)}")
+    if event.get("remaining_embeddings_known") and "remaining_embeddings" in event:
         details.append(f"remaining {event['remaining_embeddings']}")
+    for key in ("semantic_rebuild_reason", "semantic_vector_reuse_reason"):
+        if event.get(key) in _SAFE_SEMANTIC_REASONS:
+            details.append(str(event[key]).replace("_", " "))
     if event.get("embedding_batch_size"):
         details.append(f"batch {event['embedding_batch_size']}")
     if "semantic_shards_total" in event:
@@ -574,7 +591,12 @@ def dashboard_status(settings: Settings) -> dict[str, Any]:
     semantic = semantic_status(settings)
     available = capabilities(settings, semantic=semantic)
     repo_freshness = freshness(settings)
-    core_ready = bool(available.get("lexical_index")) and all(item.get("current") for item in repo_freshness["repositories"])
+    # Serving readiness belongs to the registered generation. A failed live Git
+    # probe is not evidence that its immutable lexical/Semantic indexes failed.
+    core_ready = bool(available.get("lexical_index"))
+    rows = repo_freshness["repositories"]
+    source_freshness = ("refresh_available" if any(item.get("source_sha") and not item.get("current") for item in rows)
+                        else "unverified" if any(not item.get("current") for item in rows) else "current")
     if requested == "precision" and available.get("reranker") and available.get("embedding") and semantic["aligned"]:
         effective, reason = "Precision active", None
     elif requested == "precision":
@@ -592,6 +614,10 @@ def dashboard_status(settings: Settings) -> dict[str, Any]:
         health = "Action required"
     elif effective == "Degraded":
         health = "Degraded"
+    elif source_freshness == "refresh_available":
+        health = "Refresh available"
+    elif source_freshness == "unverified":
+        health = "Freshness unverified"
     else:
         health = "Healthy"
     return {
@@ -600,7 +626,7 @@ def dashboard_status(settings: Settings) -> dict[str, Any]:
         "effective": effective,
         "reason": reason,
         "health": health,
-        "core": {"ready": core_ready},
+        "core": {"ready": core_ready, "source_freshness": source_freshness},
         "semantic": semantic,
         "capabilities": available,
         "freshness": repo_freshness,

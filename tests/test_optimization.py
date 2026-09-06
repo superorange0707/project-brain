@@ -234,7 +234,7 @@ class OptimizationTests(unittest.TestCase):
 const vm = require("node:vm");
 const input = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
 const elements = Object.fromEntries(input.ids.map(id => [id, {
-  dataset: {}, listeners: {}, textContent: "", hidden: false,
+  dataset: {}, listeners: {}, textContent: "", hidden: false, style: {},
   addEventListener(name, fn) { this.listeners[name] = fn; },
   querySelectorAll() { return []; },
   classList: { add() {}, remove() {}, toggle() {} }
@@ -255,6 +255,21 @@ ctx.setView("request");
 if (elements["page-title"].textContent !== "Continue with AI") throw Error("navigation failed");
 ctx.setJob({name:"model-verify", phase:"Verifying", status:"running"});
 if (elements["activity-button"].dataset.go !== "models") throw Error("model progress opens the wrong view");
+const progress = {semantic_cards_total:30150, cached_embeddings_reused:75, shard_vectors_reused:2000,
+  new_embeddings_completed:8161, embedding_elapsed_ms:3264400, elapsed_ms:3300000,
+  semantic_shards_reused:32, semantic_shards_rebuilt:1, remaining_embeddings_known:0};
+ctx.renderRefreshProgress({name:"refresh", status:"running", progress});
+if (!elements["refresh-counts"].innerHTML.includes("Shards reused 32")) throw Error("shard reuse is hidden");
+if (!elements["refresh-counts"].innerHTML.includes("Recovered old vectors 2,000")) throw Error("durable reuse is hidden");
+if (elements["refresh-counts"].innerHTML.includes("Estimated remaining embedding time")) throw Error("ETA guessed before reuse checks");
+if (elements["refresh-progress-fill"].style.width !== "34%") throw Error("durable vectors omitted from progress");
+progress.remaining_embeddings_known = 1;
+progress.remaining_embeddings = 25;
+ctx.renderRefreshProgress({name:"refresh", status:"running", progress});
+if (!elements["refresh-counts"].innerHTML.includes("Estimated remaining embedding time 00:10")) throw Error("ETA must use model-only rate");
+ctx.renderBrain({health:"Freshness unverified", core:{ready:true}, semantic:{aligned:true}, effective:"Precision active"});
+if (!elements["brain-status"].innerHTML.includes("Published generation ready")) throw Error("Git probe misreported as broken index");
+if (!elements["recovery-guidance"].textContent.includes("remains usable")) throw Error("unverified Git triggers misleading rebuild advice");
 ctx.state.ticket = "TICKET-A";
 ctx.state.preview = {valid: true};
 ctx.state.deliveries["view-request"] = {content:"A private evidence", total:1};

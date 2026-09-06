@@ -307,7 +307,7 @@
           <article class="card wide">
             <div class="row"><div class="grow"><h2>Refresh Brain</h2><p class="help">Normal refresh safely adds newly discovered repositories to brain.toml, fetches allowed refs, creates immutable snapshots, builds Core intelligence, then aligns Semantic indexing when the chosen edition requires it.</p></div><button class="button primary" id="brain-refresh">Refresh Brain</button></div>
             <div class="row"><label class="check"><input type="checkbox" id="refresh-fetch" checked> Fetch remotes</label><label class="check"><input type="checkbox" id="refresh-discover" checked> Find and add new repositories</label><span class="help" id="job-status">No operation running.</span></div>
-            <div class="row"><label for="auto-refresh-mode"><strong>Auto Refresh</strong></label><select id="auto-refresh-mode"><option value="off">Off</option><option value="when_idle">When idle</option></select><span class="help">Last check: <span id="auto-refresh-last-check">Never</span> · Last refresh: <span id="auto-refresh-last-refresh">Never</span> · <span id="auto-refresh-status">Off</span></span></div>
+            <div class="row"><label for="auto-refresh-mode"><strong>Auto Refresh</strong></label><select id="auto-refresh-mode"><option value="off">Off</option><option value="when_idle">When idle</option></select><span class="help">Last automatic check: <span id="auto-refresh-last-check">Never</span> · Last automatic refresh: <span id="auto-refresh-last-refresh">Never</span> · <span id="auto-refresh-status">Off</span></span></div>
             <div class="refresh-progress" id="refresh-progress" aria-live="polite">
               <div class="refresh-phase" id="refresh-phase">No Refresh Brain operation started.</div>
               <div class="progress-track"><div class="progress-fill" id="refresh-progress-fill"></div></div>
@@ -601,7 +601,7 @@
       phase = phase || job.phase || "Refreshing Brain";
       document.getElementById("refresh-phase").textContent = phase;
       var total = progress.semantic_cards_total;
-      var done = (progress.cached_embeddings_reused || 0) + (progress.new_embeddings_completed || 0);
+      var done = (progress.cached_embeddings_reused || 0) + (progress.shard_vectors_reused || 0) + (progress.new_embeddings_completed || 0);
       if (progress.generation_state === "reused" && total != null) done = total;
       if (total == null) { total = progress.repository_total; done = progress.repository_current || 0; }
       var percent = total ? Math.min(100, Math.round(done * 100 / total)) : 0;
@@ -612,20 +612,36 @@
       if (progress.semantic_repository_total != null) rows.push("Semantic repositories " + (progress.semantic_repository_current || 0) + " / " + progress.semantic_repository_total);
       if (progress.semantic_cards_total != null) rows.push("Cards " + (progress.semantic_cards_discovered || 0).toLocaleString() + " / " + progress.semantic_cards_total.toLocaleString());
       else if (progress.semantic_cards_discovered != null) rows.push("Cards discovered " + progress.semantic_cards_discovered.toLocaleString() + " · total pending");
-      if (progress.cached_embeddings_reused != null) rows.push("Cached " + progress.cached_embeddings_reused.toLocaleString());
+      if (progress.cached_embeddings_reused != null) rows.push("Cache / intact-shard reuse " + progress.cached_embeddings_reused.toLocaleString());
+      if (progress.shard_vectors_reused != null) rows.push("Recovered old vectors " + progress.shard_vectors_reused.toLocaleString());
       if (progress.new_embeddings_completed != null) rows.push("Embedded " + progress.new_embeddings_completed.toLocaleString());
-      if (progress.remaining_embeddings != null) rows.push("Remaining " + progress.remaining_embeddings.toLocaleString());
+      if (progress.remaining_embeddings_known) rows.push("Remaining model inputs " + (progress.remaining_embeddings || 0).toLocaleString());
+      else if (progress.repository_embeddings_remaining != null) rows.push("Current repo remaining model inputs " + progress.repository_embeddings_remaining.toLocaleString() + " · later repos not checked yet");
       if (progress.embedding_batch_size) rows.push("Current batch " + progress.embedding_batch_size);
       if (progress.embedding_batches_completed != null) rows.push("Embedding batches " + progress.embedding_batches_completed);
       if (progress.semantic_shards_total != null) rows.push("Semantic shards " + (progress.semantic_shards_completed || 0) + " / " + progress.semantic_shards_total);
+      if (progress.semantic_shards_reused != null) rows.push("Shards reused " + progress.semantic_shards_reused + " · rebuilt " + (progress.semantic_shards_rebuilt || 0));
+      var reasons = {checking:"Checking old vectors", unchanged_shard:"Unchanged compatible shard",
+        snapshot_changed:"Source snapshot changed; recompute only changed inputs", inputs_changed:"Semantic inputs changed",
+        no_compatible_prior_shard:"No compatible, valid prior shard", reuse_budget_exhausted:"Old-input recovery budget reached; cache/model fallback",
+        prior_shard_invalid:"Old shard failed validation; cache/model fallback", prior_inputs_unavailable:"Old inputs could not be validated; cache/model fallback",
+        no_matching_prior_inputs:"No identical old model inputs", validated_prior_inputs:"Old model inputs validated; vectors reused",
+        initial_build:"No previous Semantic generation", prior_registration_unavailable:"Prior Atlas Semantic registration could not be validated",
+        input_schema_changed:"Semantic input schema changed", model_contract_changed:"Embedding pack, dimension or backend contract changed",
+        repository_added:"No previous shard for this repository"};
+      if (reasons[progress.semantic_rebuild_reason]) rows.push(reasons[progress.semantic_rebuild_reason]);
+      if (progress.semantic_rebuild_reason !== "unchanged_shard" && reasons[progress.semantic_vector_reuse_reason]) rows.push(reasons[progress.semantic_vector_reuse_reason]);
       if (progress.generation_state === "reused") rows.push("Reused published generation · 0 new embeddings");
-      else if (progress.generation_state === "rebuilt") rows.push("Published rebuilt generation");
+      else if (progress.generation_state === "rebuilt") rows.push(progress.semantic_status === "ready" ? "Atlas Semantic registered and ready" : "Semantic built · awaiting Atlas registration");
       var elapsedMs = progress.elapsed_ms || 0;
       if ((job.status === "pending" || job.status === "running") && job.started_at_ms) elapsedMs = Math.max(elapsedMs, Date.now() - job.started_at_ms);
       rows.push("Elapsed " + elapsed(elapsedMs));
-      if (total && done > 0 && done < total && elapsedMs > 0) {
-        var cardsPerSecond = done / (elapsedMs / 1000);
-        rows.push("Rate " + cardsPerSecond.toFixed(cardsPerSecond < 10 ? 1 : 0) + " cards/s · estimated remaining " + elapsed((total - done) * 1000 / cardsPerSecond));
+      if (job.status === "running" && progress.new_embeddings_completed > 0 && progress.embedding_elapsed_ms > 0 && done < total) {
+        var cardsPerSecond = progress.new_embeddings_completed / (progress.embedding_elapsed_ms / 1000);
+        rows.push("Model rate " + cardsPerSecond.toFixed(1) + " inputs/s");
+        if (progress.remaining_embeddings_known && progress.remaining_embeddings > 0) {
+          rows.push("Estimated remaining embedding time " + elapsed(progress.remaining_embeddings * 1000 / cardsPerSecond) + " · shard writing and registration follow");
+        } else rows.push("Overall ETA pending remaining repository reuse checks");
       }
       document.getElementById("refresh-counts").innerHTML = rows.map(function (row) { return "<span>" + esc(row) + "</span>"; }).join("");
       var error = document.getElementById("refresh-progress-error");
@@ -781,7 +797,7 @@
       var semantic = brain.semantic || {};
       document.getElementById("recovery-guidance").textContent = brain.health === "Healthy" ?
         "No readiness issue detected. Diagnostics and safe storage cleanup remain available." :
-        (brain.reason || "Refresh Brain to build or align the configured source snapshots. If you edited brain.toml, re-read it first.");
+        (brain.reason || (brain.core && brain.core.ready ? "The published generation remains usable. Git freshness is separate from index readiness; refresh publishes newer snapshots without replacing pinned ticket evidence." : "Refresh Brain to build or align the configured source snapshots. If you edited brain.toml, re-read it first."));
       document.getElementById("brain-health").textContent = brain.health || "—";
       document.getElementById("brain-effective").textContent = brain.effective + (brain.reason ? " — " + brain.reason : "");
       document.getElementById("runtime-status").textContent = brain.managed_runtime || "Loopback direct transport enforced.";
@@ -789,8 +805,8 @@
       document.getElementById("semantic-chunks").textContent = (semantic.chunks || 0).toLocaleString();
       document.getElementById("semantic-status").textContent = semantic.aligned ? "Current · " + (semantic.generation || "generation") : (semantic.reason || "Semantic generation is not aligned.");
       document.getElementById("brain-status").innerHTML = [
-        ["Core index", brain.core && brain.core.ready ? "Ready" : "Stale or unavailable"],
-        ["Semantic", semantic.aligned ? "Active and snapshot-aligned" : (semantic.reason || "Not active")],
+        ["Core index", brain.core && brain.core.ready ? "Published generation ready" : "Published index unavailable"],
+        ["Semantic", semantic.aligned ? "Active · aligned to published snapshots" : (semantic.reason || "Not active")],
         ["Embedding pack", brain.capabilities && brain.capabilities.embedding ? "Verified and compatible" : "Unavailable"],
         ["Reranker pack", brain.capabilities && brain.capabilities.reranker ? "Verified and compatible" : "Unavailable"]
       ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");

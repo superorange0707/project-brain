@@ -1,3 +1,56 @@
+# Project Brain v1.0.13 — Preserve Semantic Work Across Refreshes
+
+This stable hotfix prevents avoidable re-embedding during incremental refresh
+when the disposable embedding cache has evicted computations that still exist
+in a compatible, published Semantic shard.
+
+## What changed
+
+- Unchanged compatible repositories retain their validated shards. Changed
+  repositories first use the embedding cache, then recover identical bounded
+  model inputs' vectors from the registered parent shard. Only new, changed or
+  unverifiable inputs need model work; a changed file's untouched methods can
+  reuse their vectors even when their source chunk IDs change.
+- Reuse validates pack/schema identities, immutable source and Atlas card
+  identities, sealed shard membership, vector dimensions and artifact hashes.
+  A missing or stale compatibility projection cannot override the registered
+  parent. A damaged shard does not discard other repositories' valid work.
+- Recovery is bounded and fails explicitly into the existing managed build.
+  Failed publication leaves the old registered generation authoritative;
+  ticket pins and reachability-based retention remain unchanged.
+- UI/CLI progress distinguishes whole-shard/cache reuse, recovered old vectors
+  and new embeddings, with safe reuse/rebuild reason codes. Embedding ETA does
+  not treat unchecked repositories as inevitable model work. Git freshness
+  probe failures are reported separately from published index readiness and
+  retried with backoff.
+
+## Upgrade safely
+
+**Let any running refresh finish before upgrading.** Stop the old UI process
+after its job completes. On macOS, run `brew update` then
+`brew upgrade project-brain`; `brain --version` must report `brain 1.0.13`.
+Windows users can install the official ZIP using the tagged repository's
+installer with `-Version 1.0.13` or `-ArchivePath` and its published checksums.
+
+No Atlas/Semantic schema migration, cache deletion, model reinstall,
+configuration reset or ticket reset is required. Compatible completed v1.0.7
+and v1.0.12 state remains reusable. A refresh is not required solely because
+the executable upgraded; the next normal refresh uses the corrected reuse path.
+Agent Kit v4 / Investigation Protocol v5 are unchanged.
+
+Public regressions use real native USearch shards with counted deterministic
+embedding inputs, including cache eviction, corruption, rollback, pinned
+generations and 10/50/100-repository fixtures. They verify avoided model work,
+not a five-minute cold-build promise for private enterprise workspaces.
+Field latency and private-ticket accuracy remain local measurements.
+
+The normal five-platform standalone archives, wheel, sdist, installers and
+`SHA256SUMS.txt` are produced from the tagged source with build provenance.
+Model weights are not bundled. Target repositories remain read-only: no source
+editing, target test execution, hosted inference or automatic source upload.
+
+---
+
 # Project Brain v1.0.12 — More Reliable Evidence and Investigation Flows
 
 This stable patch improves query-time investigation without changing Atlas,

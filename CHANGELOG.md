@@ -2,6 +2,22 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.13] - 2026-09-07
+
+- Recover compatible exact-input vectors from registered parent Semantic shards
+  after embedding-cache eviction. Unchanged repositories keep their shards;
+  changed repositories compute only new/changed or unverifiable model inputs.
+- Validate immutable source/card membership, pack and schema identity, native
+  vector dimensions and shard hashes before reuse. Preserve old ticket-pinned
+  generations and use explicit bounded fallback on corrupt/unavailable data.
+- Prefer the registered Semantic parent over stale compatibility projections;
+  retain valid sibling shards when one artifact is missing.
+- Expose shard reuse, recovered vectors, actual model work and rebuild reasons
+  in refresh progress. Separate Git freshness uncertainty from index readiness;
+  avoid presenting unchecked repositories as known embedding time remaining.
+- No schema migration, model reinstall, cache reset or mandatory refresh solely
+  for this upgrade. Finish an active refresh before replacing the executable.
+
 ## [1.0.12] - 2026-09-06
 
 - Read explicit pinned-file requests before optional discovery and model work
@@ -735,6 +751,8 @@ first-use lock race before GitHub Release publication.
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.13]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.13
+[1.0.12]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.12
 [1.0.11]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.11
 [1.0.9]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.9
 [1.0.8]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.8

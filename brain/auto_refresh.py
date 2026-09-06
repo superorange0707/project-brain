@@ -190,7 +190,10 @@ def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
                 settings.repositories,
             ))
         if any(failed for _, failed in probes):
-            return FreshnessDecision.action_required("Git freshness check requires attention.", check_failed=True)
+            return FreshnessDecision("unverified", (
+                "Git freshness is unverified; automatic checks will retry. Published index readiness is unchanged. "
+                "Check Git connectivity/credentials if this persists; no index reset is required.",
+            ), check_failed=True)
         if any(drift for drift, _ in probes):
             reasons.add("Selected source snapshots changed.")
         return FreshnessDecision.refresh(*reasons) if reasons else FreshnessDecision.ready()
@@ -394,11 +397,11 @@ class AutoRefreshService:
                         self._pending_reason = "Repository freshness changes were coalesced."
                         self._refresh_due = now + self._debounce
                         self._status = "debouncing" if self._debounce else "pending"
-                elif decision.kind == "action_required":
+                elif decision.kind in {"action_required", "unverified"}:
                     self._pending = False
                     self._pending_signature = ()
-                    self._pending_reason = "Action Required: " + (decision.reasons[0] if decision.reasons else "freshness check paused.")
-                    self._status = "action_required"
+                    self._pending_reason = ("Action Required: " if decision.kind == "action_required" else "") + (decision.reasons[0] if decision.reasons else "freshness check paused.")
+                    self._status = decision.kind
                     if decision.check_failed:
                         self._failures += 1
                         delay = min(self._max_backoff, self._backoff * (2 ** (self._failures - 1)))

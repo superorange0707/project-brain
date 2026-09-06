@@ -1164,6 +1164,8 @@ class SemanticRobustnessTest(unittest.TestCase):
             "semantic_cards_discovered", "semantic_cards_total", "cached_embeddings_reused", "new_embeddings_completed",
             "remaining_embeddings", "embedding_batch_size", "embedding_batches_completed", "semantic_shards_completed",
             "semantic_shards_total", "semantic_shards_reused", "semantic_shards_rebuilt", "generation_state",
+            "shard_vectors_reused", "embedding_elapsed_ms", "remaining_embeddings_known", "repository_embeddings_remaining",
+            "semantic_rebuild_reason", "semantic_vector_reuse_reason",
         }
         self.assertTrue(all(set(event) <= safe_keys for event in events))
         self.assertNotIn("private_progress_fixture", json.dumps(events))

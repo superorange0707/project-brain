@@ -33,6 +33,25 @@ from brain.semantic import (
 
 
 class SemanticAtlasAlignmentTests(unittest.TestCase):
+    def test_git_freshness_never_invalidates_ready_published_components(self) -> None:
+        available = {"lexical_index": True, "embedding": True, "reranker": True}
+        semantic = {"aligned": True, "stale": False, "reason": None}
+        for source, current, health, freshness_state in (
+            (None, False, "Freshness unverified", "unverified"),
+            ("new-sha", False, "Refresh available", "refresh_available"),
+            ("old-sha", True, "Healthy", "current"),
+        ):
+            with self.subTest(health=health), mock.patch("brain.ops.current_edition", return_value="precision"), \
+                    mock.patch("brain.ops.capabilities", return_value=available), \
+                    mock.patch("brain.ops.semantic_status", return_value=semantic), \
+                    mock.patch("brain.ops.model_status", return_value={}), \
+                    mock.patch("brain.ops.freshness", return_value={"repositories": [{"source_sha": source, "current": current}]}):
+                status = dashboard_status(self.settings)
+                self.assertTrue(status["core"]["ready"])
+                self.assertEqual(health, status["health"])
+                self.assertEqual(freshness_state, status["core"]["source_freshness"])
+                self.assertEqual("Precision active", status["effective"])
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

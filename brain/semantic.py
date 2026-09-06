@@ -14,7 +14,7 @@ import time
 from collections import OrderedDict
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 from urllib.error import URLError
@@ -385,6 +385,20 @@ def _embedding_failure(
     )
 
 
+def _embedding_inputs(
+    chunks: list[Chunk], *, pack_id: str, pack_compatibility_identity: str,
+    dimension: int, document_instruction: str, input_suffix: str,
+) -> tuple[list[str], list[str]]:
+    """One identity for cached and shard-backed vectors: the exact model input."""
+    cards = [_bounded_semantic_card(
+        chunk.card, document_instruction=document_instruction, input_suffix=input_suffix, dimension=dimension,
+    ) for chunk in chunks]
+    keys = [hashlib.sha256(
+        f"{pack_id}\0{pack_compatibility_identity}\0{dimension}\0{SEMANTIC_EMBEDDING_INPUT_VERSION}\0{document_instruction}\0{card}\0{input_suffix}".encode("utf-8")
+    ).hexdigest() for card in cards]
+    return cards, keys
+
+
 def _cache_vectors(
     settings: Settings,
     pack_id: str,
@@ -400,6 +414,7 @@ def _cache_vectors(
     pack_compatibility_identity: str | None = None,
     write_capacity: list[int] | None = None,
     cache_usage: list[tuple[int, int]] | None = None,
+    reuse_vectors: Callable[[list[str]], dict[str, list[float]]] | None = None,
 ) -> list[list[float]]:
     """Reuse vectors by stable chunk identity without persisting query/source text."""
     from .catalog import connect
@@ -409,26 +424,20 @@ def _cache_vectors(
 
         if workspace_lock_mode(settings) != "exclusive":
             cache_usage = None
-    cards = [
-        _bounded_semantic_card(
-            chunk.card, document_instruction=document_instruction, input_suffix=input_suffix, dimension=dimension
-        )
-        for chunk in chunks
-    ]
     # Cache the exact, bounded document sent to the model rather than only the
     # source chunk identity.  This prevents a pre-bound card or changed pack
     # instruction from being reused as if it were current evidence.
     pack_compatibility_identity = pack_compatibility_identity or _injected_pack_identity(pack_id)
-    keys = [
-        hashlib.sha256(
-            f"{pack_id}\0{pack_compatibility_identity}\0{dimension}\0{SEMANTIC_EMBEDDING_INPUT_VERSION}\0{document_instruction}\0{card}\0{input_suffix}".encode("utf-8")
-        ).hexdigest()
-        for card in cards
-    ]
+    cards, keys = _embedding_inputs(
+        chunks, pack_id=pack_id, pack_compatibility_identity=pack_compatibility_identity,
+        dimension=dimension, document_instruction=document_instruction, input_suffix=input_suffix,
+    )
     vectors: list[list[float] | None] = [None] * len(chunks)
     cached = 0
     completed = 0
     completed_batches = 0
+    shard_reused = 0
+    embedding_ms = 0
 
     def report(*, batch: int = 0, remaining: int | None = None) -> None:
         if progress is not None:
@@ -440,6 +449,8 @@ def _cache_vectors(
                 "remaining_embeddings": remaining,
                 "embedding_batch_size": batch,
                 "embedding_batches_completed": completed_batches,
+                "shard_vectors_reused": shard_reused,
+                "embedding_elapsed_ms": embedding_ms,
             })
 
     connection = connect(settings)
@@ -478,6 +489,20 @@ def _cache_vectors(
                     pass
                 invalid.append((key,))
             missing.append(index)
+        # The acceleration cache is disposable; published shards are not. Read
+        # their validated vectors only on a cache miss, without filling/thrashing
+        # the same bounded cache again or changing any old-generation artifact.
+        if missing and reuse_vectors is not None:
+            recovered = reuse_vectors(list(dict.fromkeys(keys[index] for index in missing)))
+            still_missing = []
+            for index in missing:
+                vector = valid_embedding_vector(recovered.get(keys[index]), dimension=dimension)
+                if vector is None:
+                    still_missing.append(index)
+                else:
+                    vectors[index] = vector
+                    shard_reused += 1
+            missing = still_missing
         if touched:
             connection.executemany("UPDATE embedding_cache SET last_used_at=? WHERE cache_key=?", touched)
         if invalid:
@@ -501,6 +526,7 @@ def _cache_vectors(
                 while pending:
                     current = pending.pop(0)
                     report(batch=len(current), remaining=len(missing) - completed)
+                    batch_started = time.perf_counter()
                     try:
                         computed = embed([cards[index] for index in current])
                     except Exception as error:
@@ -516,6 +542,8 @@ def _cache_vectors(
                         middle = len(current) // 2
                         pending[0:0] = [current[:middle], current[middle:]]
                         continue
+                    finally:
+                        embedding_ms += max(1, round((time.perf_counter() - batch_started) * 1000))
                     normalized_batch = [
                         valid_embedding_vector(vector, dimension=dimension) for vector in computed
                     ]
@@ -574,6 +602,7 @@ def _chunk_groups(
     manifest: dict[tuple[str, str], str] | None = None,
     source_projection: tuple[int, int, str] | None = None,
     legacy_walk_budget: object | None = None,
+    max_seconds: float = MAX_SEMANTIC_SOURCE_SCAN_SECONDS,
 ) -> list[Chunk]:
     chunks: list[Chunk] = []
     metadata_bytes = 0
@@ -599,7 +628,7 @@ def _chunk_groups(
             repo.name,
             snapshot,
             source_projection,
-            max_seconds=MAX_SEMANTIC_SOURCE_SCAN_SECONDS,
+            max_seconds=max_seconds,
         ):
             raw = content.encode("utf-8")
             if _excluded(Path(relative), raw):
@@ -677,6 +706,138 @@ def _entries(chunks: list[Chunk]) -> list[dict[str, object]]:
          "kind": chunk.kind, "symbol": chunk.symbol, "target_id": chunk.target_id}
         for chunk in chunks
     ]
+
+
+def _atlas_chunk(repo: str, card: dict[str, object]) -> Chunk:
+    level = str(card.get("level") or "entity")
+    content = str(card.get("content") or "")
+    chunk_id = str(card.get("card_id") or hashlib.sha256(content.encode()).hexdigest())
+    metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
+    start = max(1, int(metadata.get("line_start") or 1))
+    end = max(start, int(metadata.get("line_end") or start))
+    target = str(card.get("target_id") or level)
+    path = str(card.get("path") or "")
+    text = "\n".join([
+        f"Repository: {repo}", f"Path: {path}", "Language: Text",
+        f"Kind: atlas_{level}_card", f"Symbol: {target}", "Identifiers: atlas", "Code:", content,
+    ])
+    return Chunk(chunk_id, str(card.get("content_hash") or chunk_id), path, start, end,
+                 f"atlas_{level}_card", target, text, target or None)
+
+
+def _reuse_shard_vectors(
+    settings: Settings, repo: Repository, shard: dict[str, object], generation: Any,
+    requested: list[str], *, backend: tuple[Any, Any], pack_id: str,
+    pack_compatibility_identity: str, dimension: int, document_instruction: str,
+    input_suffix: str, budget: dict[str, float],
+) -> tuple[dict[str, list[float]], str]:
+    """Recover evicted computations from the registered parent, including v1.0.7.
+
+    No new schema/receipt is needed: rebuild exact inputs from retained lexical
+    blobs and content-addressed Atlas rows, match the sealed shard entries, then
+    fetch only matching keys. Work is repo-scoped and bounded across the build.
+    This is build acceleration, never permission to substitute serving evidence.
+    """
+    from .atlas import _card
+    from .catalog import connect
+    from .index import indexed_snapshot_source_projection
+
+    started = time.monotonic()
+    index = None
+    try:
+        if budget["seconds"] <= 0:
+            return {}, "reuse_budget_exhausted"
+        if not _valid_shard_artifact(shard, root=_shard_root(settings)):
+            return {}, "prior_shard_invalid"
+        entries = shard["entries"]
+        if len(entries) > MAX_SEMANTIC_CHUNKS_PER_REPOSITORY:
+            return {}, "reuse_budget_exhausted"
+        snapshot = str(shard["snapshot"])
+        if generation.snapshots.get(repo.name) != snapshot:
+            return {}, "prior_inputs_unavailable"
+        projection = indexed_snapshot_source_projection(
+            settings, {repo.name: snapshot}, max_repositories=1,
+            max_items_per_repository=MAX_SEMANTIC_SOURCE_FILES_PER_REPOSITORY,
+            max_items=int(budget["items"]), max_bytes_per_repository=MAX_SEMANTIC_SOURCE_BYTES_PER_REPOSITORY,
+            max_bytes=int(budget["bytes"]), max_file_bytes=3_000_000,
+            max_seconds=budget["seconds"],
+        )[repo.name]
+        budget["items"] -= projection[0]
+        budget["bytes"] -= projection[1]
+        chunks = _chunk_groups(replace(repo, source_sha=snapshot), settings=settings, source_projection=projection,
+                               max_seconds=max(0, budget["seconds"] - (time.monotonic() - started)))
+        card_ids = [str(entry["chunk_id"]) for entry in entries if str(entry.get("kind") or "").startswith("atlas_")]
+        metadata_bytes = sum(len(chunk.card.encode("utf-8")) for chunk in chunks)
+        with closing(connect(settings)) as connection:
+            connection.set_progress_handler(lambda: int(time.monotonic() - started >= budget["seconds"]), 10_000)
+            for offset in range(0, len(card_ids), SEMANTIC_CACHE_LOOKUP_BATCH):
+                selected = card_ids[offset:offset + SEMANTIC_CACHE_LOOKUP_BATCH]
+                slots = ",".join("?" for _ in selected)
+                rows = connection.execute(
+                    "SELECT c.card_id,c.level,c.target_id,c.repo,c.module_id,c.entity_id,c.path,c.content,"
+                    "c.content_hash,c.metadata_json FROM atlas_cards c JOIN generation_cards g ON g.card_id=c.card_id "
+                    f"WHERE g.generation=? AND g.snapshot_sha=? AND c.repo=? AND c.card_id IN ({slots}) "
+                    "AND length(CAST(c.content AS BLOB)) <= 48000 AND length(CAST(c.metadata_json AS BLOB)) <= 65536 "
+                    "AND length(CAST(c.card_id AS BLOB))+length(CAST(c.level AS BLOB))+length(CAST(c.target_id AS BLOB)) "
+                    "+length(CAST(c.repo AS BLOB))+length(CAST(COALESCE(c.module_id,'') AS BLOB)) "
+                    "+length(CAST(COALESCE(c.entity_id,'') AS BLOB))+length(CAST(COALESCE(c.path,'') AS BLOB)) "
+                    "+length(CAST(c.content_hash AS BLOB)) <= 65536",
+                    [generation.generation, snapshot, repo.name, *selected],
+                )
+                for row in rows:
+                    card = dict(zip(("card_id", "level", "target_id", "repo", "module_id", "entity_id", "path", "content", "content_hash", "metadata"), row))
+                    card["metadata"] = json.loads(card["metadata"])
+                    canonical = _card(card["level"], card["target_id"], card["repo"], card["content"],
+                                      module_id=card["module_id"], entity_id=card["entity_id"],
+                                      path=card["path"], metadata=card["metadata"])
+                    if card != canonical:
+                        continue
+                    chunk = _atlas_chunk(repo.name, card)
+                    metadata_bytes += len(chunk.card.encode("utf-8"))
+                    if len(chunks) >= MAX_SEMANTIC_CHUNKS_PER_REPOSITORY or metadata_bytes > MAX_SEMANTIC_METADATA_BYTES_PER_REPOSITORY:
+                        return {}, "reuse_budget_exhausted"
+                    chunks.append(chunk)
+        if time.monotonic() - started >= budget["seconds"]:
+            return {}, "reuse_budget_exhausted"
+        # Entry order may change; IDs alone are insufficient (source chunk IDs
+        # include the whole file blob, while exact unchanged method inputs don't).
+        by_entry = {json.dumps(entry, sort_keys=True): position for position, entry in enumerate(entries)}
+        _, keys = _embedding_inputs(chunks, pack_id=pack_id, pack_compatibility_identity=pack_compatibility_identity,
+                                    dimension=dimension, document_instruction=document_instruction, input_suffix=input_suffix)
+        wanted = set(requested)
+        positions = {}
+        for entry, key in zip(_entries(chunks), keys, strict=True):
+            position = by_entry.get(json.dumps(entry, sort_keys=True))
+            if key in wanted and position is not None:
+                positions.setdefault(key, position)
+        if not positions:
+            return {}, "no_matching_prior_inputs"
+        Index, numpy = backend
+        index = Index.restore(str(shard["path"]), view=True)
+        if index is None or index.ndim != dimension or len(index) != len(entries):
+            return {}, "prior_shard_invalid"
+        recovered = {}
+        keys = list(positions)
+        for offset in range(0, len(keys), SEMANTIC_CACHE_LOOKUP_BATCH):
+            if time.monotonic() - started >= budget["seconds"]:
+                return recovered, "reuse_budget_exhausted"
+            selected = keys[offset:offset + SEMANTIC_CACHE_LOOKUP_BATCH]
+            values = index.get(numpy.asarray([positions[key] for key in selected], dtype=numpy.uint64), dtype="f32")
+            for key, value in zip(selected, values, strict=True):
+                vector = valid_embedding_vector(value.tolist() if value is not None else None, dimension=dimension)
+                if vector is not None:
+                    recovered[key] = vector
+        return recovered, "validated_prior_inputs"
+    except sqlite3.DataError:
+        return {}, "reuse_budget_exhausted"
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, RuntimeError):
+        # Acceleration failure does not invalidate otherwise valid current input.
+        # The managed cache/model pipeline still has to build and validate it.
+        return {}, "prior_inputs_unavailable"
+    finally:
+        if index is not None:
+            index.reset()
+        budget["seconds"] -= time.monotonic() - started
 
 
 def _published_state(settings: Settings) -> dict[str, object] | None:
@@ -784,8 +945,13 @@ def semantic_state_compatibility(
     component: dict[str, object] | None = None,
     require_active_pack: bool = True,
     verify_artifacts: bool = True,
+    allow_missing_shards: bool = False,
 ) -> tuple[bool, str | None]:
-    """Validate one published Semantic artifact against its Atlas contract."""
+    """Validate one published Semantic artifact against its Atlas contract.
+
+    allow_missing_shards is reserved for build recovery of individual intact
+    shards; it must never authorize serving or component registration.
+    """
     if not state:
         return False, "Semantic generation has not been built."
     if state.get("stale"):
@@ -854,7 +1020,7 @@ def semantic_state_compatibility(
             if not repo or snapshots.get(repo) != snapshot or key in seen:
                 return False, "Semantic shard manifest is invalid."
             seen.add(key)
-            if not _valid_shard_manifest_entry(shard, root=shard_root):
+            if not allow_missing_shards and not _valid_shard_manifest_entry(shard, root=shard_root):
                 return False, "Semantic shard manifest is invalid."
             if verify_artifacts and not _valid_shard_artifact(shard, root=shard_root):
                 return False, "Semantic shard manifest is invalid."
@@ -1256,28 +1422,7 @@ def build_semantic_index(
             for card in cards_by_repo[repo.name]:
                 if len(chunks) >= MAX_SEMANTIC_CHUNKS_PER_REPOSITORY:
                     raise SemanticEmbeddingError("Semantic repository exceeds its chunk limit")
-                level = str(card.get("level") or "entity")
-                content = str(card.get("content") or "")
-                chunk_id = str(card.get("card_id") or hashlib.sha256(content.encode()).hexdigest())
-                metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
-                line_start = max(1, int(metadata.get("line_start") or 1))
-                line_end = max(line_start, int(metadata.get("line_end") or line_start))
-                target_id = str(card.get("target_id") or level)
-                semantic_card = "\n".join([
-                    f"Repository: {repo.name}",
-                    f"Path: {str(card.get('path') or '')}",
-                    "Language: Text",
-                    f"Kind: atlas_{level}_card",
-                    f"Symbol: {target_id}",
-                    "Identifiers: atlas",
-                    "Code:",
-                    content,
-                ])
-                chunks.append(Chunk(
-                    chunk_id, str(card.get("content_hash") or chunk_id), str(card.get("path") or ""), line_start, line_end,
-                    f"atlas_{level}_card", target_id, semantic_card,
-                    target_id or None,
-                ))
+                chunks.append(_atlas_chunk(repo.name, card))
             repo_metadata_bytes = sum(len(chunk.card.encode("utf-8")) for chunk in chunks)
             if repo_metadata_bytes > MAX_SEMANTIC_METADATA_BYTES_PER_REPOSITORY:
                 raise SemanticEmbeddingError("Semantic repository exceeds its metadata byte limit")
@@ -1295,7 +1440,15 @@ def build_semantic_index(
                 semantic_cards_discovered=card_total,
             )
         emit("semantic_manifest", semantic_cards_total=card_total)
-        published = _published_state(settings)
+        from .catalog import current_generation_ref
+
+        parent = current_generation_ref(settings)
+        # Once Atlas has registered Semantic, its immutable component is the
+        # authority even if the compatibility projection is missing/stale or a
+        # previous attempted refresh wrote it before Atlas publication failed.
+        registered_parent = parent is not None and parent.component("semantic").get("status") == "ready"
+        published = (_serving_state(settings, parent, require_active_pack=False, for_rebuild=True)
+                     if registered_parent else _published_state(settings))
         if not dimension and published and published.get("pack_id") == pack_id:
             try:
                 dimension = int(published.get("dimension") or 0)
@@ -1305,6 +1458,13 @@ def build_semantic_index(
             settings, published, groups, backend=backend_name, pack_id=pack_id,
             pack_compatibility_identity=pack_compatibility_identity, dimension=dimension,
         ):
+            if manifest is not None:
+                _check_pack_integrity(manifest)
+            if registered_parent and _published_state(settings) != published:
+                from .ops import ensure_write_capacity
+
+                ensure_write_capacity(settings, len((json.dumps(published, indent=2) + "\n").encode("utf-8")))
+                _atomic_state_write(_state_path(settings), published)
             shard_total = sum(bool(chunks) for _, _, chunks in groups)
             emit(
                 "semantic_reuse",
@@ -1338,24 +1498,46 @@ def build_semantic_index(
         cached_total = 0
         embedded_total = 0
         batches_total = 0
+        shard_vectors_total = 0
+        embedding_ms_total = 0
+        reuse_budget = {"items": MAX_SEMANTIC_SOURCE_FILES_TOTAL, "bytes": MAX_SEMANTIC_SOURCE_BYTES_TOTAL,
+                        "seconds": MAX_SEMANTIC_SOURCE_SCAN_SECONDS}
         from .ops import ensure_write_capacity, remaining_write_capacity
 
         semantic_cache_capacity = [remaining_write_capacity(settings)]
         # Only the exclusive bulk build shares accounting. Standalone callers
         # measure their own cache; this is not persisted or used for serving.
         semantic_cache_usage: list[tuple[int, int]] = []
+        prior_compatible = _state_is_compatible(
+            published, backend=backend_name, pack_id=pack_id,
+            pack_compatibility_identity=pack_compatibility_identity, dimension=dimension,
+        )
+        if published is None:
+            missing_reason = "prior_registration_unavailable" if registered_parent else "initial_build"
+        elif any(published.get(key) != value for key, value in (
+            ("chunk_schema_version", CHUNK_SCHEMA_VERSION), ("card_version", CARD_VERSION),
+            ("embedding_input_version", SEMANTIC_EMBEDDING_INPUT_VERSION),
+            ("atlas_card_version", ATLAS_CARD_VERSION), ("shard_manifest_version", SEMANTIC_SHARD_MANIFEST_VERSION),
+        )):
+            missing_reason = "input_schema_changed"
+        elif any(published.get(key) != value for key, value in (
+            ("pack_id", pack_id), ("pack_compatibility_identity", pack_compatibility_identity),
+            ("dimension", dimension), ("backend", backend_name),
+        )):
+            missing_reason = "model_contract_changed"
+        else:
+            missing_reason = "no_compatible_prior_shard"
         prior_shards = {
             (str(shard.get("repo") or ""), str(shard.get("snapshot") or "")): shard
-            for shard in (published.get("shards") or [] if _state_is_compatible(
-                published, backend=backend_name, pack_id=pack_id,
-                pack_compatibility_identity=pack_compatibility_identity, dimension=dimension,
-            ) else [])
+            for shard in (published.get("shards") or [] if prior_compatible else [])
             if (
                 isinstance(shard, dict)
                 and _valid_shard_manifest_entry(shard, root=_shard_root(settings).resolve())
                 and _valid_shard_artifact(shard, root=_shard_root(settings))
             )
         }
+        prior_by_repo = {str(shard["repo"]): shard for shard in prior_shards.values()}
+        prior_repos = {str(shard.get("repo") or "") for shard in (published.get("shards") or [] if prior_compatible else []) if isinstance(shard, dict)}
         for position, (repo, snapshot, chunks) in enumerate(groups, start=1):
             if not chunks:
                 continue
@@ -1376,6 +1558,8 @@ def build_semantic_index(
                     semantic_shards_total=shard_total,
                     semantic_shards_reused=reused_shards,
                     semantic_shards_rebuilt=rebuilt_shards,
+                    semantic_rebuild_reason="unchanged_shard",
+                    embedding_batch_size=0,
                 )
                 continue
             if not dimension:
@@ -1383,12 +1567,34 @@ def build_semantic_index(
                     embed, chunks[0].card, document_instruction=document_instruction, input_suffix=input_suffix,
                     restart=runtime.shutdown if runtime is not None else None,
                 )
-            repo_progress = {"cached": 0, "embedded": 0, "batches": 0}
+            reusable_shard = prior_by_repo.get(repo.name) if registered_parent else None
+            reason = ("snapshot_changed" if reusable_shard and reusable_shard["snapshot"] != snapshot
+                      else "inputs_changed" if reusable_shard
+                      else "prior_registration_unavailable" if repo.name in prior_by_repo
+                      else "prior_shard_invalid" if prior_compatible and repo.name in prior_repos
+                      else "repository_added" if prior_compatible else missing_reason)
+            emit("semantic_embedding", semantic_repository_current=position, semantic_rebuild_reason=reason,
+                 semantic_vector_reuse_reason="checking", remaining_embeddings_known=0)
+            repo_progress = {"cached": 0, "embedded": 0, "batches": 0, "shard": 0, "ms": 0}
+
+            def reuse_vectors(keys: list[str]) -> dict[str, list[float]]:
+                if reusable_shard is None or backend is None:
+                    emit("semantic_embedding", semantic_vector_reuse_reason=reason)
+                    return {}
+                values, reuse_reason = _reuse_shard_vectors(
+                    settings, repo, reusable_shard, parent, keys, backend=backend, pack_id=pack_id,
+                    pack_compatibility_identity=pack_compatibility_identity, dimension=dimension,
+                    document_instruction=document_instruction, input_suffix=input_suffix, budget=reuse_budget,
+                )
+                emit("semantic_embedding", semantic_vector_reuse_reason=reuse_reason)
+                return values
 
             def cache_progress(details: dict[str, object]) -> None:
                 repo_progress["cached"] = int(details.get("cached_embeddings_reused") or 0)
                 repo_progress["embedded"] = int(details.get("new_embeddings_completed") or 0)
                 repo_progress["batches"] = int(details.get("embedding_batches_completed") or 0)
+                repo_progress["shard"] = int(details.get("shard_vectors_reused") or 0)
+                repo_progress["ms"] = int(details.get("embedding_elapsed_ms") or 0)
                 values: dict[str, object] = {
                     "semantic_repository_current": position,
                     "semantic_repository_total": semantic_repo_total,
@@ -1398,6 +1604,10 @@ def build_semantic_index(
                     "new_embeddings_completed": embedded_total + repo_progress["embedded"],
                     "embedding_batch_size": int(details.get("embedding_batch_size") or 0),
                     "embedding_batches_completed": batches_total + repo_progress["batches"],
+                    "shard_vectors_reused": shard_vectors_total + repo_progress["shard"],
+                    "embedding_elapsed_ms": embedding_ms_total + repo_progress["ms"],
+                    "repository_embeddings_remaining": int(details.get("remaining_embeddings") or 0),
+                    "remaining_embeddings_known": int(position == last_semantic_position),
                 }
                 # The cache lookup is intentionally performed by the real per-repo
                 # indexing loop. The exact global remainder becomes known once the
@@ -1414,10 +1624,13 @@ def build_semantic_index(
                 pack_compatibility_identity=pack_compatibility_identity,
                 write_capacity=semantic_cache_capacity,
                 cache_usage=semantic_cache_usage,
+                reuse_vectors=reuse_vectors,
             )
             cached_total += repo_progress["cached"]
             embedded_total += repo_progress["embedded"]
             batches_total += repo_progress["batches"]
+            shard_vectors_total += repo_progress["shard"]
+            embedding_ms_total += repo_progress["ms"]
             if backend is None:
                 all_mock_entries.extend([{**entry, "repo": repo.name, "snapshot": snapshot, "vector": vector} for entry, vector in zip(entries, repo_vectors, strict=True)])
             else:
@@ -1472,6 +1685,7 @@ def build_semantic_index(
                 semantic_shards_total=shard_total,
                 semantic_shards_reused=reused_shards,
                 semantic_shards_rebuilt=rebuilt_shards,
+                embedding_batch_size=0,
             )
 
         state = {
@@ -1509,6 +1723,11 @@ def build_semantic_index(
             new_embeddings_completed=embedded_total,
             semantic_shards_reused=reused_shards,
             semantic_shards_rebuilt=rebuilt_shards,
+            shard_vectors_reused=shard_vectors_total,
+            embedding_elapsed_ms=embedding_ms_total,
+            remaining_embeddings=0,
+            remaining_embeddings_known=1,
+            embedding_batch_size=0,
             generation_state="rebuilt",
         )
         return _state_result(state)
@@ -1629,6 +1848,7 @@ def _serving_state(
     generation: Any | None,
     *,
     require_active_pack: bool = True,
+    for_rebuild: bool = False,
 ) -> dict[str, object] | None:
     if generation is None:
         if getattr(settings, "atlas_generation_mode", "current") == "legacy_source_pin":
@@ -1642,7 +1862,7 @@ def _serving_state(
         cache_key = (
             str(path.resolve()), stat.st_mtime_ns, stat.st_size, "legacy", tuple(sorted(snapshots.items())),
         )
-        if cache_key in _SERVING_STATE_CACHE:
+        if not for_rebuild and cache_key in _SERVING_STATE_CACHE:
             return _SERVING_STATE_CACHE[cache_key]
         value = _published_state(settings)
         valid, _ = semantic_state_compatibility(
@@ -1670,7 +1890,7 @@ def _serving_state(
             stat.st_size, str(generation.identity),
             str(component.get("content_hash") or ""),
         )
-        if cache_key in _SERVING_STATE_CACHE:
+        if not for_rebuild and cache_key in _SERVING_STATE_CACHE:
             return _SERVING_STATE_CACHE[cache_key]
         value = json.loads(read_managed_text(
             generation_root(settings), path, max_bytes=MAX_SEMANTIC_STATE_BYTES,
@@ -1684,11 +1904,13 @@ def _serving_state(
             component=component,
             require_active_pack=require_active_pack,
             verify_artifacts=False,
+            allow_missing_shards=for_rebuild,
         )
         if valid:
-            if len(_SERVING_STATE_CACHE) >= 64:
-                _SERVING_STATE_CACHE.clear()
-            _SERVING_STATE_CACHE[cache_key] = value
+            if not for_rebuild:
+                if len(_SERVING_STATE_CACHE) >= 64:
+                    _SERVING_STATE_CACHE.clear()
+                _SERVING_STATE_CACHE[cache_key] = value
             return value
         return None
     except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):

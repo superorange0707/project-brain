@@ -13,6 +13,31 @@ paths. It records only claims supported by local/public-synthetic verification.
 coverage. `DEFERRED TO TARGET MACHINE` and `DEFERRED TO PRIVATE LOCAL DATA` are
 intentional local-only validation steps, not engineering blockers.
 
+## 2026-09-07 v1.0.13 incremental Semantic refresh hotfix
+
+The confirmed defect was reuse loss after disposable embedding-cache eviction:
+changed repositories rebuilt vectors even when identical bounded model inputs
+still existed in their published shards. The fix recovers those vectors from
+the registered parent using retained lexical source and sealed Atlas cards.
+No new store, schema, model contract or serving authority is introduced.
+
+The native USearch fixture with two changed inputs required 22 model inputs
+before the fix after cache eviction (20 were unchanged); the fixed path needs
+only the two changed inputs. Compatible no-op refresh requires no chunking or
+embedding. Other regressions cover stale projections, changed pack identity,
+missing/corrupt shards, exhausted recovery budgets, poisoned card rows,
+publication rollback, old/new ticket pins and reachability GC. At 10/50/100
+repositories, changing one repository restores only that repository's prior
+native shard; the other repositories reuse whole shards.
+
+The reviewed implementation passed all four local Python 3.11/3.12/3.13/3.14
+full suites with ResourceWarning errors enabled: each discovered 497 tests,
+492 passed and five native-Windows-only cases were skipped on macOS. Source
+compilation passed on every interpreter. Native Windows, official model-pack
+readiness, tagged artifacts, parity and Homebrew remain enforced by the normal
+release workflow. These are synthetic correctness/work-count measurements,
+not a claim about a private 193-minute build's new wall-clock duration.
+
 ## 2026-09-06 v1.0.12 investigation optimization
 
 The patch prioritizes explicit pinned-file reads ahead of optional model work,
