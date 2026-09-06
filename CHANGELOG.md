@@ -2,6 +2,23 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.12] - 2026-09-06
+
+- Read explicit pinned-file requests before optional discovery and model work
+  can consume the query deadline. Deduplicate file operations and retain the
+  compiled operation budget; account for direct reads in hydration timings.
+- Progressive widening searches only the additional unscoped repositories;
+  explicitly scoped history, path and symbol operations are not repeated.
+- Batch execution-flow discovery and canonical edge/entity validation by depth,
+  retaining per-seed branch limits, deterministic ordering and the SQL budget.
+  Later anchored entries no longer lose their entire traversal budget to
+  repeated validation of earlier entries.
+- Keep canonical unresolved calls, such as external logging calls, as candidate
+  leaves instead of discarding the verified internal flow. Never traverse or
+  promote an unresolved target; corrupt graph identities still fail closed.
+- These query-time changes require no Atlas/Semantic schema migration, model
+  reinstall, index rebuild or ticket-state reset.
+
 ## [1.0.11] - 2026-09-05
 
 Includes the workspace refinements prepared under the unpublished v1.0.10 tag.

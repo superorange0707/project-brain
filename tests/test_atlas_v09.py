@@ -479,6 +479,101 @@ class AtlasV09Tests(unittest.TestCase):
         self.assertEqual(["src/service.py"], [item.path for item in bundle.evidence])
         self.assertIsNotNone(bundle.metrics["time_to_first_verified_evidence_ms"])
 
+    def test_explicit_file_is_read_once_before_optional_discovery_can_expire(self) -> None:
+        from brain.core import _direct_file
+
+        request = parse_context_request(json.dumps({"CONTEXT_REQUEST": {
+            "version": 2, "objective": "Inspect this exact file",
+            "files": [{"repo": "service", "path": "src/service.py", "lines": "1-3"}] * 2,
+        }}))
+        generation = current_generation_ref(self.settings)
+        settings = replace(
+            self.settings, atlas_generation=generation, atlas_generation_mode="pinned",
+            repositories=[replace(repo) for repo in self.settings.repositories],
+        )
+        (self.root / "service/src/service.py").write_text("NEWER_GENERATION_ONLY = True\n")
+        snapshot_indexes(self.settings, changed_only=True)
+        self.assertNotEqual(generation.identity, current_generation_ref(self.settings).identity)
+        events = []
+        clock = [0.0]
+
+        def read_requested(*args, **kwargs):
+            events.append("file")
+            return _direct_file(*args, **kwargs)
+
+        def discover(*args, **kwargs):
+            events.append("route")
+            return {"repos": ["service"], "candidates": [], "graph_edges": []}
+
+        def slow_semantic(*args, **kwargs):
+            events.append("semantic")
+            clock[0] = 20.0
+            kwargs["serving_status"]["status"] = "ready"
+            return []
+
+        with (
+            mock.patch("brain.core.time.perf_counter", side_effect=lambda: clock[0]),
+            mock.patch("brain.core._direct_file", side_effect=read_requested),
+            mock.patch("brain.atlas.route", side_effect=discover),
+            mock.patch("brain.editions.current_edition", return_value="semantic"),
+            mock.patch("brain.semantic.search_semantic", side_effect=slow_semantic),
+        ):
+            bundle = retrieve_context(settings, request)
+        self.assertEqual(["file", "route", "semantic"], events)
+        self.assertEqual(1, len(bundle.evidence))
+        self.assertEqual((1, 3), (bundle.evidence[0].line_start, bundle.evidence[0].line_end))
+        self.assertIn("return policy(customer)", bundle.evidence[0].content)
+        self.assertEqual(generation.identity, bundle.atlas_generation.identity)
+        self.assertEqual(0.0, bundle.metrics["time_to_first_verified_evidence_ms"])
+        self.assertEqual("time_budget", bundle.trace["stop_reason"])
+
+    def test_explicit_files_still_obey_compiled_operation_limit(self) -> None:
+        from brain.core import _direct_file
+
+        request = parse_context_request(json.dumps({"CONTEXT_REQUEST": {
+            "version": 2, "objective": "Inspect exact source with a small operation budget",
+            "files": [
+                {"repo": "service", "path": "src/service.py"},
+                {"repo": "service", "path": "config.yml"},
+            ],
+        }}))
+        settings = replace(self.settings, max_effective_operations=1, experience_enabled=False)
+        with (
+            mock.patch("brain.core._direct_file", wraps=_direct_file) as direct,
+            mock.patch("brain.atlas.route", return_value={}),
+            mock.patch("brain.relations.related_relationships", return_value=[]),
+        ):
+            bundle = retrieve_context(settings, request)
+        self.assertEqual(1, direct.call_count)
+        self.assertEqual(["src/service.py"], [item.path for item in bundle.evidence])
+        self.assertEqual(1, bundle.trace["planner"]["deferred_operations"])
+        self.assertEqual("operation_budget", bundle.trace["stop_reason"])
+
+    def test_progressive_widening_does_not_repeat_explicit_history_scope(self) -> None:
+        from brain.core import Repository
+
+        (self.root / "other").mkdir()
+        settings = replace(
+            self.settings, experience_enabled=False, initial_repo_limit=1, widen_repo_limit=2,
+            repositories=[*self.settings.repositories, Repository("other", self.root / "other")],
+        )
+        request = parse_context_request(json.dumps({"CONTEXT_REQUEST": {
+            "version": 2, "objective": "Find a missing implementation and its known history",
+            "history": [{"query": "change", "repos": ["service"]}],
+            "paths": [{"query": "missing.py"}],
+        }}))
+        with (
+            mock.patch("brain.atlas.route", return_value={"repos": ["service", "other"]}),
+            mock.patch("brain.core.path_hits", return_value=[]) as paths,
+            mock.patch("brain.core.git_history", return_value="abc123 2026-09-06 relevant change") as history,
+            mock.patch("brain.relations.related_relationships", return_value=[]),
+        ):
+            bundle = retrieve_context(settings, request)
+        self.assertEqual(1, bundle.trace["widening_rounds"])
+        self.assertEqual([["service"], ["other"]], [call.args[2] for call in paths.call_args_list])
+        self.assertEqual(1, history.call_count)
+        self.assertEqual(1, len(bundle.history))
+
     def test_incremental_refresh_records_rename_delete_and_add_together(self) -> None:
         repository = self.root / "service"
         (repository / "config.yml").rename(repository / "renamed-config.yml")

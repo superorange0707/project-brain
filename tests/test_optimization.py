@@ -16,6 +16,106 @@ from brain.retrieval.ranker import fuse_and_rank
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_execution_flow_batches_validation_without_losing_later_seeds(self) -> None:
+        import sqlite3
+        from brain.core import Evidence
+        from brain.investigation import _execution_flow, MAX_FLOW_DB_QUERIES, MAX_FLOW_SEEDS
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo").mkdir()
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='flow'\n[graph]\nenabled=false\n[[repositories]]\nname='repo'\npath='repo'\n")
+            sources = {}
+            for i in range(MAX_FLOW_SEEDS):
+                path = f"flow{i:02}.py"
+                sources[path] = (
+                    f"def entry_{i}():\n    return middle_{i}()\n"
+                    f"def middle_{i}():\n    return final_{i}()\n"
+                    f"def final_{i}():\n    return {i}\n"
+                )
+                (root / "repo" / path).write_text(sources[path])
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            generation = current_generation_ref(settings)
+            connection = sqlite3.connect(settings.state_dir / "catalog.sqlite3")
+            try:
+                seeds = [str(row[0]) for row in connection.execute(
+                    "SELECT e.entity_id FROM generation_entities g JOIN atlas_entities e ON e.entity_id=g.entity_id "
+                    "WHERE g.generation=? AND e.simple_name LIKE 'entry_%' ORDER BY e.path",
+                    (generation.generation,),
+                )]
+            finally:
+                connection.close()
+            self.assertEqual(MAX_FLOW_SEEDS, len(seeds))
+            bundle = ContextBundle("Trace every anchored entry", atlas_generation=generation, evidence=[
+                Evidence("repo", path, 1, 6, content, "code", 100, verification_content=content)
+                for path, content in sources.items()
+            ])
+            flow = _execution_flow(settings, generation, seeds, bundle)
+            self.assertLessEqual(flow["database_operations"], MAX_FLOW_DB_QUERIES)
+            self.assertLessEqual(flow["database_operations"], 15)
+            self.assertEqual(2 * MAX_FLOW_SEEDS, len(flow["steps"]))
+            self.assertTrue(all(step["state"] == "verified" for step in flow["steps"]))
+            self.assertEqual([0] * MAX_FLOW_SEEDS + [1] * MAX_FLOW_SEEDS, [step["depth"] for step in flow["steps"]])
+            self.assertEqual(set(seeds), {step["source_id"] for step in flow["steps"] if step["depth"] == 0})
+            self.assertEqual(flow, _execution_flow(settings, generation, seeds, bundle))
+            without_source = _execution_flow(
+                settings, generation, seeds, ContextBundle("metadata only", atlas_generation=generation),
+            )
+            self.assertTrue(all(step["state"] == "candidate" for step in without_source["steps"]))
+            with mock.patch("brain.investigation.MAX_FLOW_DB_QUERIES", 4):
+                bounded = _execution_flow(settings, generation, seeds, bundle)
+            self.assertEqual(0, bounded["database_operations"])
+            self.assertEqual([], bounded["steps"])
+            connection = sqlite3.connect(settings.state_dir / "catalog.sqlite3")
+            try:
+                connection.execute(
+                    "UPDATE atlas_edges SET target_id='poisoned-target' WHERE edge_id=?",
+                    (flow["steps"][-1]["identity"],),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            poisoned = _execution_flow(settings, generation, seeds, bundle)
+            self.assertEqual("degraded", poisoned["status"])
+            self.assertEqual([], poisoned["steps"])
+            self.assertIn("content identity", poisoned["reason"])
+
+    def test_unresolved_external_call_does_not_discard_the_verified_internal_flow(self) -> None:
+        import sqlite3
+        from brain.core import Evidence
+        from brain.investigation import _execution_flow
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo").mkdir()
+            content = "def entry():\n    logger.info('trace')\n    return service()\ndef service():\n    return 1\n"
+            (root / "repo/main.py").write_text(content)
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='external-call'\n[graph]\nenabled=false\n[[repositories]]\nname='repo'\npath='repo'\n")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            generation = current_generation_ref(settings)
+            connection = sqlite3.connect(settings.state_dir / "catalog.sqlite3")
+            try:
+                seed = str(connection.execute(
+                    "SELECT e.entity_id FROM generation_entities g JOIN atlas_entities e ON e.entity_id=g.entity_id "
+                    "WHERE g.generation=? AND e.simple_name='entry'", (generation.generation,),
+                ).fetchone()[0])
+            finally:
+                connection.close()
+            bundle = ContextBundle("Trace through logging", atlas_generation=generation, evidence=[
+                Evidence("repo", "main.py", 1, 5, content, "code", 100, verification_content=content),
+            ])
+            flow = _execution_flow(settings, generation, [seed], bundle)
+            self.assertEqual("ready", flow["status"])
+            steps = {step["target"]: step for step in flow["steps"]}
+            self.assertEqual("verified", steps["service"]["state"])
+            self.assertEqual("candidate", steps["info"]["state"])
+            self.assertEqual("atlas_candidate", steps["info"]["evidence_authority"])
+            self.assertFalse(any(step["source_id"] == steps["info"]["target_id"] for step in flow["steps"]))
+
     def test_full_storage_inventory_streams_more_than_half_a_million_entries(self) -> None:
         import stat
         from types import SimpleNamespace

@@ -13,6 +13,23 @@ paths. It records only claims supported by local/public-synthetic verification.
 coverage. `DEFERRED TO TARGET MACHINE` and `DEFERRED TO PRIVATE LOCAL DATA` are
 intentional local-only validation steps, not engineering blockers.
 
+## 2026-09-06 v1.0.12 investigation optimization
+
+The patch prioritizes explicit pinned-file reads ahead of optional model work,
+deduplicates file operations, batches bounded execution-flow validation by depth,
+and avoids repeating explicit repository scopes during progressive widening.
+Canonical unresolved calls remain unverified navigation leaves; they cannot
+invalidate an otherwise verified internal chain or become resolved dispatch.
+Generation identities, schemas, model packs and target read-only boundaries are
+unchanged. No new dependency, index, session store or migration is introduced.
+
+The added regressions cover a slow model after G2 publication while a request
+still reads G1, duplicate and deferred files, 24 entry points with two internal
+call steps each, metadata-only evidence, SQL limits, corrupt graph rows,
+unresolved logging calls and duplicate scoped history during widening. Full
+Python 3.11–3.14 native release matrices and the existing model-pack lifecycle,
+five-platform artifact/parity, provenance and Homebrew gates remain required.
+
 ## 2026-09-05 v1.0.11 workspace refinement and release qualification
 
 The unpublished v1.0.10 tag is preserved. Its native release validation caught

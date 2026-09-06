@@ -2301,6 +2301,29 @@ def retrieve_context(
         if compiled_plan.deferred_operations:
             trace.stop_reason = "operation_budget"
 
+        # The plan protects explicit source requests. Execute them before optional
+        # discovery/model work can consume the deadline, including expanded v5
+        # candidate requests, without reading duplicate operations twice.
+        first_verified_evidence_ms: float | None = None
+        direct_started = time.perf_counter()
+        file_values = {item.value for item in compiled_plan.operations if item.kind == "file"}
+        for item in request["files"]:
+            if time_budget_exhausted():
+                break
+            value = f"{item['repo']}:{item['path']}" + (f":{item['lines']}" if item.get("lines") else "")
+            if value not in file_values:
+                continue
+            file_values.remove(value)
+            evidence = _direct_file(settings, item)
+            if evidence:
+                bundle.evidence.append(evidence)
+                trace.bytes_read += len(evidence.content.encode("utf-8", errors="replace"))
+                if first_verified_evidence_ms is None:
+                    first_verified_evidence_ms = (time.perf_counter() - started) * 1000
+            else:
+                bundle.unresolved.append(f"Requested file `{item['repo']}:{item['path']}` was not found")
+        trace.add_stage("source_hydration_ms", (time.perf_counter() - direct_started) * 1000)
+
         candidates: list[SearchHit] = []
         from .atlas import route as route_atlas
 
@@ -2317,7 +2340,6 @@ def retrieve_context(
         trace.add_stage("atlas_route_ms", atlas_route_ms)
         first_repo_ms = (time.perf_counter() - started) * 1000 if atlas_route.get("repos") else None
         first_entity_ms = (time.perf_counter() - started) * 1000 if atlas_route.get("candidates") else None
-        first_verified_evidence_ms: float | None = None
         candidates.extend(
             SearchHit(
                 str(item["repo"]), str(item["path"]), int(item["line"]), str(item.get("text") or ""),
@@ -2479,6 +2501,8 @@ def retrieve_context(
             trace.final_repo_scope = list(wave)
             emit("targeted_retrieval", repo_current=0, repo_total=len(wave), candidate_count=len(candidates))
             for operation in targeted:
+                if wave_number and operation.repos:
+                    continue  # Explicit scopes were already evaluated in the first wave.
                 if time_budget_exhausted():
                     break
                 repos = scope_for(operation, wave)
@@ -2542,22 +2566,6 @@ def retrieve_context(
                 repo_current=len(wave), repo_total=len(wave), candidate_count=len(candidates),
                 physical_operations_completed=trace.physical_backend_operations,
             )
-
-        file_values = {item.value for item in compiled_plan.operations if item.kind == "file"}
-        for item in request["files"]:
-            if time_budget_exhausted():
-                break
-            value = f"{item['repo']}:{item['path']}" + (f":{item['lines']}" if item.get("lines") else "")
-            if value not in file_values:
-                continue
-            evidence = _direct_file(settings, item)
-            if evidence:
-                bundle.evidence.append(evidence)
-                trace.bytes_read += len(evidence.content.encode("utf-8", errors="replace"))
-                if first_verified_evidence_ms is None:
-                    first_verified_evidence_ms = (time.perf_counter() - started) * 1000
-            else:
-                bundle.unresolved.append(f"Requested file `{item['repo']}:{item['path']}` was not found")
 
         if include_diff and not time_budget_exhausted():
             bundle.evidence.extend(working_tree_diffs(settings))

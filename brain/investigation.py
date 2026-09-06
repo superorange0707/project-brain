@@ -1680,61 +1680,84 @@ def _execution_flow(
     frontier = list(seeds)
     seen = set(seeds)
     database_operations = 0
+
+    def count_query(_statement: str) -> None:
+        nonlocal database_operations
+        database_operations += 1
+
     try:
+        connection.set_trace_callback(count_query)
         for depth in range(MAX_FLOW_DEPTH):
-            next_frontier: list[str] = []
-            for source_id in frontier[:MAX_FLOW_SEEDS]:
-                if database_operations >= MAX_FLOW_DB_QUERIES:
-                    break
-                database_operations += 1
-                rows = connection.execute(
-                    "SELECT e.edge_id,e.edge_type,e.source_id,e.target_id,e.repo,e.path,e.line_start,e.confidence,"
-                    "t.simple_name,t.module_id FROM generation_edges g JOIN atlas_edges e ON e.edge_id=g.edge_id "
-                    "LEFT JOIN atlas_entities t ON t.entity_id=e.target_id "
+            # One bounded seek per seed, one validation batch per depth. A
+            # global LIMIT would let the first busy entity starve later seeds;
+            # a window query would materialize every outgoing edge first.
+            # Reserve discovery plus at most four shared validation statements.
+            if database_operations + 5 > MAX_FLOW_DB_QUERIES:
+                break
+            queries: list[str] = []
+            parameters: list[Any] = []
+            for ordinal, source_id in enumerate(frontier[:MAX_FLOW_SEEDS]):
+                queries.append(
+                    "SELECT * FROM (SELECT e.edge_id,e.target_id,? AS seed_order,e.confidence,e.edge_type "
+                    "FROM generation_edges g JOIN atlas_edges e ON e.edge_id=g.edge_id "
                     f"WHERE g.generation=? AND e.source_id=? AND e.edge_type IN ({','.join('?' for _ in EXECUTION_EDGE_TYPES)}) "
-                    "ORDER BY e.confidence DESC,e.edge_type,e.target_id LIMIT ?",
-                    (generation.generation, source_id, *EXECUTION_EDGE_TYPES, MAX_FLOW_BRANCH),
-                ).fetchall()
-                valid_edges = _valid_generation_edges(
-                    connection, generation.generation, (str(row[0]) for row in rows),
+                    "ORDER BY e.confidence DESC,e.edge_type,e.target_id LIMIT ?)"
                 )
-                valid_targets = _valid_generation_entities(
-                    connection, generation.generation, (str(row[3]) for row in rows),
+                parameters.extend((ordinal, generation.generation, source_id, *EXECUTION_EDGE_TYPES, MAX_FLOW_BRANCH))
+            rows = connection.execute(
+                " UNION ALL ".join(queries) + " ORDER BY seed_order,confidence DESC,edge_type,target_id",
+                parameters,
+            ).fetchall()
+            valid_edges = _valid_generation_edges(
+                connection, generation.generation, (str(row[0]) for row in rows),
+            )
+            valid_targets = _valid_generation_entities(
+                connection, generation.generation, (str(row[1]) for row in rows),
+            )
+            if any(
+                str(row[0]) not in valid_edges or (
+                    str(row[1]) not in valid_targets and not (
+                        valid_edges[str(row[0])]["edge_type"] == "CALLS"
+                        and valid_edges[str(row[0])]["metadata"].get("resolved") is False
+                    )
+                ) for row in rows
+            ):
+                return {
+                    "schema_version": EXECUTION_FLOW_SCHEMA_VERSION,
+                    "compatibility_identity": compatibility,
+                    "generation": generation.generation,
+                    "status": "degraded",
+                    "reason": "typed graph content identity is incompatible",
+                    "steps": [], "paths": [], "database_operations": database_operations,
+                }
+            next_frontier: list[str] = []
+            for row in rows:
+                edge = valid_edges[str(row[0])]
+                target_entity = valid_targets.get(str(row[1]))
+                target = str(edge["target_id"])
+                if target in seen:
+                    continue
+                target_name = str(
+                    (target_entity["simple_name"] if target_entity else edge["metadata"].get("target_name")) or target
                 )
-                database_operations += 5
-                if any(str(row[0]) not in valid_edges or str(row[3]) not in valid_targets for row in rows):
-                    return {
-                        "schema_version": EXECUTION_FLOW_SCHEMA_VERSION,
-                        "compatibility_identity": compatibility,
-                        "generation": generation.generation,
-                        "status": "degraded",
-                        "reason": "typed graph content identity is incompatible",
-                        "steps": [], "paths": [], "database_operations": database_operations,
-                    }
-                for row in rows:
-                    edge = valid_edges[str(row[0])]
-                    target_entity = valid_targets[str(row[3])]
-                    target = str(edge["target_id"])
-                    if target in seen:
-                        continue
-                    state = "verified" if _verified_value_location(
-                        bundle, str(edge["repo"]), str(edge["path"]), int(edge["line_start"]),
-                        str(target_entity["simple_name"] or target), kind="symbol",
-                    ) else "candidate"
-                    steps.append({
-                        "identity": str(edge["edge_id"]), "order": len(steps) + 1, "depth": depth,
-                        "edge_type": str(edge["edge_type"]), "source_id": str(edge["source_id"]),
-                        "target_id": target, "target": str(target_entity["simple_name"] or target),
-                        "module_id": target_entity["module_id"], "repo": str(edge["repo"]),
-                        "path": str(edge["path"]), "line": int(edge["line_start"]),
-                        "confidence": float(edge["confidence"]),
-                        "state": state, "evidence_authority": "exact_source" if state == "verified" else "atlas_candidate",
-                    })
-                    if target not in seen:
-                        seen.add(target)
-                        next_frontier.append(target)
-                    if len(steps) >= MAX_FLOW_STEPS:
-                        break
+                # A canonical unresolved call (for example logger.info) is a
+                # navigation leaf, not corrupted graph data or verified dispatch.
+                state = "verified" if target_entity is not None and _verified_value_location(
+                    bundle, str(edge["repo"]), str(edge["path"]), int(edge["line_start"]),
+                    target_name, kind="symbol",
+                ) else "candidate"
+                steps.append({
+                    "identity": str(edge["edge_id"]), "order": len(steps) + 1, "depth": depth,
+                    "edge_type": str(edge["edge_type"]), "source_id": str(edge["source_id"]),
+                    "target_id": target, "target": target_name,
+                    "module_id": target_entity["module_id"] if target_entity else None, "repo": str(edge["repo"]),
+                    "path": str(edge["path"]), "line": int(edge["line_start"]),
+                    "confidence": float(edge["confidence"]),
+                    "state": state, "evidence_authority": "exact_source" if state == "verified" else "atlas_candidate",
+                })
+                seen.add(target)
+                if target_entity is not None:
+                    next_frontier.append(target)
                 if len(steps) >= MAX_FLOW_STEPS:
                     break
             frontier = next_frontier

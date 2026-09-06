@@ -1,3 +1,54 @@
+# Project Brain v1.0.12 — More Reliable Evidence and Investigation Flows
+
+This stable patch improves query-time investigation without changing Atlas,
+Semantic or ticket-state schemas. It builds on v1.0.11's large-workspace recovery,
+ticket-first UI and verified Windows/macOS installation paths.
+
+## Highlights
+
+- Explicit file requests are read from their pinned source before optional
+  discovery or model work can consume the query deadline. Duplicate file
+  operations are read once and still obey the compiled operation budget.
+- Execution-flow discovery and canonical edge/entity validation are batched by
+  depth. Per-seed branch limits and deterministic order are retained, allowing
+  later investigation entry points to be explored within the SQL budget.
+- A canonical unresolved external call, such as logging, remains a candidate
+  leaf instead of discarding the verified internal call chain. Unresolved
+  dispatch is never promoted to verified evidence or traversed; corrupted graph
+  identities still fail closed.
+- Progressive widening no longer repeats already evaluated, explicitly scoped
+  history, path or symbol operations.
+- Homebrew release verification uses the official installed tap and its fully
+  qualified formula name, preserving Homebrew's trust checks.
+
+## Downloads and upgrade
+
+The release includes macOS arm64/amd64 and Linux arm64/amd64 standalone archives,
+the native Windows amd64 ZIP, wheel, sdist, both installers and `SHA256SUMS.txt`.
+Every asset has a checksum and signed GitHub build-provenance attestation.
+Model weights are never bundled into Core.
+
+On macOS, run `brew update` then `brew upgrade project-brain`; `brain --version`
+must report `brain 1.0.12`. On Windows, use the tagged repository installer with
+`-Version 1.0.12`, or `-ArchivePath` with the downloaded official ZIP and matching
+`SHA256SUMS.txt`. Offline installation does not require GitHub authentication,
+administrator access or an Execution Policy change; company security policy
+still applies. Finish active work and stop the old UI process before upgrading.
+
+No Atlas/Semantic migration, index rebuild, model reinstall, cache deletion,
+configuration reset or ticket reset is required solely for this patch. Existing
+generations remain pinned, and Agent Kit v4 / Investigation Protocol v5 remain
+compatible. `brain refresh` is normal workspace maintenance, not a migration
+requirement for these query-time fixes.
+
+Project Brain remains read-only toward target repositories: no target editing,
+target test execution, hosted inference or automatic source upload. Public
+regressions exercise generation isolation, graph corruption, bounded traversal
+and Python 3.11–3.14 compatibility; enterprise latency and private-ticket accuracy
+remain field measurements, not blanket performance guarantees.
+
+---
+
 # Project Brain v1.0.11 — Large-Workspace Reliability and Recovery
 
 Project Brain v1 turns the Workspace Intelligence Atlas into a bounded,
