@@ -1,4 +1,9 @@
-# Project Brain v1.0.14 — Continue Gathering Evidence
+# Project Brain v1.0.14 — macOS: Continue Gathering Evidence
+
+This publication provides stable macOS Apple Silicon/Intel packages and Python
+distributions from the unchanged v1.0.14 tag. Windows/Linux native installers
+remain on v1.0.12; the global GitHub Latest pointer stays there so their existing
+download commands keep working. macOS Homebrew upgrades directly to v1.0.14.
 
 This stable patch removes the lifetime four-wave investigation rejection.
 The automatic allowance still pauses work, but the user can explicitly approve
@@ -38,12 +43,14 @@ The version must be `brain 1.0.14`. Replace your existing M365 Agent's generated
 INSTRUCTIONS.md and PROJECT_KNOWLEDGE.md with the new kit. Keep the same ticket
 and conversation; no new Agent or mandatory `brain refresh` is required.
 
-Tagged macOS/Linux archives, native Windows ZIP, wheel, sdist and installers
-are checksum-verified. The explicitly selected patch workflow may reuse the
-successful v1.0.12 model-pack qualification only after verifying identical
-model runtime, transport, locking, dependency and bounded-input contracts.
-Python compatibility, native artifact/installer tests, cross-platform parity,
-provenance and downloaded-asset verification still run on this release.
+Both tagged Mac archives passed native CLI/installer checks. Python 3.11–3.14,
+package builds, five-platform deterministic parity and independent full CI passed
+on commit `9a2a2b7b4696c450567832cd56938851608596ef`. The all-platform release run
+hit an optional Node UI smoke-test timeout on Windows 3.12; Mac publication is
+explicitly independent of that failure, not a claim that the failed job passed.
+Unchanged model-pack contracts were verified against successful v1.0.12
+qualification. Published Mac/Python assets carry checksums and attestations and
+are downloaded again for integrity and anonymous-availability checks.
 
 Target repositories remain read-only. No target source editing/test execution,
 hosted inference or automatic source upload is introduced. Model weights are

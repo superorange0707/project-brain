@@ -1,0 +1,135 @@
+name: Publish verified macOS v1.0.14
+
+# Explicitly authorized Mac-only publication. Never moves the release tag or
+# changes the global latest pointer used by Windows/Linux installers.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-macos-v1014
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: v1.0.14
+      SOURCE_SHA: 9a2a2b7b4696c450567832cd56938851608596ef
+      SOURCE_RUN: "34110869803"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require exact tagged source and successful Mac qualification
+        shell: python
+        run: |
+          import json, os, subprocess
+          def api(path):
+              return json.loads(subprocess.check_output(["gh", "api", path], text=True))
+          repo, sha, run = os.environ["GH_REPO"], os.environ["SOURCE_SHA"], os.environ["SOURCE_RUN"]
+          assert subprocess.check_output(["git", "rev-parse", "v1.0.14^{commit}"], text=True).strip() == sha
+          metadata = api(f"repos/{repo}/actions/runs/{run}")
+          assert metadata["head_sha"] == sha and metadata["path"] == ".github/workflows/release.yml"
+          jobs = api(f"repos/{repo}/actions/runs/{run}/jobs?per_page=100")["jobs"]
+          results = {job["name"]: job["conclusion"] for job in jobs}
+          required = [
+              "Standalone macos-arm64", "Standalone macos-amd64", "Build distributions",
+              "Compare deterministic behavior across five native artifacts",
+              "Stable v1 model-pack catalog readiness (macos-15, darwin-arm64)",
+              *[f"Python {version}" for version in ("3.11", "3.12", "3.13", "3.14")],
+          ]
+          for name in required:
+              assert results.get(name) == "success", (name, results.get(name))
+              print(f"PASS: {name}")
+          ci = api(f"repos/{repo}/actions/runs/34110451035")
+          assert ci["head_sha"] == sha and ci["conclusion"] == "success"
+          print("PASS: independent full CI on the identical commit")
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34110869803
+          name: standalone-macos-arm64
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34110869803
+          name: standalone-macos-amd64
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34110869803
+          name: python-package-distributions
+          path: dist/
+      - name: Validate artifacts and prepare checksums
+        shell: python
+        run: |
+          import hashlib, subprocess, tarfile, zipfile
+          from pathlib import Path
+          root = Path("dist")
+          expected = {
+              "project-brain-v1.0.14-macos-arm64.tar.gz",
+              "project-brain-v1.0.14-macos-amd64.tar.gz",
+              "project_brain_context-1.0.14-py3-none-any.whl",
+              "project_brain_context-1.0.14.tar.gz",
+          }
+          assert {p.name for p in root.iterdir()} == expected
+          required = {"brain", "codebase-memory-mcp", "zoekt", "zoekt-index", "PROJECT_BRAIN_LICENSE",
+                      "CODEBASE_MEMORY_LICENSE", "CODEBASE_MEMORY_THIRD_PARTY_NOTICES.md", "ZOEKt_LICENSE", "ZOEKt_VERSION"}
+          for path in sorted(root.glob("project-brain-*.tar.gz")):
+              with tarfile.open(path) as archive:
+                  files = {member.name.removeprefix("./") for member in archive if member.isfile()}
+                  assert files == required, (path, files)
+              print(f"PASS: {path.name} bundled file set")
+          with zipfile.ZipFile(root / "project_brain_context-1.0.14-py3-none-any.whl") as wheel:
+              assert wheel.testzip() is None
+              metadata = wheel.read("project_brain_context-1.0.14.dist-info/METADATA").decode()
+              assert "\nVersion: 1.0.14\n" in metadata and "\nRequires-Python: >=3.11\n" in metadata
+          with tarfile.open(root / "project_brain_context-1.0.14.tar.gz") as archive:
+              metadata = archive.extractfile("project_brain_context-1.0.14/PKG-INFO").read().decode()
+              assert "\nVersion: 1.0.14\n" in metadata
+          (root / "install-project-brain.sh").write_bytes(subprocess.check_output(["git", "show", "v1.0.14:scripts/install-project-brain.sh"]))
+          lines = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(root.iterdir())]
+          (root / "SHA256SUMS.txt").write_text("".join(lines), encoding="utf-8")
+      - name: Attest the verified release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: "dist/*"
+      - name: Create draft stable Mac release
+        run: |
+          awk '/^---$/ { exit } { print }' RELEASE_NOTES.md > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --latest=false \
+            --title "Project Brain v1.0.14 — macOS: Continue Gathering Evidence" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+      - name: Verify downloaded assets and attestations
+        run: |
+          mkdir verified
+          gh release download "$RELEASE_TAG" --dir verified
+          cd verified
+          sha256sum -c SHA256SUMS.txt
+          for asset in *; do gh attestation verify "$asset" --repo "$GH_REPO"; done
+      - name: Publish Mac release without changing other platforms' latest release
+        run: |
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest=false
+          trap 'gh release edit "$RELEASE_TAG" --draft=true' ERR
+          mkdir anonymous
+          for source in dist/*; do
+            asset="$(basename "$source")"
+            curl --fail --location --silent --show-error --retry 5 --retry-all-errors --retry-delay 5 \
+              "https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}/$asset" --output "anonymous/$asset"
+          done
+          (cd anonymous && sha256sum -c SHA256SUMS.txt)
+          trap - ERR
