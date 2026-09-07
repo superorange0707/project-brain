@@ -1,13 +1,14 @@
-# Project Brain v1.0.16 — Read the Complete Source Evidence
+# Project Brain v1.0.17 — Read the Complete Source Evidence
 
 This stable patch lets protocol-v5 investigations request a known Java adaptor
 or other configured source file directly. Missing content in a handoff is not
 proof that the repository file is absent.
 
-The v1.0.15 tag was not published. Its native Windows tests detected that a
-rooted path such as `/absolute` was not rejected by a host-dependent path check.
-This release validates the protocol's relative-path rule independently of the
-operating system and preserves the earlier tag unchanged.
+The v1.0.15 and v1.0.16 tags were not published and remain unchanged. Native
+Windows validation caught a rooted-path validation gap in v1.0.15, then timing
+failures in two UI test harnesses during the v1.0.16 release gates. This release
+includes the portable path guard and separates UI assertions from animation
+timers and unrelated capability probes; no failed release gate is bypassed.
 
 ## What changed
 
@@ -38,7 +39,7 @@ brain agent-kit m365 --json
 brain ui
 ```
 
-The version must be `brain 1.0.16`. Replace the existing M365 Agent's generated
+The version must be `brain 1.0.17`. Replace the existing M365 Agent's generated
 `INSTRUCTIONS.md` and `PROJECT_KNOWLEDGE.md`; optionally update
 `SUGGESTED_PROMPTS.md`. Agent Kit remains v4 and the request protocol remains v5.
 No new Agent is required. On an existing v5 ticket, ask for the known files via

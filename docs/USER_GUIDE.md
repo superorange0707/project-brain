@@ -25,7 +25,7 @@ directories can still be searched.
 
 ## 2. Installation
 
-macOS, Windows, Linux and Python distributions are at **v1.0.16**.
+macOS, Windows, Linux and Python distributions are at **v1.0.17**.
 Use the platform-specific commands below.
 
 ### Homebrew (recommended on macOS)
@@ -48,8 +48,8 @@ toolchain. Homebrew maps `superorange0707/tap` to the separate
 ### Linux installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.16/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.16
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.17/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.17
 ```
 
 This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
@@ -58,8 +58,8 @@ adjacent executables in `~/.local/bin` without changing Brain workspace state.
 ### Standalone macOS/Linux archive
 
 Use the verified
-[v1.0.16 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.16)
-or [v1.0.16 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.16)
+[v1.0.17 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.17)
+or [v1.0.17 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.17)
 for the matching arm64/amd64 platform. Keep `brain`,
 `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the same directory on
 `PATH`.
@@ -70,9 +70,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.16 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.17 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.16
+.\scripts\install-project-brain.ps1 -Version 1.0.17
 brain.exe --version
 ```
 
@@ -90,7 +90,7 @@ For a ZIP already downloaded in a browser or transferred from another machine,
 put its published `SHA256SUMS.txt` in the same directory and run the same script:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.16-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.17-windows-amd64.zip"
 ```
 
 The version is read from the official filename. This path performs no network
@@ -106,14 +106,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.16-windows-amd64.zip` and the published
+Download `project-brain-v1.0.17-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.16-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.16-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.17-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.17-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -136,7 +136,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.16"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.17"
 ```
 
 Upgrade later with:
@@ -148,7 +148,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.16"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.17"
 ```
 
 ### From a source checkout
@@ -953,7 +953,7 @@ are never deleted.
 
 ### Request a complete known source file
 
-Project Brain v1.0.16 and later accept `files` on an existing v5
+Project Brain v1.0.17 and later accept `files` on an existing v5
 ticket. A project knowledge file or context handoff is not a complete repository
 export. If it lacks an established Java adaptor, ask the Agent to request the
 source through Brain instead of asking you to copy it manually:
@@ -1304,12 +1304,24 @@ before moving it outside the project's trust boundary.
 ```bash
 brain evidence ABC-1234 internal-standard.md --kind document --target m365
 brain evidence ABC-1234 production.log --kind log --target m365
+brain evidence ABC-1234 runtime-snapshot.json --kind runtime --target m365
 ```
 
-Text evidence is archived under the ticket and automatically included in later
-context rounds as explicitly user-supplied evidence. Binary files such as PDFs
+Text evidence is archived under the ticket and included in later context rounds
+as explicitly user-supplied evidence, subject to per-item and total context
+limits. Give the generated `generated/handoffs/ABC-1234/evidence-NNN.md` to the
+Agent as well: a later bounded context may omit a large attachment. Check the
+reported delivery path if the workspace uses a custom generated directory.
+Binary files such as PDFs
 are archived locally, but Brain does not claim to parse them; attach the stored
 binary directly to M365 Copilot or another AI that supports that format.
+
+A runtime snapshot already committed in a configured repository can use the
+normal v5 `files` request. A live process, production database or deployed
+configuration outside Git is different: supply an authorized observation using
+`brain evidence`; Brain does not inspect production systems or infer their
+current state from static source. An unavailable pinned source snapshot is an
+explicit blocker, never permission to silently read a newer generation.
 
 ## 12. Review your implementation
 

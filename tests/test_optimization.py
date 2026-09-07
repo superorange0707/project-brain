@@ -233,6 +233,9 @@ class OptimizationTests(unittest.TestCase):
         result = subprocess.run([node, "-e", r'''
 const vm = require("node:vm");
 const input = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+// Test UI assertions, not toast animation latency or the runner's Node startup.
+const timers = new Map();
+const watchdog = setTimeout(() => {console.error("UI assertions did not complete"); process.exit(1);}, 10000);
 const elements = Object.fromEntries(input.ids.map(id => [id, {
   dataset: {}, listeners: {}, textContent: "", hidden: false, style: {},
   addEventListener(name, fn) { this.listeners[name] = fn; },
@@ -244,10 +247,15 @@ const ctx = { URLSearchParams, location: {search:""},
   localStorage: { getItem() {throw Error("disabled");}, setItem() {throw Error("disabled");} },
   document: {documentElement:{dataset:{}}, querySelectorAll() {return [];},
     getElementById(id) {if (!elements[id]) throw Error("Missing DOM node: " + id); return elements[id];}},
-  fetch: async () => {throw Error("connection lost");}, setTimeout, clearTimeout
+  fetch: async () => {throw Error("connection lost");},
+  setTimeout(fn, milliseconds) {
+    if (milliseconds !== 2600) throw Error("unexpected unmocked UI timer: " + milliseconds);
+    const id = Symbol(); timers.set(id, fn); return id;
+  },
+  clearTimeout(id) { timers.delete(id); }
 };
 vm.createContext(ctx);
-vm.runInContext(input.script, ctx);
+vm.runInContext(input.script, ctx, {timeout:5000});
 if (ctx.document.documentElement.dataset.theme !== "light") throw Error("system theme ignored");
 elements["theme-button"].listeners.click();
 if (ctx.document.documentElement.dataset.theme !== "dark") throw Error("theme toggle failed");
@@ -276,11 +284,10 @@ ctx.state.deliveries["view-request"] = {content:"A private evidence", total:1};
 ctx.selectTicket("TICKET-B");
 if (ctx.state.preview || ctx.state.deliveries["view-request"].content) throw Error("old ticket context leaked");
 if (!elements["run-request"].disabled || elements["review-ticket"].value !== "TICKET-B") throw Error("ticket state not synchronized");
-ctx.api("/api/status").then(() => {throw Error("connection failure hidden");}, error => {
-  if (!error.message.includes("may still be running")) throw error;
-});
 (async function () {
-  await Promise.resolve();
+  await ctx.api("/api/status").then(() => {throw Error("connection failure hidden");}, error => {
+    if (!error.message.includes("may still be running")) throw error;
+  });
   const paused = {valid:true, kind:"context_request", operation_count:1, actions:[],
     objective:"Additional evidence", continuation:{required:true, reason:"Automatic allowance reached",
       next_wave:5, generation:1, physical_operations_per_wave:32, context_bytes_per_wave:48000, token:"a".repeat(64)}};
@@ -311,9 +318,15 @@ ctx.api("/api/status").then(() => {throw Error("connection failure hidden");}, e
   if (ctx.state.preview) throw Error("changed request retains approval");
   ctx.report({message:"Investigation paused", recovery:{action:"continue_investigation", message:"Continue with AI"}});
   if (elements["error-recovery"].dataset.go !== "request" || elements["page-title"].textContent !== "Continue with AI") throw Error("wave pause routed to health/refresh");
-})().catch(error => {console.error(error); process.exitCode = 1;});
-'''], input=json.dumps({"script": script, "ids": ids}), capture_output=True, text=True, timeout=10)
+  for (const fn of timers.values()) fn();
+  timers.clear();
+})().then(() => {
+  clearTimeout(watchdog);
+  console.log("UI smoke assertions complete");
+}).catch(error => {clearTimeout(watchdog); console.error(error); process.exitCode = 1;});
+'''], input=json.dumps({"script": script, "ids": ids}), capture_output=True, text=True, timeout=30)
         self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("UI smoke assertions complete", result.stdout)
 
     def test_rrf_uses_per_channel_candidate_rank_without_mutating_inputs(self) -> None:
         hits = [

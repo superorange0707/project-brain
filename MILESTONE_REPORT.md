@@ -13,7 +13,22 @@ paths. It records only claims supported by local/public-synthetic verification.
 coverage. `DEFERRED TO TARGET MACHINE` and `DEFERRED TO PRIVATE LOCAL DATA` are
 intentional local-only validation steps, not engineering blockers.
 
-## 2026-09-07 v1.0.16 explicit full-file evidence patch
+## 2026-09-07 v1.0.17 release-test synchronization
+
+The v1.0.16 independent CI matrix passed, but release-native Windows checks
+timed out in a Node smoke process and a synthetic refresh/status test. The
+release was not published. Those tests now await all JavaScript assertions,
+drive presentation timers without wall-clock delays, retain execution and
+completion watchdogs, and probe capabilities before holding the mock refresh
+open. Its worker is always released in a finally block. Real readiness tests
+remain separate; no product status cache or newer-generation substitution was
+introduced to make a test pass. Full tagged native matrices remain mandatory.
+
+No additional runtime-evidence defect is claimed fixed without the affected
+request/error. Repository files, pinned source snapshots and user-supplied
+production observations remain distinct evidence authorities.
+
+## 2026-09-07 v1.0.16 explicit full-file evidence patch (unpublished)
 
 The unpublished v1.0.15 tag is retained unchanged. Native Windows CI rejected
 its host-dependent absolute-path guard; a leading-slash check now enforces the

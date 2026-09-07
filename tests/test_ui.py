@@ -790,9 +790,14 @@ None beyond the stated boundary.
         self.assertNotIn("secret", job["error"])
 
     def test_refresh_jobs_report_progress_and_reject_overlapping_mutations(self) -> None:
+        from brain.ops import dashboard_status
+
         entered = threading.Event()
         release = threading.Event()
         outcome = self.refresh_outcome()
+        # Probe real capabilities before holding a synthetic refresh open. This
+        # test covers job coordination; other status tests cover live readiness.
+        dashboard = dashboard_status(self.settings)
 
         def slow_refresh(*args, **kwargs):
             progress = kwargs.get("progress")
@@ -804,7 +809,7 @@ None beyond the stated boundary.
                     "embedding_batches_completed": 1,
                 })
             entered.set()
-            self.assertTrue(release.wait(3))
+            self.assertTrue(release.wait(30), "test did not release the synthetic refresh")
             if progress:
                 progress({
                     "phase": "semantic_embedding", "phase_label": "Building Semantic index", "elapsed_ms": 20,
@@ -814,22 +819,27 @@ None beyond the stated boundary.
                 })
             return outcome
 
-        with patch("brain.ops.refresh_brain", side_effect=slow_refresh):
+        with patch("brain.ops.refresh_brain", side_effect=slow_refresh), patch(
+            "brain.ops.dashboard_status", return_value=dashboard,
+        ):
             code, requested, _ = self.post("/api/refresh", {"fetch": False, "discover": False})
             self.assertEqual(202, code)
-            self.assertTrue(entered.wait(3))
-            _, running, _ = self.get("/api/job?id=" + quote(requested["data"]["id"], safe=""))
-            first = running["data"]["progress"]
-            self.assertEqual("semantic_embedding", first["phase"])
-            self.assertEqual("Building Semantic index", first["phase_label"])
-            self.assertEqual(4, first["semantic_cards_discovered"])
-            _, status, _ = self.get("/api/status")
-            self.assertEqual(requested["data"]["id"], status["data"]["jobs"][0]["id"])
-            with self.assertRaises(HTTPError) as caught:
-                self.post("/api/refresh", {"fetch": False, "discover": False})
-            self.assertEqual(400, caught.exception.code)
-            caught.exception.close()
-            release.set()
+            try:
+                self.assertTrue(entered.wait(10))
+                _, running, _ = self.get("/api/job?id=" + quote(requested["data"]["id"], safe=""))
+                first = running["data"]["progress"]
+                self.assertEqual("semantic_embedding", first["phase"])
+                self.assertEqual("Building Semantic index", first["phase_label"])
+                self.assertEqual(4, first["semantic_cards_discovered"])
+                _, status, _ = self.get("/api/status")
+                self.assertEqual(requested["data"]["id"], status["data"]["jobs"][0]["id"])
+                self.assertEqual("running", status["data"]["jobs"][0]["status"])
+                with self.assertRaises(HTTPError) as caught:
+                    self.post("/api/refresh", {"fetch": False, "discover": False})
+                self.assertEqual(400, caught.exception.code)
+                caught.exception.close()
+            finally:
+                release.set()
             job = self.job(requested["data"]["id"])
         self.assertEqual("succeeded", job["status"])
         self.assertEqual("Completed", job["phase"])

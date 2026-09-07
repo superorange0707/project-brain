@@ -2,7 +2,20 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.16] - 2026-09-07
+## [1.0.17] - 2026-09-07
+
+- Ship the complete-source evidence changes from the unpublished v1.0.16 tag.
+  Preserve both earlier unpublished tags rather than changing their source.
+- Make the packaged UI smoke test await every async assertion and signal
+  completion explicitly. Drive toast timers without real animation delays;
+  retain bounded JavaScript execution and an independent completion watchdog.
+- Isolate refresh-job coordination from unrelated live capability probes in
+  its test. Release the synthetic worker even after failed assertions and
+  retain running-state, overlap rejection and progress-sanitization checks.
+- No runtime retrieval, generation, schema, model-input or migration changes
+  beyond the already-reviewed complete-source evidence patch.
+
+## [1.0.16] - 2026-09-07 (unpublished)
 
 - Preserve the unpublished v1.0.15 tag. Native Windows CI caught a rooted-path
   validation gap before publication; reject leading-slash paths independently
