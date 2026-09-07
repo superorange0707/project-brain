@@ -1,3 +1,67 @@
+# Project Brain v1.0.15 — Read the Complete Source Evidence
+
+This stable patch lets protocol-v5 investigations request a known Java adaptor
+or other configured source file directly. Missing content in a handoff is not
+proof that the repository file is absent.
+
+## What changed
+
+- Optional `files` entries identify an exact repository and relative path.
+  Omit `lines` for the full file or provide a `start-end` range. The existing
+  immutable ticket-pinned source remains the final evidence authority.
+- Large files are delivered in whole-line, UTF-8 byte-bounded pages with total
+  lines, returned range, completeness and a remaining range to request next.
+  Missing pinned source, invalid ranges and exhausted budgets are explicit;
+  truncated source is never represented as a complete file.
+- File-only requests bypass optional repository discovery and model inference.
+  Explicitly requested pages are included in delta handoffs even when their
+  stable evidence IDs are already known.
+- M365 and default chat instructions explain how to request full files, follow
+  pages and distinguish missing export content from unavailable source.
+
+## Upgrade and continue working
+
+Finish active work. From the Brain workspace containing `brain.toml`, stop the
+old UI while idle, upgrade, and regenerate the existing Agent's kit:
+
+```sh
+brain ui stop
+brew update
+brew upgrade project-brain
+brain --version
+brain agent-kit m365 --json
+brain ui
+```
+
+The version must be `brain 1.0.15`. Replace the existing M365 Agent's generated
+`INSTRUCTIONS.md` and `PROJECT_KNOWLEDGE.md`; optionally update
+`SUGGESTED_PROMPTS.md`. Agent Kit remains v4 and the request protocol remains v5.
+No new Agent is required. On an existing v5 ticket, ask for the known files via
+`files` with the latest `base_context_id`, and return each generated context
+to the Agent. Follow remaining ranges until the requested source is complete.
+If the investigation pauses, approve one additional bounded wave in the UI.
+
+This patch changes no Atlas/Semantic schema or model-input contract. It does
+not require `brain refresh`, an Atlas rebuild, model reinstall, cache deletion
+or ticket reset. An active refresh should finish before replacing executables.
+Windows uses the versioned ZIP and the existing online/offline installer;
+macOS and Linux use their matching archives or supported package manager.
+
+## Scope and known limitations
+
+Existing v4/v5 mixed-ticket lineage defects and Markdown-fenced JSON request
+classification are not fixed by this patch. Keep legacy tickets on their
+current protocol; do not change a JSON version number or edit session state.
+For JSON, paste the raw object without Markdown fences. Normal v5 files
+requests also accept the documented YAML envelope.
+
+Target source remains read-only. No model weights, private repository data,
+hosted inference or automatic source upload are introduced. The existing
+opt-in PyPI publication policy is unchanged. Full native Python 3.11–3.14,
+five-platform artifact/parity, checksum and provenance gates remain enforced.
+
+---
+
 # Project Brain v1.0.14 — Continue Gathering Evidence
 
 This stable release provides macOS Apple Silicon/Intel, Linux arm64/amd64,

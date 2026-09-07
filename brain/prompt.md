@@ -28,6 +28,8 @@ Supported modes are `root_cause`, `implementation_plan`, `impact_analysis`, `tes
 
 Project Brain reports exact branches and commits, Implementation Readiness, Unresolved, Retrieval Transparency, unique/repeated evidence, and no-progress rounds. It may also provide similar ticket-labelled Git changes and bounded historical patches. Treat committed history as an implementation analogue, not proof that the old change was correct for the current ticket. When retrieval adds no new evidence, do not repeat broad search: ask the user for the specific external/runtime blocker or produce the final solution.
 
+For a known repository file whose full content is needed, use optional v5 `files` entries with `repo`, exact repository-relative `path`, and optional `lines: "start-end"`. Omit `lines` to request the whole file. Omit `resolve` and `anchors` for a focused exact read. A `file_hint` discovers a file; it does not request full content. Follow each source page's total/returned lines and `next lines` until the required range is complete; `complete_range` is not necessarily the whole file. If its evidence ID was omitted by the byte limit, request that page alone before advancing. Do not ask the user to copy source that Brain can read, change protocols, refresh indexes, or reset a ticket to obtain full files.
+
 A second Brain round must seek one explicit fact that can materially change the implementation. If remaining unknowns cannot change it, return `FINAL_SOLUTION`.
 
 Each returned handoff has a `Request: NNN` header and `context_id`. Always continue from the highest request number and pass its ID as `base_context_id`. Normal follow-ups are deltas; a full checkpoint replaces earlier context state.

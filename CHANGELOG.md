@@ -2,6 +2,21 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.15] - 2026-09-07
+
+- Add explicit protocol-v5 `files` requests for complete known source files or
+  exact line ranges. Read the ticket's immutable source generation directly;
+  file-only requests do not repeat optional discovery or model inference.
+- Page large files at whole-line, UTF-8 byte boundaries. Report total/returned
+  lines, completeness, continuation ranges and explicit access/budget blockers.
+  Re-emit explicitly requested evidence in deltas even when its ID is known.
+- Teach the existing M365 Agent Kit v4 and default chat instructions to request
+  configured source through Brain instead of asking users to copy it manually.
+- Preserve schemas, model packs, caches, source generations and ticket state.
+  No migration or mandatory refresh is required. Known mixed legacy-protocol
+  lineage and Markdown-fenced JSON classification defects remain outside this
+  focused patch; keep an existing ticket on its current protocol.
+
 ## [1.0.14] - 2026-09-07
 
 - Replace the lifetime four-wave investigation rejection with explicit,

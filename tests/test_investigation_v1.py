@@ -257,6 +257,115 @@ class CustomerListener {
         }
         return json.dumps({"INVESTIGATION_REQUEST": value})
 
+    def test_v5_requested_files_validation_and_identity(self) -> None:
+        body = {"version": 5, "mode": "implementation_plan", "objective": "Read the established adaptor",
+                "files": [{"repo": "customer-api", "path": "src/Adaptor.java"}]}
+        text = json.dumps({"INVESTIGATION_REQUEST": body})
+        plan = request_preview(text, self.settings)
+        self.assertEqual([], plan["request"]["searches"])
+        self.assertEqual(["file"], [operation.kind for operation in compile_request(plan["request"]).operations])
+        self.assertEqual(body["files"], json.loads(plan["normalized_json"])["INVESTIGATION_REQUEST"]["files"])
+        self.assertNotIn('"files"', request_preview(self.request("Unchanged request"))["normalized_json"])
+        ranged = {**body, "files": [{**body["files"][0], "lines": "1-4000"}]}
+        ranged_plan = request_preview(json.dumps({"INVESTIGATION_REQUEST": ranged}))
+        self.assertNotEqual(protocol_request_signature(plan, "FILES", {}), protocol_request_signature(ranged_plan, "FILES", {}))
+        bad_files = [None, {}, ["bad"], body["files"] * 51]
+        bad_files += [[{"repo": "customer-api", "path": path}] for path in ("../escape", "/absolute", "C:/private", "src\\File.java", "src\nfile.java")]
+        bad_files += [[{**body["files"][0], "lines": lines}] for lines in (True, 12, "0-10", "10-9", "1-999999999")]
+        for files in bad_files:
+            with self.subTest(files=files), self.assertRaises(BrainError):
+                parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {**body, "files": files}}))
+
+    def test_v5_requested_files_deliver_full_adaptors_without_discovery_on_original_generation(self) -> None:
+        from brain.core import deliver
+
+        relative = "src/main/java/demo/LongAdaptor.java"
+        file_path = self.root / "customer-api" / relative
+        original = "class LongAdaptor {\n" + "\n".join(f"// original row {i}" for i in range(800)) + '\nString tail = "ADAPTOR_G1_END";\n}\n'
+        file_path.write_text(original, encoding="utf-8")
+        generation = self.publish("sha-files-g1", "G1_ONLY")
+        start_session(self.settings, "FILES", "Read the adaptor implementations")
+        file_path.write_text('class LongAdaptor { String changed = "ADAPTOR_G2_ONLY"; }\n', encoding="utf-8")
+        self.publish("sha-files-g2", "G2_ONLY")
+        body = {"version": 5, "mode": "implementation_plan", "objective": "Read both established Java files",
+                "files": [{"repo": "customer-api", "path": relative},
+                          {"repo": "customer-client", "path": "src/main/java/demo/CustomerClient.java"}]}
+        with mock.patch("brain.atlas.route", side_effect=AssertionError("exact files must not rediscover repositories")), mock.patch(
+            "brain.semantic.search_semantic", side_effect=AssertionError("exact files must not invoke semantic search"),
+        ):
+            content, _, _ = create_context(self.settings, "FILES", json.dumps({"INVESTIGATION_REQUEST": body}))
+        self.assertIn(original.rstrip(), content)
+        self.assertIn("interface CustomerClient", content)
+        self.assertNotIn("ADAPTOR_G2_ONLY", content)
+        self.assertIn("complete_file; total lines 803", content)
+        state = session_state(self.settings, "FILES")
+        self.assertEqual(generation.identity, state["atlas_generation_id"])
+        trace = state["request_history"][-1]["retrieval"]["trace"]
+        self.assertTrue(trace["direct_files_only"])
+        self.assertEqual(2, trace["physical_backend_operations"])
+        self.assertEqual(["complete_file", "complete_file"], [item["status"] for item in trace["file_reads"]])
+        delivered, _ = deliver(self.settings, "FILES", content, "m365", copy=False)
+        self.assertEqual(content, delivered[0].read_text(encoding="utf-8"))
+        prior_ids = dict(state["stable_identities"]["evidence"])
+        body["base_context_id"] = state["last_context_id"]
+        repeated, _, _ = create_context(self.settings, "FILES", json.dumps({"INVESTIGATION_REQUEST": body}), continue_investigation=True)
+        self.assertIn(original.rstrip(), repeated)
+        self.assertEqual(prior_ids, session_state(self.settings, "FILES")["stable_identities"]["evidence"])
+
+    def test_v5_requested_files_unicode_pages_are_complete_and_generation_pinned(self) -> None:
+        relative = "src/main/java/demo/PagedAdaptor.java"
+        rows = ["class PagedAdaptor {"] + [f"// row {i:03d} " + "数据" * 28 for i in range(220)] + ["}"]
+        (self.root / "customer-api" / relative).write_text("\n".join(rows) + "\n", encoding="utf-8")
+        generation = self.publish("sha-page-g1", "PAGES_G1")
+        settings = replace(self.settings, hard_context_chars=24_000)
+        start_session(settings, "PAGES", "Read every line of the established adaptor")
+        body = {"version": 5, "mode": "implementation_plan", "objective": "Read the next pinned adaptor page",
+                "files": [{"repo": "customer-api", "path": relative}]}
+        last = 0
+        for wave in range(1, 12):
+            content, _, _ = create_context(settings, "PAGES", json.dumps({"INVESTIGATION_REQUEST": body}), continue_investigation=True)
+            state = session_state(settings, "PAGES")
+            report = state["request_history"][-1]["retrieval"]["trace"]["file_reads"][0]
+            start, end = (int(value) for value in report["returned_lines"].split("-"))
+            self.assertEqual(last + 1, start)
+            self.assertIn("\n".join(rows[start - 1:end]), content)
+            self.assertLessEqual(len(content.encode("utf-8")), settings.hard_context_chars)
+            self.assertEqual(generation.identity, state["atlas_generation_id"])
+            last = end
+            if not report["next_lines"]:
+                break
+            body["files"][0]["lines"] = report["next_lines"]
+            body["base_context_id"] = state["last_context_id"]
+        self.assertEqual(len(rows), last)
+        self.assertGreater(wave, 1)
+
+    def test_v5_requested_files_fail_explicitly_and_respect_operation_budget(self) -> None:
+        from brain.core import _requested_file_page
+
+        generation = self.publish("sha-direct-budget", "DIRECT_BUDGET")
+        pinned = replace(self.settings, atlas_generation=generation, atlas_generation_mode="pinned", max_backend_operations=1)
+        first = {"repo": "customer-api", "path": "src/main/java/demo/CustomerController.java"}
+        second = {"repo": "customer-client", "path": "src/main/java/demo/CustomerClient.java"}
+        request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "implementation_plan", "objective": "Read two exact files", "files": [first, first, second],
+        }}))
+        bundle = retrieve_context(pinned, request)
+        self.assertEqual(1, bundle.trace["physical_backend_operations"])
+        self.assertEqual(1, len(bundle.evidence))
+        self.assertEqual(1, len(bundle.unresolved))
+        self.assertIn("physical-operation budget", bundle.unresolved[0])
+        with mock.patch("brain.index.read_indexed_file", return_value=None):
+            evidence, report = _requested_file_page(pinned, first, max_bytes=8_000)
+        self.assertIsNone(evidence)
+        self.assertEqual("unavailable", report["status"])
+        self.assertIn("Pinned indexed source is unavailable", report["reason"])
+        evidence, report = _requested_file_page(pinned, {**first, "lines": "9999-10000"}, max_bytes=8_000)
+        self.assertIsNone(evidence)
+        self.assertEqual("out_of_range", report["status"])
+        evidence, report = _requested_file_page(pinned, first, max_bytes=1)
+        self.assertIsNone(evidence)
+        self.assertEqual("blocked", report["status"])
+
     def test_generation_components_java_spring_extraction_and_incremental_reuse(self) -> None:
         generation = self.publish("sha-g1", "G1_ONLY")
         self.assertEqual("ready", generation.component("runtime_anchors")["status"])

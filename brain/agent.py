@@ -262,7 +262,9 @@ For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365`
 
 ## Request envelope
 
-Use exactly one `INVESTIGATION_REQUEST` mapping. Required fields are `version: 5`, `mode`, and `objective`. Supported modes are `root_cause`, `implementation_plan`, `impact_analysis`, `test_surface`, `flow_trace`, and `history`. Optional bounded fields are `runtime_facts`, `hypotheses`, `required`, `resolve`, `anchors`, `base_context_id`, `checkpoint`, and `wave`.
+Use exactly one `INVESTIGATION_REQUEST` mapping. Required fields are `version: 5`, `mode`, and `objective`. Supported modes are `root_cause`, `implementation_plan`, `impact_analysis`, `test_surface`, `flow_trace`, and `history`. Optional bounded fields are `runtime_facts`, `hypotheses`, `required`, `resolve`, `anchors`, `files`, `base_context_id`, `checkpoint`, and `wave`.
+
+For an established file, `files: [{repo: VERIFIED_REPO, path: VERIFIED_RELATIVE_PATH}]` requests full pinned source, not another search. Optional `lines: "start-end"` requests an exact range. Large requests return whole-line byte-bounded pages with total lines, returned range and `next lines`; request the remaining range on the same ticket. Only advance after that page's evidence is actually embedded. File-only requests skip optional discovery/models. Missing handoff content does not prove the source file is absent; never ask the user to fetch configured repository code manually.
 
 ## State and lineage
 

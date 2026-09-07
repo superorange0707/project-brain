@@ -13,6 +13,28 @@ paths. It records only claims supported by local/public-synthetic verification.
 coverage. `DEFERRED TO TARGET MACHINE` and `DEFERRED TO PRIVATE LOCAL DATA` are
 intentional local-only validation steps, not engineering blockers.
 
+## 2026-09-07 v1.0.15 explicit full-file evidence patch
+
+Protocol v5 now accepts known repository-relative files and optional ranges.
+The existing pinned source reader remains authoritative; bounded whole-line
+pages expose completeness and continuation without creating another index or
+session store. Exact-file-only reads bypass optional discovery/model work.
+Explicitly requested pages remain visible in delta handoffs even when their
+stable evidence identities have already been observed.
+
+Local ResourceWarning-strict validation discovered 511 tests: 506 passed and
+five native-Windows-only cases were skipped. The four new regressions passed
+on Python 3.11, 3.12, 3.13 and 3.14. They cover an 803-line Java adaptor delivered
+to M365, multiple files, G1 reads after G2 publication, stable repeated evidence,
+contiguous Unicode pagination, validation and explicit read/budget failures.
+The tagged full native matrices, artifacts, parity and publication checks
+remain release gates; their results are not claimed before workflow completion.
+
+No Atlas/Semantic schema, model input, pack or migration changes are made.
+Mixed legacy-protocol lineage and fenced-JSON classification are not repaired
+by this patch. Update the existing Agent's generated instructions after upgrade;
+do not reset sessions, rebuild indexes or switch a legacy ticket to v5.
+
 ## 2026-09-07 v1.0.14 investigation continuation patch
 
 The user may approve one bounded wave after automatic investigation pauses,

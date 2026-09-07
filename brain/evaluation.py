@@ -241,7 +241,7 @@ def _evaluate_public_v5_waves(
     for index, raw in enumerate(selected_requests, 1):
         allowed = {
             "version", "mode", "objective", "runtime_facts", "hypotheses", "required", "resolve",
-            "anchors", "base_context_id", "checkpoint", "wave",
+            "anchors", "files", "base_context_id", "checkpoint", "wave",
         }
         request = {key: value for key, value in json.loads(json.dumps(raw)).items() if key in allowed}
         request["version"] = 5

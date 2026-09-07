@@ -1792,7 +1792,7 @@ def _request_body(text: str) -> dict[str, Any]:
         2: {"version", "objective", "searches", "paths", "symbols", "files", "history", "expand"},
         3: {"version", "objective", "hints", "coverage", "expand"},
         4: {"version", "objective", "runtime_facts", "hypotheses", "required", "resolve", "base_context_id", "checkpoint"},
-        5: {"version", "mode", "objective", "runtime_facts", "hypotheses", "required", "resolve", "anchors", "base_context_id", "checkpoint", "wave"},
+        5: {"version", "mode", "objective", "runtime_facts", "hypotheses", "required", "resolve", "anchors", "files", "base_context_id", "checkpoint", "wave"},
     }[version]
     unknown = sorted(set(request) - allowed)
     if unknown:
@@ -1902,10 +1902,15 @@ def _request_body(text: str) -> dict[str, Any]:
             *exact_anchor_terms, *request["resolve"], *derived_anchor_terms,
             *objective_terms(objective, limit=8),
         ]
+        requested_files = request.get("files", []) if version == 5 else []
+        if not isinstance(requested_files, list) or len(requested_files) > MAX_REQUEST_ITEMS:
+            raise BrainError(f"files must be a list of at most {MAX_REQUEST_ITEMS} items")
+        if requested_files and not exact_anchor_terms and not request["resolve"]:
+            resolve_terms = []  # Known files need exact reads, not another discovery pass.
         request["searches"] = [{"query": value, "repos": []} for value in list(dict.fromkeys(resolve_terms))[:12]]
         request["paths"] = []
         request["symbols"] = []
-        request["files"] = []
+        request["files"] = requested_files
         request["history"] = [
             {"query": value, "repos": []} for value in request["resolve"]
             if any(token in value.lower() for token in ("history", "commit", "change", "ticket"))
@@ -2037,11 +2042,23 @@ def parse_context_request(text: str) -> dict[str, Any]:
             raise BrainError(f"files[{index}] requires repo and path")
         if set(item) - {"repo", "path", "lines"}:
             raise BrainError(f"files[{index}] has unknown keys")
+        if request["version"] == 5:
+            if (
+                not isinstance(item["repo"], str) or len(item["repo"].encode("utf-8")) > 200
+                or not isinstance(item["path"], str) or len(item["path"].encode("utf-8")) > 1_000
+                or "\\" in item["path"] or re.match(r"^[A-Za-z]:", item["path"])
+                or any(ord(character) < 32 or ord(character) == 127 for character in item["path"])
+            ):
+                raise BrainError(f"files[{index}] requires a bounded repository name and repository-relative POSIX path")
+            if "lines" in item and (not isinstance(item["lines"], str) or len(item["lines"]) > 32):
+                raise BrainError(f"files[{index}].lines must be a bounded start-end string")
         if item.get("lines") and not re.fullmatch(r"\s*\d+\s*[-:]\s*\d+\s*", str(item["lines"])):
             raise BrainError(f"files[{index}].lines must look like 10-40")
         if item.get("lines"):
             start, end = (int(value) for value in re.split(r"[-:]", str(item["lines"])))
-            if start < 1 or end < start or end - start > 2_000:
+            if start < 1 or end < start or (
+                end > MAX_SOURCE_FILE_BYTES if request["version"] == 5 else end - start > 2_000
+            ):
                 raise BrainError(f"files[{index}].lines is outside the safe range")
         relative = str(item["path"])
         if Path(relative).is_absolute() or ".." in Path(relative).parts:
@@ -2106,7 +2123,7 @@ def request_preview(text: str, settings: Settings | None = None) -> dict[str, An
     public_request = (
         {key: request[key] for key in ("version", "objective", "hints", "coverage", "expand") if key in request}
         if request["version"] == 3
-        else {key: request[key] for key in ("version", "mode", "objective", "runtime_facts", "hypotheses", "required", "resolve", "anchors", "base_context_id", "checkpoint", "wave") if key in request}
+        else {key: request[key] for key in ("version", "mode", "objective", "runtime_facts", "hypotheses", "required", "resolve", "anchors", "files", "base_context_id", "checkpoint", "wave") if key in request and (key != "files" or request[key])}
         if request["version"] == 5
         else {key: request[key] for key in ("version", "objective", "runtime_facts", "hypotheses", "required", "resolve", "base_context_id", "checkpoint") if key in request}
         if request["version"] == 4
@@ -2197,6 +2214,47 @@ def _direct_file(settings: Settings, item: dict[str, Any]) -> Evidence | None:
         return read_source(settings, hit, full=line_range is None, lines=line_range)
     except BrainError:
         return None
+
+
+def _requested_file_page(
+    settings: Settings, item: dict[str, Any], *, max_bytes: int,
+) -> tuple[Evidence | None, dict[str, Any]]:
+    """Read a bounded, whole-line page from the existing authoritative reader."""
+    repo, path = str(item["repo"]), str(item["path"])
+    result: dict[str, Any] = {"repo": repo, "path": path, "requested_lines": item.get("lines") or "all"}
+    try:
+        source = read_source(settings, SearchHit(repo, path, 1, "", "requested file", 100, ["direct file request"]), full=True)
+    except BrainError as error:
+        return None, {**result, "status": "unavailable", "reason": str(error)}
+    rows = source.content.split("\n") if source.line_end else []
+    total = len(rows)
+    result["source_bytes_read"] = len(source.content.encode("utf-8"))
+    start, end = (1, total) if not item.get("lines") else tuple(int(value) for value in re.split(r"[-:]", item["lines"]))
+    result["total_lines"] = total
+    if not total and not item.get("lines"):
+        return None, {**result, "status": "empty", "reason": "The pinned file exists and is empty."}
+    if start > total or end > total:
+        return None, {**result, "status": "out_of_range", "reason": f"The pinned file contains {total} lines; requested {start}-{end}."}
+    page: list[str] = []
+    used = 0
+    for row in rows[start - 1:min(end, start + 1_999)]:
+        size = len(row.encode("utf-8")) + (1 if page else 0)
+        if used + size > max_bytes:
+            break
+        page.append(row)
+        used += size
+    if not page:
+        return None, {**result, "status": "blocked", "reason": f"Line {start} exceeds this request's {max_bytes}-byte source-page budget; no partial line was emitted."}
+    last = start + len(page) - 1
+    next_lines = f"{last + 1}-{end}" if last < end else None
+    status = "partial" if next_lines else "complete_file" if start == 1 and last == total else "complete_range"
+    result.update(status=status, returned_lines=f"{start}-{last}", next_lines=next_lines)
+    source.line_start, source.line_end, source.content = start, last, "\n".join(page)
+    source.found_by.append(
+        f"pinned file read: {status}; total lines {total}; requested {start}-{end}; returned {start}-{last}"
+        + (f"; continue the same files entry with lines={next_lines}" if next_lines else "")
+    )
+    return source, result
 
 
 def working_tree_diffs(settings: Settings, repos: Iterable[str] | None = None) -> list[Evidence]:
@@ -2311,22 +2369,61 @@ def retrieve_context(
         first_verified_evidence_ms: float | None = None
         direct_started = time.perf_counter()
         file_values = {item.value for item in compiled_plan.operations if item.kind == "file"}
+        file_reads: list[dict[str, Any]] = []
+        seen_files: set[str] = set()
+        page_bytes = min(64_000, max(1, settings.hard_context_chars // 3 // max(1, len(file_values))))
         for item in request["files"]:
-            if time_budget_exhausted():
-                break
             value = f"{item['repo']}:{item['path']}" + (f":{item['lines']}" if item.get("lines") else "")
-            if value not in file_values:
+            if value in seen_files:
+                continue
+            seen_files.add(value)
+            if time_budget_exhausted() or value not in file_values:
+                if request.get("version") == 5:
+                    bundle.unresolved.append(f"File read deferred by the request budget: {item['repo']}:{item['path']}; request it again in a focused files request.")
                 continue
             file_values.remove(value)
-            evidence = _direct_file(settings, item)
+            if request.get("version") == 5:
+                if not trace.try_reserve_backend():
+                    bundle.unresolved.append(f"File read deferred by the physical-operation budget: {item['repo']}:{item['path']}.")
+                    continue
+                evidence, report = _requested_file_page(settings, item, max_bytes=page_bytes)
+                file_reads.append(report)
+                trace.bytes_read += int(report.get("source_bytes_read") or 0)
+                if not evidence:
+                    bundle.unresolved.append(f"File read {report['status']}: {item['repo']}:{item['path']}: {report['reason']}")
+                    continue
+            else:
+                evidence = _direct_file(settings, item)
             if evidence:
                 bundle.evidence.append(evidence)
-                trace.bytes_read += len(evidence.content.encode("utf-8", errors="replace"))
+                if request.get("version") != 5:
+                    trace.bytes_read += len(evidence.content.encode("utf-8", errors="replace"))
                 if first_verified_evidence_ms is None:
                     first_verified_evidence_ms = (time.perf_counter() - started) * 1000
             else:
                 bundle.unresolved.append(f"Requested file `{item['repo']}:{item['path']}` was not found")
         trace.add_stage("source_hydration_ms", (time.perf_counter() - direct_started) * 1000)
+
+        if request.get("version") == 5 and request["files"] and not any(
+            request.get(key) for key in ("searches", "paths", "symbols", "history", "expand")
+        ) and not include_diff:
+            # Keep ticket runtime/lineage in create_context; only bypass optional
+            # discovery and models for an exact, already-addressed source read.
+            trace.hydrated_regions = len(bundle.evidence)
+            trace.stop_reason = "requested_files_read" if not bundle.unresolved else "requested_files_incomplete"
+            scope = sorted({str(item["repo"]) for item in request["files"]})
+            trace.initial_repo_scope = trace.final_repo_scope = scope
+            bundle.metrics = {
+                "total_ms": round((time.perf_counter() - started) * 1000, 3),
+                "source_hydration_ms": trace.stage_ms["source_hydration_ms"],
+                "physical_backend_operations": trace.physical_backend_operations,
+                "bytes_read": trace.bytes_read, "hydrated_regions": len(bundle.evidence),
+                "candidates": 0, "raw_candidates": 0, "rerank_input_count": 0,
+                "repo_scope_count": len(scope), "repo_scope_limit": len(scope), "semantic_repo_count": 0,
+            }
+            bundle.trace = {**trace.as_dict(), "file_reads": file_reads, "direct_files_only": True}
+            emit("complete", evidence_count=len(bundle.evidence), physical_operations_completed=trace.physical_backend_operations)
+            return bundle
 
         candidates: list[SearchHit] = []
         from .atlas import route as route_atlas
@@ -2744,6 +2841,8 @@ def retrieve_context(
             "semantic_repo_count": len(trace.semantic_repo_scope),
         }
         bundle.trace = trace.as_dict()
+        if file_reads:
+            bundle.trace["file_reads"] = file_reads
         bundle.trace["cross_repo_relationships"] = cross_repo_relationships
         bundle.trace["atlas_generation"] = (
             bundle.atlas_generation.generation if bundle.atlas_generation is not None else None
@@ -2943,10 +3042,12 @@ def pack_delta_context(
     output.append(f"- New evidence: `{len(new_evidence_ids)}`")
     superseded = progress.get("superseded_evidence_ids") or []
     output.append(f"- Invalidated/superseded evidence: `{', '.join(superseded) if superseded else 'none'}`")
-    new_items = [item for item in bundle.evidence if _evidence_id(item) in new_evidence_ids]
+    new_items = [item for item in bundle.evidence if _evidence_id(item) in new_evidence_ids or "direct file request" in item.found_by]
     new_public_ids = [_public_evidence_id(progress, item) for item in new_items]
     output.append(f"- Embedded evidence IDs: `{', '.join(new_public_ids) or 'none'}`")
     output.append("- Omitted evidence IDs due to byte limit: `none`")
+    if bundle.trace.get("file_reads"):
+        output.append("- Explicitly requested file pages are re-emitted even when their stable evidence IDs are already known.")
     output.extend(["", "## New source evidence", ""])
     if progress.get("protocol_version") == 5 and progress.get("investigation_runtime"):
         from .investigation import render_protocol_v5

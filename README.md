@@ -33,7 +33,7 @@ in control and apply the resulting solution in your normal IDE.
 
 ## Install
 
-The current stable release is **v1.0.14** for macOS, Windows and Linux.
+The current stable release is **v1.0.15** for macOS, Windows and Linux.
 Standalone downloads contain `brain`, `codebase-memory-mcp`, `zoekt`, and
 `zoekt-index`; model weights are never bundled.
 
@@ -61,9 +61,9 @@ On managed machines that allow `git clone` but block direct `.ps1` downloads,
 get the installer from the tagged repository and run it directly:
 
 ```powershell
-git clone --depth 1 --branch v1.0.14 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.15 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.14
+.\scripts\install-project-brain.ps1 -Version 1.0.15
 ```
 
 Specifying `-Version` skips the GitHub API lookup. The installer downloads only
@@ -80,7 +80,7 @@ Already downloaded the ZIP? Put the release's `SHA256SUMS.txt` beside it and,
 from the installer clone, run:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.14-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.15-windows-amd64.zip"
 ```
 
 This path is fully offline: no API call, credentials, administrator access, or
@@ -90,7 +90,7 @@ file in another directory. Close a running Brain UI before upgrading its tools.
 
 If company policy also blocks PowerShell script execution, use the portable ZIP:
 
-**[Download `project-brain-v1.0.14-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.14/project-brain-v1.0.14-windows-amd64.zip)**
+**[Download `project-brain-v1.0.15-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.15/project-brain-v1.0.15-windows-amd64.zip)**
 
 Download the ZIP in a browser and extract its complete contents into
 `%LOCALAPPDATA%\ProjectBrain\bin` (or another folder you control) so the four
@@ -108,20 +108,20 @@ Windows is recommended when `brain refresh` needs to fetch remote refs and
 create immutable Git snapshots.
 
 Verify the download against
-[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.14/SHA256SUMS.txt):
+[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.15/SHA256SUMS.txt):
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.14-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\project-brain-v1.0.15-windows-amd64.zip -Algorithm SHA256
 ```
 
 On unrestricted machines, the same installer is also available directly from
-the [v1.0.14 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.14).
+the [v1.0.15 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.15).
 
 ### Linux — verified user-level installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.14/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.14
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.15/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.15
 brain --version
 ```
 
@@ -133,17 +133,17 @@ and installs the four executables in `~/.local/bin`.
 Python 3.11–3.14 is supported:
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.14"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.15"
 ```
 
 Or install the release wheel directly:
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.14/project_brain_context-1.0.14-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.15/project_brain_context-1.0.15-py3-none-any.whl
 ```
 
 All native archives, Python distributions, installers and their checksums are on the
-**[v1.0.14 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.14)**.
+**[v1.0.15 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.15)**.
 
 ## Quick start
 

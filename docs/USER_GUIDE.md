@@ -25,7 +25,7 @@ directories can still be searched.
 
 ## 2. Installation
 
-macOS, Windows, Linux and Python distributions are at **v1.0.14**.
+macOS, Windows, Linux and Python distributions are at **v1.0.15**.
 Use the platform-specific commands below.
 
 ### Homebrew (recommended on macOS)
@@ -48,8 +48,8 @@ toolchain. Homebrew maps `superorange0707/tap` to the separate
 ### Linux installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.14/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.14
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.15/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.15
 ```
 
 This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
@@ -58,8 +58,8 @@ adjacent executables in `~/.local/bin` without changing Brain workspace state.
 ### Standalone macOS/Linux archive
 
 Use the verified
-[v1.0.14 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.14)
-or [v1.0.14 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.14)
+[v1.0.15 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.15)
+or [v1.0.15 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.15)
 for the matching arm64/amd64 platform. Keep `brain`,
 `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the same directory on
 `PATH`.
@@ -70,9 +70,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.14 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.15 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.14
+.\scripts\install-project-brain.ps1 -Version 1.0.15
 brain.exe --version
 ```
 
@@ -90,7 +90,7 @@ For a ZIP already downloaded in a browser or transferred from another machine,
 put its published `SHA256SUMS.txt` in the same directory and run the same script:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.14-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.15-windows-amd64.zip"
 ```
 
 The version is read from the official filename. This path performs no network
@@ -106,14 +106,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.14-windows-amd64.zip` and the published
+Download `project-brain-v1.0.15-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.14-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.14-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.15-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.15-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -136,7 +136,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.14"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.15"
 ```
 
 Upgrade later with:
@@ -148,7 +148,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.14"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.15"
 ```
 
 ### From a source checkout
@@ -950,6 +950,45 @@ Old investigations can be removed from **Project overview** with **Delete
 history**. The confirmation names the ticket; this deletes only `.runs/TICKET`
 and that ticket's generated handoffs. Repositories, branches, and source files
 are never deleted.
+
+### Request a complete known source file
+
+Project Brain v1.0.15 and later accept `files` on an existing v5
+ticket. A project knowledge file or context handoff is not a complete repository
+export. If it lacks an established Java adaptor, ask the Agent to request the
+source through Brain instead of asking you to copy it manually:
+
+```yaml
+INVESTIGATION_REQUEST:
+  version: 5
+  mode: implementation_plan
+  objective: Read the complete established adaptor implementation.
+  files:
+    - repo: COPY_THE_VERIFIED_REPOSITORY_NAME
+      path: COPY_THE_VERIFIED_RELATIVE_PATH
+  base_context_id: COPY_THE_LATEST_CONTEXT_ID
+```
+
+Replace placeholders with names and the latest context ID already shown by
+Brain. Omit `lines` for a full file, or add `lines: "100-250"` for an exact range.
+File-only requests read the pinned source before optional discovery/model work;
+they do not change the ticket generation or rebuild indexes. Unknown paths,
+unavailable pinned source and out-of-range requests are reported explicitly.
+
+Larger files are paged at complete line boundaries within the request's UTF-8
+byte budget (at most 2,000 lines and 64,000 source bytes per page, and less when
+the context budget is shared across files). The source's `Found by` metadata
+states total lines, returned lines, completeness and `next lines`. Continue the
+same file with that remaining range. `complete_range` means the requested range,
+not necessarily the whole file. If the page's evidence ID was omitted by the
+final context byte limit, request that page alone before advancing. A single
+line larger than the page budget is an explicit blocker, never partial source
+presented as a complete line. No automatic endless retrieval loop is started.
+
+After installing the fix, regenerate `brain agent-kit m365` and update the
+existing Agent's instructions so it knows the optional `files` field. The kit
+remains v4 and the request protocol remains v5; no new Agent is required. Do not
+downgrade or switch a legacy ticket's protocol to work around a missing file.
 
 ### Continue after an investigation pauses
 

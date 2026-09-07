@@ -43,6 +43,19 @@ INVESTIGATION_REQUEST:
 
 Supported modes are `root_cause`, `implementation_plan`, `impact_analysis`, `test_surface`, `flow_trace`, and `history`. Anchor entries contain only `kind` and `value`; supported kinds include symbol, stack_frame, exception, log_literal, error_code, endpoint, topic, event, queue, config_key, feature_flag, schema, table, field, constant, package, and file_hint.
 
+When an established repository file is missing from the handoff or only a snippet was shown, request it through optional `files`, not from the user. Each entry has `repo`, the exact repository-relative `path`, and optional `lines: "start-end"`. Omit `lines` to request the whole file. For a focused read, omit `resolve` and `anchors`; a file hint only discovers a path and does not request its full contents. Brain returns exact pinned source with total lines, returned range, and `next lines` when another bounded page is needed. Continue that same files entry using the returned range until the requested content is complete. A `complete_range` page is not a claim that the whole file was delivered. If an evidence ID was omitted by the context byte limit, its page was not delivered: request that page alone before advancing. Keep protocol v5 and the same ticket; do not reset, refresh or switch to a legacy protocol to read files. An export/handoff not containing a file does not establish that it is absent from the repository. Ask the user only for files genuinely outside the configured/pinned source scope or an explicit access blocker.
+
+```yaml
+INVESTIGATION_REQUEST:
+  version: 5
+  mode: implementation_plan
+  objective: Read the complete implementation of the established adaptor.
+  files:
+    - repo: COPY_THE_VERIFIED_REPOSITORY_NAME
+      path: COPY_THE_VERIFIED_RELATIVE_FILE_PATH
+  base_context_id: COPY_THE_LATEST_CONTEXT_ID
+```
+
 Use the newest round-specific context file. Apply a delta only to its declared `base_context_id`. Replace accumulated state only when Brain sends a full checkpoint whose replacement status is `complete_replacement`. An `incomplete_non_replacing` recovery preserves prior evidence and supplies a retained-evidence manifest; keep the prior state until the omitted IDs are recovered or explicitly superseded. Preserve stable `E####`, `A###`, `F###`, `B###`, and `CTX-###` identities. Protocols v1–v4 remain valid for an existing legacy conversation, but new requests use v5. For a legacy request, use `paths:` for a filename/path fragment; in v5 use a `file_hint` anchor instead.
 
 When Brain publishes a `checkpoint-NNN` first-useful handoff, consume its exact evidence immediately without treating the investigation as complete. Apply only the matching `checkpoint-delta-NNN` continuation to its declared checkpoint ID; never combine it with another ticket or generation.
