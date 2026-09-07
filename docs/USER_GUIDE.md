@@ -25,9 +25,8 @@ directories can still be searched.
 
 ## 2. Installation
 
-macOS Homebrew and Python distributions are at **v1.0.14**. Windows/Linux
-native downloads remain at **v1.0.12**; the global GitHub Latest pointer is kept
-there for those installers. Use the platform-specific commands below.
+macOS, Windows, Linux and Python distributions are at **v1.0.14**.
+Use the platform-specific commands below.
 
 ### Homebrew (recommended on macOS)
 
@@ -49,8 +48,8 @@ toolchain. Homebrew maps `superorange0707/tap` to the separate
 ### Linux installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.12/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.12
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.14/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.14
 ```
 
 This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
@@ -60,7 +59,7 @@ adjacent executables in `~/.local/bin` without changing Brain workspace state.
 
 Use the verified
 [v1.0.14 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.14)
-or [v1.0.12 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.12)
+or [v1.0.14 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.14)
 for the matching arm64/amd64 platform. Keep `brain`,
 `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the same directory on
 `PATH`.
@@ -71,9 +70,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.12 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.14 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.12
+.\scripts\install-project-brain.ps1 -Version 1.0.14
 brain.exe --version
 ```
 
@@ -91,7 +90,7 @@ For a ZIP already downloaded in a browser or transferred from another machine,
 put its published `SHA256SUMS.txt` in the same directory and run the same script:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.12-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.14-windows-amd64.zip"
 ```
 
 The version is read from the official filename. This path performs no network
@@ -107,14 +106,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.12-windows-amd64.zip` and the published
+Download `project-brain-v1.0.14-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.12-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.12-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.14-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.14-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help

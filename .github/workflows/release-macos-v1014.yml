@@ -1,9 +1,14 @@
-name: Publish verified macOS v1.0.14
+name: Publish verified v1.0.14 artifacts
 
-# Explicitly authorized Mac-only publication. Never moves the release tag or
-# changes the global latest pointer used by Windows/Linux installers.
+# Mac-first publication, followed by explicitly requested remaining platforms.
+# Never moves the release tag or replaces existing executable artifacts.
 on:
   workflow_dispatch:
+    inputs:
+      complete_platforms:
+        description: "Add qualified Windows/Linux artifacts to the existing Mac release and mark it Latest"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,6 +32,7 @@ jobs:
       RELEASE_TAG: v1.0.14
       SOURCE_SHA: 9a2a2b7b4696c450567832cd56938851608596ef
       SOURCE_RUN: "34110869803"
+      COMPLETE_PLATFORMS: ${{ inputs.complete_platforms }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -50,11 +56,18 @@ jobs:
               "Stable v1 model-pack catalog readiness (macos-15, darwin-arm64)",
               *[f"Python {version}" for version in ("3.11", "3.12", "3.13", "3.14")],
           ]
+          if os.environ["COMPLETE_PLATFORMS"] == "true":
+              required += ["Standalone linux-arm64", "Standalone linux-amd64", "Standalone Windows amd64",
+                           "Stable v1 model-pack catalog readiness (windows-latest, windows-amd64)"]
           for name in required:
               assert results.get(name) == "success", (name, results.get(name))
               print(f"PASS: {name}")
           ci = api(f"repos/{repo}/actions/runs/34110451035")
           assert ci["head_sha"] == sha and ci["conclusion"] == "success"
+          ci_jobs = api(f"repos/{repo}/actions/runs/34110451035/jobs?per_page=100")["jobs"]
+          ci_results = {job["name"]: job["conclusion"] for job in ci_jobs}
+          for version in ("3.11", "3.12", "3.13", "3.14"):
+              assert ci_results[f"Native Windows Python {version}"] == "success"
           print("PASS: independent full CI on the identical commit")
       - uses: actions/download-artifact@v8
         with:
@@ -74,10 +87,25 @@ jobs:
           run-id: 34110869803
           name: python-package-distributions
           path: dist/
+      - uses: actions/download-artifact@v8
+        if: inputs.complete_platforms
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34110869803
+          pattern: standalone-linux-*
+          merge-multiple: true
+          path: dist/
+      - uses: actions/download-artifact@v8
+        if: inputs.complete_platforms
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34110869803
+          name: standalone-windows-amd64
+          path: dist/
       - name: Validate artifacts and prepare checksums
         shell: python
         run: |
-          import hashlib, subprocess, tarfile, zipfile
+          import hashlib, os, subprocess, tarfile, zipfile
           from pathlib import Path
           root = Path("dist")
           expected = {
@@ -86,6 +114,10 @@ jobs:
               "project_brain_context-1.0.14-py3-none-any.whl",
               "project_brain_context-1.0.14.tar.gz",
           }
+          complete = os.environ["COMPLETE_PLATFORMS"] == "true"
+          if complete:
+              expected.update({"project-brain-v1.0.14-linux-arm64.tar.gz", "project-brain-v1.0.14-linux-amd64.tar.gz",
+                               "project-brain-v1.0.14-windows-amd64.zip"})
           assert {p.name for p in root.iterdir()} == expected
           required = {"brain", "codebase-memory-mcp", "zoekt", "zoekt-index", "PROJECT_BRAIN_LICENSE",
                       "CODEBASE_MEMORY_LICENSE", "CODEBASE_MEMORY_THIRD_PARTY_NOTICES.md", "ZOEKt_LICENSE", "ZOEKt_VERSION"}
@@ -102,6 +134,26 @@ jobs:
               metadata = archive.extractfile("project_brain_context-1.0.14/PKG-INFO").read().decode()
               assert "\nVersion: 1.0.14\n" in metadata
           (root / "install-project-brain.sh").write_bytes(subprocess.check_output(["git", "show", "v1.0.14:scripts/install-project-brain.sh"]))
+          if complete:
+              with zipfile.ZipFile(root / "project-brain-v1.0.14-windows-amd64.zip") as archive:
+                  assert archive.testzip() is None
+                  names = set(archive.namelist())
+                  assert {"brain.exe", "codebase-memory-mcp.exe", "zoekt.exe", "zoekt-index.exe"}.issubset(names)
+                  assert not any("/" in name or "\\" in name or name.endswith(".gguf") for name in names)
+              (root / "install-project-brain.ps1").write_bytes(subprocess.check_output(["git", "show", "v1.0.14:scripts/install-project-brain.ps1"]))
+              # Previously published Mac/package bytes are immutable. Only the
+              # checksum manifest grows when the remaining platforms are added.
+              previous = Path("previous-release")
+              previous.mkdir()
+              subprocess.run(["gh", "release", "download", "v1.0.14", "--dir", str(previous)], check=True)
+              old_names = {"install-project-brain.sh", "SHA256SUMS.txt", "project-brain-v1.0.14-macos-arm64.tar.gz",
+                           "project-brain-v1.0.14-macos-amd64.tar.gz", "project_brain_context-1.0.14-py3-none-any.whl",
+                           "project_brain_context-1.0.14.tar.gz"}
+              assert {path.name for path in previous.iterdir()} == old_names
+              subprocess.run(["sha256sum", "-c", "SHA256SUMS.txt"], cwd=previous, check=True)
+              for path in previous.iterdir():
+                  if path.name != "SHA256SUMS.txt":
+                      assert path.read_bytes() == (root / path.name).read_bytes(), path.name
           lines = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(root.iterdir())]
           (root / "SHA256SUMS.txt").write_text("".join(lines), encoding="utf-8")
       - name: Attest the verified release assets
@@ -109,11 +161,17 @@ jobs:
         with:
           subject-path: "dist/*"
       - name: Create draft stable Mac release
+        if: ${{ !inputs.complete_platforms }}
         run: |
           awk '/^---$/ { exit } { print }' RELEASE_NOTES.md > "$RUNNER_TEMP/release-notes.md"
           gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --latest=false \
             --title "Project Brain v1.0.14 — macOS: Continue Gathering Evidence" \
             --notes-file "$RUNNER_TEMP/release-notes.md"
+      - name: Add remaining native platforms without replacing published executables
+        if: inputs.complete_platforms
+        run: |
+          gh release upload "$RELEASE_TAG" dist/*-linux-*.tar.gz dist/*-windows-*.zip dist/install-project-brain.ps1
+          gh release upload "$RELEASE_TAG" dist/SHA256SUMS.txt --clobber
       - name: Verify downloaded assets and attestations
         run: |
           mkdir verified
@@ -122,6 +180,7 @@ jobs:
           sha256sum -c SHA256SUMS.txt
           for asset in *; do gh attestation verify "$asset" --repo "$GH_REPO"; done
       - name: Publish Mac release without changing other platforms' latest release
+        if: ${{ !inputs.complete_platforms }}
         run: |
           gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest=false
           trap 'gh release edit "$RELEASE_TAG" --draft=true' ERR
@@ -133,3 +192,18 @@ jobs:
           done
           (cd anonymous && sha256sum -c SHA256SUMS.txt)
           trap - ERR
+      - name: Verify anonymous complete downloads before promoting all-platform Latest
+        if: inputs.complete_platforms
+        run: |
+          mkdir anonymous
+          for source in dist/*; do
+            asset="$(basename "$source")"
+            curl --fail --location --silent --show-error --retry 5 --retry-all-errors --retry-delay 5 \
+              "https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}/$asset" --output "anonymous/$asset"
+          done
+          (cd anonymous && sha256sum -c SHA256SUMS.txt)
+          cmp dist/SHA256SUMS.txt anonymous/SHA256SUMS.txt
+          awk '/^---$/ { exit } { print }' RELEASE_NOTES.md > "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$RELEASE_TAG" --prerelease=false --latest \
+            --title "Project Brain v1.0.14 — Continue Gathering Evidence" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

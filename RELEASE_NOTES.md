@@ -1,9 +1,9 @@
-# Project Brain v1.0.14 — macOS: Continue Gathering Evidence
+# Project Brain v1.0.14 — Continue Gathering Evidence
 
-This publication provides stable macOS Apple Silicon/Intel packages and Python
-distributions from the unchanged v1.0.14 tag. Windows/Linux native installers
-remain on v1.0.12; the global GitHub Latest pointer stays there so their existing
-download commands keep working. macOS Homebrew upgrades directly to v1.0.14.
+This stable release provides macOS Apple Silicon/Intel, Linux arm64/amd64,
+Windows x64 and Python distributions from the unchanged v1.0.14 tag. Windows
+and Linux packages were added after the Mac-first publication; the already
+published Mac executables are unchanged. All platforms now use v1.0.14.
 
 This stable patch removes the lifetime four-wave investigation rejection.
 The automatic allowance still pauses work, but the user can explicitly approve
@@ -46,10 +46,12 @@ and conversation; no new Agent or mandatory `brain refresh` is required.
 Both tagged Mac archives passed native CLI/installer checks. Python 3.11–3.14,
 package builds, five-platform deterministic parity and independent full CI passed
 on commit `9a2a2b7b4696c450567832cd56938851608596ef`. The all-platform release run
-hit an optional Node UI smoke-test timeout on Windows 3.12; Mac publication is
-explicitly independent of that failure, not a claim that the failed job passed.
+hit an optional Node UI smoke-test timeout on Windows 3.12. The independent
+full CI on the identical tag passed all Windows Python 3.11–3.14 jobs, including
+that test. Publication combines those successful tests with the tagged native
+artifact, installer and parity jobs; it does not relabel the failed job as passed.
 Unchanged model-pack contracts were verified against successful v1.0.12
-qualification. Published Mac/Python assets carry checksums and attestations and
+qualification. All published assets carry checksums and attestations and
 are downloaded again for integrity and anonymous-availability checks.
 
 Target repositories remain read-only. No target source editing/test execution,
