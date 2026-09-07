@@ -275,6 +275,14 @@ class CustomerListener {
         for files in bad_files:
             with self.subTest(files=files), self.assertRaises(BrainError):
                 parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {**body, "files": files}}))
+        # Windows considers a rooted POSIX path non-absolute without a drive.
+        # The protocol's repository-relative rule must not depend on the host.
+        with mock.patch("brain.core.Path.is_absolute", return_value=False):
+            for path in ("/absolute", "/", "//server/share"):
+                with self.subTest(rooted_path=path), self.assertRaises(BrainError):
+                    parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                        **body, "files": [{"repo": "customer-api", "path": path}],
+                    }}))
 
     def test_v5_requested_files_deliver_full_adaptors_without_discovery_on_original_generation(self) -> None:
         from brain.core import deliver

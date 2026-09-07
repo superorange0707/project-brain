@@ -2046,7 +2046,7 @@ def parse_context_request(text: str) -> dict[str, Any]:
             if (
                 not isinstance(item["repo"], str) or len(item["repo"].encode("utf-8")) > 200
                 or not isinstance(item["path"], str) or len(item["path"].encode("utf-8")) > 1_000
-                or "\\" in item["path"] or re.match(r"^[A-Za-z]:", item["path"])
+                or item["path"].startswith("/") or "\\" in item["path"] or re.match(r"^[A-Za-z]:", item["path"])
                 or any(ord(character) < 32 or ord(character) == 127 for character in item["path"])
             ):
                 raise BrainError(f"files[{index}] requires a bounded repository name and repository-relative POSIX path")

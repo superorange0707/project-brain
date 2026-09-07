@@ -2,8 +2,11 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.15] - 2026-09-07
+## [1.0.16] - 2026-09-07
 
+- Preserve the unpublished v1.0.15 tag. Native Windows CI caught a rooted-path
+  validation gap before publication; reject leading-slash paths independently
+  of the host's path semantics, with a portable regression on all platforms.
 - Add explicit protocol-v5 `files` requests for complete known source files or
   exact line ranges. Read the ticket's immutable source generation directly;
   file-only requests do not repeat optional discovery or model inference.

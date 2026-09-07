@@ -13,7 +13,12 @@ paths. It records only claims supported by local/public-synthetic verification.
 coverage. `DEFERRED TO TARGET MACHINE` and `DEFERRED TO PRIVATE LOCAL DATA` are
 intentional local-only validation steps, not engineering blockers.
 
-## 2026-09-07 v1.0.15 explicit full-file evidence patch
+## 2026-09-07 v1.0.16 explicit full-file evidence patch
+
+The unpublished v1.0.15 tag is retained unchanged. Native Windows CI rejected
+its host-dependent absolute-path guard; a leading-slash check now enforces the
+protocol's POSIX relative-path contract on every host. The regression also
+simulates Windows' non-absolute rooted-path result on Unix test runners.
 
 Protocol v5 now accepts known repository-relative files and optional ranges.
 The existing pinned source reader remains authoritative; bounded whole-line
