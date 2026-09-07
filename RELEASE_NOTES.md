@@ -58,6 +58,22 @@ Target repositories remain read-only. No target source editing/test execution,
 hosted inference or automatic source upload is introduced. Model weights are
 not bundled and the existing opt-in PyPI publication policy is unchanged.
 
+## Known legacy-request compatibility issues
+
+Agent Kit v4 uses request protocol v5; these are different version numbers.
+Although plain JSON requests for protocols v1–v4 remain parseable, existing
+v4 ticket context lineage is not safely migrated to v5. Sending v4 into an
+existing v5 ticket can also leave later v5 requests rejected by identity
+validation. This is a compatibility defect, not a requirement to delete evidence
+or rebuild indexes. Keep an existing ticket on its current protocol while a
+managed compatibility/recovery fix is prepared; do not manually rewrite session
+state or change JSON version numbers to bypass the error.
+
+JSON wrapped in a Markdown code fence may also be classified as ordinary chat.
+Pasting only the JSON object avoids this separate formatting issue. These issues
+were reproduced during post-publication compatibility diagnosis and are not
+fixed by the v1.0.14 artifact set.
+
 ---
 
 # Project Brain v1.0.13 — Preserve Semantic Work Across Refreshes
