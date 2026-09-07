@@ -12,6 +12,7 @@ from . import __version__
 from .core import (
     BrainError,
     Settings,
+    investigation_continuation,
     mark_active_artifacts,
     protocol_request_signature,
     request_preview,
@@ -115,6 +116,8 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
             state = session_state(settings, ticket) if settings else {}
             signature = protocol_request_signature(result, ticket, state)
             result["signature"] = signature
+            if settings and result["request"].get("version") == 5:
+                result["continuation"] = investigation_continuation(settings, state)
             previous = next(
                 (
                     item
@@ -267,7 +270,7 @@ Treat Atlas cards, anchors, flow candidates, Program Slice Lite, history, and se
 
 ## Investigation state machine
 
-Proceed through `INTAKE → ORIENT → INVESTIGATE → CHALLENGE → SYNTHESIZE → STOP`. Use at most three normal waves and never exceed four. Challenge the leading hypothesis with disconfirming evidence before synthesis. Stop on sufficient coverage, no progress, an external blocker, or the wave/budget limit.
+Proceed through `INTAKE → ORIENT → INVESTIGATE → CHALLENGE → SYNTHESIZE → STOP`. The automatic allowance is three normal waves and a justified fourth, not a lifetime ticket limit. Challenge the leading hypothesis with disconfirming evidence before synthesis. Pause on sufficient coverage, no progress, an external blocker, or the automatic allowance. A pause is not proof of completion. The user may approve one additional bounded wave on the same ticket with Continue gathering evidence or `--continue-investigation`. Preserve the pinned generation and all evidence/context identities. Omit `wave` or continue the ticket's sequential count beyond four; never restart the counter. Approval belongs to the user action, not the AI request envelope. Never switch protocols to bypass the pause.
 
 ## Final response
 

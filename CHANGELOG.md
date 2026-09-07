@@ -2,6 +2,22 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.14] - 2026-09-07
+
+- Replace the lifetime four-wave investigation rejection with explicit,
+  single-wave user continuation in the UI and CLI. Keep automatic stopping and
+  per-wave work/input bounds; preserve the ticket's original generation,
+  evidence identities, context lineage and cumulative work accounting.
+- Explain investigation pauses without directing users to refresh or reset.
+  Update generated AI/M365 instructions to allow focused, user-approved follow-up
+  requests beyond wave four. No index rebuild or state migration is required.
+- Keep the context ID already reserved by an early checkpoint when retry
+  coverage changes. Revalidate its exact pinned proofs and preserve the early
+  artifact; completed context identities can never be rebound.
+- Permit explicitly requested reuse of a successful stable release's model-pack
+  qualification only when its runtime, dependency and bounded-input fingerprint
+  is unchanged. Default tag releases retain full fresh qualification.
+
 ## [1.0.13] - 2026-09-07
 
 - Recover compatible exact-input vectors from registered parent Semantic shards
@@ -751,6 +767,7 @@ first-use lock race before GitHub Release publication.
 - Per-ticket sessions and reusable project/ticket knowledge.
 - CI, release packaging, security policy, user guide, and contribution guide.
 
+[1.0.14]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.14
 [1.0.13]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.13
 [1.0.12]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.12
 [1.0.11]: https://github.com/superorange0707/project-brain/releases/tag/v1.0.11

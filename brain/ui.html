@@ -247,7 +247,7 @@
       <button class="button" id="activity-button" hidden><span id="activity-summary" role="status"></span> · View progress</button>
       <div class="error" id="global-error" role="alert" hidden>
         <p id="global-error-message"></p>
-        <div class="row"><button class="button" id="error-recheck">Recheck connection & status</button><button class="button" data-go="brain">Health & recovery</button><button class="button ghost" id="dismiss-error">Dismiss</button></div>
+        <div class="row"><button class="button" id="error-recheck">Recheck connection & status</button><button class="button" id="error-recovery" data-go="brain">Health & recovery</button><button class="button ghost" id="dismiss-error">Dismiss</button></div>
       </div>
 
       <section class="view active" id="view-overview">
@@ -562,7 +562,7 @@
       ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
     }
     function renderRecovery(recovery, message) {
-      var target = document.getElementById(recovery && recovery.action === "safe_gc" ? "storage-recovery-message" : "recovery-message");
+      var target = document.getElementById(recovery && recovery.action === "continue_investigation" ? "request-message" : recovery && recovery.action === "safe_gc" ? "storage-recovery-message" : "recovery-message");
       if (!target) return;
       if (!recovery) {
         if (message) target.innerHTML = '<div class="error">' + esc(message) + '</div>';
@@ -888,7 +888,8 @@
       var checkpoint = cockpit.first_useful_checkpoint || {};
       target.innerHTML = [
         ["Pinned generation", cockpit.generation],
-        ["Wave / hard limit", String(cockpit.wave) + " / " + String(cockpit.hard_max_waves)],
+        ["Completed wave", String(cockpit.wave)],
+        ["Continuation", "More evidence can be requested on this ticket; each approved continuation runs one bounded wave."],
         ["Anchors", anchors.length],
         ["Execution / integration steps", String(execution.length) + " / " + String(integration.length)],
         ["Hypotheses / blockers", String(hypotheses.length) + " / " + String(frontier.length)],
@@ -947,8 +948,11 @@
       showToast(error.message || String(error));
       document.getElementById("global-error-message").textContent = error.message || String(error);
       document.getElementById("global-error").hidden = false;
+      var paused = error.recovery && error.recovery.action === "continue_investigation";
+      document.getElementById("error-recovery").dataset.go = paused ? "request" : "brain";
+      document.getElementById("error-recovery").textContent = paused ? "Continue with AI" : "Health & recovery";
       if (error.recovery) {
-        setView("brain");
+        setView(paused ? "request" : "brain");
         renderRecovery(error.recovery, error.message || String(error));
       }
     }
@@ -1025,7 +1029,8 @@
       var run = document.getElementById("run-request");
       var actionable = plan.valid && plan.kind !== "conversation" && !plan.duplicate_of;
       run.disabled = !actionable;
-      run.textContent = plan.kind === "final_solution" ? "Archive final plan" : "Run retrieval";
+      var continuation = plan.continuation || {};
+      run.textContent = plan.kind === "final_solution" ? "Archive final plan" : continuation.required ? "Continue gathering evidence" : "Run retrieval";
       run.dataset.label = run.textContent;
       document.getElementById("operation-count").textContent = plan.valid ? plan.operation_count : "!";
       document.getElementById("request-objective").textContent = plan.valid ? (plan.objective || plan.label) : plan.error;
@@ -1042,6 +1047,10 @@
         message.innerHTML = '<div class="success"><strong>Ready to implement.</strong><br>' + esc(plan.message) + '</div>';
       } else if (plan.duplicate_of) {
         message.innerHTML = '<div class="error">This retrieval already ran as request ' + String(plan.duplicate_of).padStart(3, "0") + '. Clear the old reply and paste only the AI’s latest complete response. If the AI asked you a human question, answer it directly in that chat; Brain should not create another request.</div>';
+      } else if (continuation.required) {
+        message.innerHTML = '<div class="success"><strong>More evidence can be gathered on this ticket.</strong><br>' + esc(continuation.reason) +
+          ' Review this request, then approve wave ' + esc(continuation.next_wave) + ' on pinned generation ' + esc(continuation.generation) +
+          '. This permits one bounded wave, not an automatic loop. Existing evidence is retained; no refresh or reset is needed.</div>';
       } else {
         message.innerHTML = '<div class="success">Valid repository request. Review exactly what Brain will retrieve, then run it.</div>';
       }
@@ -1069,6 +1078,12 @@
     });
     document.getElementById("run-request").addEventListener("click", async function () {
       if (!state.preview) return;
+      var continuation = state.preview.continuation || {};
+      var approveContinuation = state.preview.kind === "context_request" && continuation.required === true;
+      if (approveContinuation && !window.confirm("Continue gathering evidence for " + document.getElementById("request-ticket").value +
+          "? Approve wave " + continuation.next_wave + " on pinned generation " + continuation.generation +
+          ", up to " + continuation.physical_operations_per_wave + " backend operations and " + continuation.context_bytes_per_wave +
+          " context bytes. Existing evidence stays intact. This does not approve another wave or a refresh.")) return;
       var button = this; busy(button, true, state.preview.kind === "final_solution" ? "Archiving…" : "Retrieving…");
       var completed = false;
       try {
@@ -1076,6 +1091,8 @@
           ticket: document.getElementById("request-ticket").value,
           text: document.getElementById("request-text").value,
           include_diff: document.getElementById("request-diff").checked,
+          continue_investigation: approveContinuation,
+          continuation_token: approveContinuation ? continuation.token : null,
           target: document.getElementById("request-target").value
         };
         var job = await api("/api/retrieval", {method:"POST",body:JSON.stringify(body)});

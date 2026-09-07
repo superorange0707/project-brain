@@ -118,6 +118,7 @@ _PROGRESS_LABELS = {
     "continuation_published": "Publishing checkpoint continuation",
     "wave_complete": "Investigation wave complete",
     "investigation_complete": "Investigation complete",
+    "investigation_paused": "Wave complete — investigation paused; more evidence can be requested",
     "discovery": "Discovering repositories",
     "sync": "Reconciling repository snapshots",
     "core_index": "Building Core indexes",

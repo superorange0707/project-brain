@@ -13,6 +13,35 @@ paths. It records only claims supported by local/public-synthetic verification.
 coverage. `DEFERRED TO TARGET MACHINE` and `DEFERRED TO PRIVATE LOCAL DATA` are
 intentional local-only validation steps, not engineering blockers.
 
+## 2026-09-07 v1.0.14 investigation continuation patch
+
+The user may approve one bounded wave after automatic investigation pauses,
+without replacing the session or its generation. Preview approvals are bound
+to ticket incarnation, context, wave and configured budgets. Duplicate plans,
+invalid public IDs, untrusted approval fields and stale confirmations remain
+rejected; cumulative work survives bounded history retention.
+
+A deterministic regression reproduced the earlier checkpoint retry failure:
+different retrieval coverage allocated a new context ID despite the early
+artifact already reserving one. Retry now finalizes only that uncommitted
+reservation, revalidates pinned proofs, and retains the original artifact.
+Completed context IDs are never rebound. The large-comment identity test no
+longer depends on wall-clock scheduling; a separate deterministic test retains
+the real parse deadline enforcement.
+
+The continuation implementation passed the full local Python 3.11–3.14 matrix
+(504 cases per interpreter, five native-Windows skips). The additional release
+fixes receive fresh focused tests, a full local suite and tagged native CI.
+Release results are authoritative only after the workflow completes.
+
+The user authorized an expedited patch release. An explicit manual release
+option can reuse a successful stable tag's model-pack qualification only after
+checking ancestry, its successful full release run, unchanged model files,
+bounded-input AST contracts and dependency metadata. This avoids repeatedly
+installing and re-certifying unchanged large model packs; it does not skip
+native Core, Python matrix, installer, parity, checksum or provenance gates.
+Default tag pushes still perform fresh model-pack qualification.
+
 ## 2026-09-07 v1.0.13 incremental Semantic refresh hotfix
 
 The confirmed defect was reuse loss after disposable embedding-cache eviction:

@@ -18,6 +18,7 @@ from brain.atlas import _file_intelligence, _prioritized_routing_terms, build_at
 from brain.catalog import collect_generation_components, current_generation_ref, publish_generation
 from brain.core import (
     BrainError,
+    InvestigationContinuationRequired,
     ContextBundle,
     Evidence,
     _publish_first_useful_checkpoint,
@@ -25,6 +26,7 @@ from brain.core import (
     create_context,
     create_feedback,
     load_settings,
+    investigation_continuation,
     parse_context_request,
     prefetch_ticket,
     protocol_request_signature,
@@ -718,11 +720,20 @@ class B {
 
     def test_masked_java_tail_does_not_change_atlas_identity(self) -> None:
         source = '@RestController class A { @GetMapping("/a") String a(){ return "a"; } }'
-        baseline = _file_intelligence("customer-api", "src/A.java", "blob", source)
-        padded = _file_intelligence(
-            "customer-api", "src/A.java", "blob", source + " /*" + ("x" * 900_000) + "*/",
-        )
+        # Identity invariance is independent of scheduler/CI load. Time-budget
+        # enforcement is checked separately, without a wall-clock race here.
+        with mock.patch("brain.atlas.time.monotonic", return_value=0):
+            baseline = _file_intelligence("customer-api", "src/A.java", "blob", source)
+            padded = _file_intelligence(
+                "customer-api", "src/A.java", "blob", source + " /*" + ("x" * 900_000) + "*/",
+            )
         self.assertEqual(baseline, padded)
+
+    def test_java_parse_deadline_still_fails_closed(self) -> None:
+        from brain.atlas import AtlasCapacityError, _java_entities
+
+        with mock.patch("brain.atlas.time.monotonic", return_value=3), self.assertRaisesRegex(AtlasCapacityError, "parse time budget"):
+            _java_entities("repo", "A.java", "blob", "module", "class A {}", "class A {}", 2)
 
     def test_stack_frame_declaring_class_must_own_the_method_line(self) -> None:
         source = """package demo;
@@ -1710,9 +1721,226 @@ String docs = """
         self.assertEqual(generation_two.generation, session_state(self.settings, "TICKET-B")["generation"])
         self.assertEqual(generation_two.generation, session_state(self.settings, "TICKET-B")["prefetch"]["generation"])
 
-        with self.assertRaisesRegex(BrainError, "hard four-wave limit"):
-            create_context(self.settings, "TICKET-A", self.request("Wrong wave", base="CTX-004", wave=4))
+        fifth_request = self.request("Find additional G1 source evidence", base="CTX-004", wave=5)
+        before = state_path.read_bytes()
+        artifacts = {path: path.read_bytes() for path in state_path.parent.glob("*.md")}
+        with self.assertRaisesRegex(InvestigationContinuationRequired, "Continue gathering evidence"):
+            create_context(self.settings, "TICKET-A", fifth_request)
+        self.assertEqual(before, state_path.read_bytes())
+        approval = response_preview(fifth_request, self.settings, "TICKET-A")["continuation"]
+        self.assertTrue(approval["required"])
+        self.assertEqual(5, approval["next_wave"])
+        fifth, _, number = create_context(
+            self.settings, "TICKET-A", fifth_request,
+            continue_investigation=True, continuation_token=approval["token"],
+        )
+        state_five = session_state(self.settings, "TICKET-A")
+        self.assertEqual(5, number)
+        self.assertEqual(5, state_five["investigation_runtime"]["wave"])
+        self.assertEqual(generation_one.identity, state_five["atlas_generation_id"])
+        self.assertEqual("unavailable", state_five["investigation_runtime"]["serving_state"]["semantic"])
+        self.assertNotIn("G2_ONLY", fifth)
+        self.assertEqual("CTX-005", state_five["last_context_id"])
+        self.assertEqual(first_anchor_ids, {
+            item["identity"]: item["anchor_id"] for item in state_five["investigation_runtime"]["anchors"]["candidates"]
+            if item["identity"] in first_anchor_ids
+        })
+        for path, content in artifacts.items():
+            self.assertEqual(content, path.read_bytes(), path.name)
+        sixth_request = self.request("Check another G1 blocker", base="CTX-005", wave=6)
+        with self.assertRaises(InvestigationContinuationRequired):
+            create_context(self.settings, "TICKET-A", sixth_request)
+        with self.assertRaisesRegex(BrainError, "changed after approval"):
+            create_context(self.settings, "TICKET-A", sixth_request,
+                           continue_investigation=True, continuation_token=approval["token"])
+        create_context(self.settings, "TICKET-A", sixth_request, continue_investigation=True)
+        state_six = session_state(self.settings, "TICKET-A")
+        self.assertEqual(6, state_six["investigation_runtime"]["wave"])
+        self.assertEqual(generation_one.identity, state_six["atlas_generation_id"])
+        self.assertTrue(state_six["request_history"][-1]["retrieval"]["user_approved_continuation"])
+        self.assertIsNone(state_six["investigation_runtime"]["hard_max_waves"])
         self.assertEqual(4, HARD_MAX_WAVES)
+
+    def test_continuation_pause_is_derived_and_ai_cannot_approve_it(self) -> None:
+        for reason in ("coverage_satisfied", "no_progress", "awaiting_user_continuation"):
+            with self.subTest(reason=reason):
+                pause = investigation_continuation(self.settings, {
+                    "investigation_runtime": {"wave": 1, "stop_reason": reason},
+                })
+                self.assertTrue(pause["required"])
+                self.assertEqual(2, pause["next_wave"])
+        fourth = {"investigation_runtime": {"wave": 3}}
+        self.assertTrue(investigation_continuation(self.settings, fourth)["required"])
+        fourth["investigation_runtime"]["evidence_frontier"] = {
+            "items": [{"status": "unresolved", "priority": "high"}],
+        }
+        self.assertFalse(investigation_continuation(self.settings, fourth)["required"])
+        for wave in (5, 6, 100):
+            self.assertEqual(wave, parse_context_request(self.request("More evidence", wave=wave))["wave"])
+        for wave in (0, -1, True, "5", 5.5):
+            with self.subTest(wave=wave), self.assertRaisesRegex(BrainError, "positive integer"):
+                parse_context_request(self.request("More evidence", wave=wave))
+        for field in ("continue_investigation", "continuation_token"):
+            request = json.loads(self.request("The AI cannot grant its own continuation"))
+            request["INVESTIGATION_REQUEST"][field] = True
+            with self.subTest(field=field), self.assertRaises(BrainError):
+                parse_context_request(json.dumps(request))
+        original = investigation_continuation(self.settings, fourth)["token"]
+        for changes in ({"started_at": "new-session"}, {"ticket": "OTHER"}, {"last_context_id": "CTX-999"}):
+            self.assertNotEqual(original, investigation_continuation(self.settings, {**fourth, **changes})["token"])
+        self.assertNotEqual(original, investigation_continuation(
+            replace(self.settings, max_backend_operations=self.settings.max_backend_operations + 1), fourth,
+        )["token"])
+        self.assertNotEqual(original, investigation_continuation(
+            replace(self.settings, hard_context_chars=self.settings.hard_context_chars + 1), fourth,
+        )["token"])
+
+    def _paused_continuation_fixture(self):
+        generation = self.publish("sha-g1", "G1_ONLY")
+        start_session(self.settings, "CONTINUE", "Keep the existing investigation and evidence.")
+        create_context(self.settings, "CONTINUE", self.request("Trace CustomerController G1_ONLY", wave=1))
+        path = self.settings.runs_dir / "CONTINUE" / "session.json"
+        state = session_state(self.settings, "CONTINUE")
+        state["investigation_runtime"]["wave"] = 4
+        state["investigation_runtime"]["stop_reason"] = "default_wave_limit"
+        # Emulate an old four-wave session with no new cumulative counter.
+        state.pop("physical_operations_total", None)
+        state["investigation_runtime"]["bounds"]["physical_operations_used"] = self.settings.max_backend_operations * 4
+        path.write_text(json.dumps(state), encoding="utf-8")
+        return generation, path, self.request("Additional CustomerController evidence", base="CTX-001", wave=5)
+
+    def test_legacy_continuation_reuses_pin_and_keeps_cumulative_budget_after_history_rolloff(self) -> None:
+        generation, path, request = self._paused_continuation_fixture()
+        self.publish("sha-g2", "G2_ONLY")
+        prior = session_state(self.settings, "CONTINUE")
+        approval = response_preview(request, self.settings, "CONTINUE")["continuation"]
+        operations = []
+
+        def retrieve(settings, *args, **kwargs):
+            self.assertEqual(generation.identity, settings.atlas_generation.identity)
+            self.assertEqual(generation.component("semantic"), settings.atlas_generation.component("semantic"))
+            self.assertEqual(self.settings.max_backend_operations, settings.max_backend_operations)
+            self.assertEqual({"sha-g1"}, {repo.source_sha for repo in settings.repositories})
+            bundle = retrieve_context(settings, *args, **kwargs)
+            operations.append(bundle.trace["physical_backend_operations"])
+            return bundle
+
+        with mock.patch("brain.core.retrieve_context", side_effect=retrieve):
+            content, _, _ = create_context(self.settings, "CONTINUE", request,
+                continue_investigation=True, continuation_token=approval["token"])
+        self.assertNotIn("G2_ONLY", content)
+        state = session_state(self.settings, "CONTINUE")
+        self.assertEqual(generation.identity, state["atlas_generation_id"])
+        self.assertEqual(prior["sources"], state["sources"])
+        used = self.settings.max_backend_operations * 4 + operations[0]
+        self.assertEqual(used, state["physical_operations_total"])
+        self.assertEqual(used, state["investigation_runtime"]["bounds"]["physical_operations_used"])
+        self.assertEqual("single_user_approved_wave", state["investigation_runtime"]["bounds"]["budget_scope"])
+        # Bounded history may roll off; that must never refund prior work.
+        state["request_history"] = []
+        path.write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(used, investigation_continuation(self.settings, state)["physical_operations_used"])
+        next_request = self.request("More G1 contract evidence", base=state["last_context_id"], wave=6)
+        with mock.patch("brain.core.retrieve_context", side_effect=retrieve):
+            create_context(self.settings, "CONTINUE", next_request, continue_investigation=True)
+        final = session_state(self.settings, "CONTINUE")
+        self.assertEqual(used + operations[-1], final["physical_operations_total"])
+        self.assertEqual(6, final["investigation_runtime"]["wave"])
+        self.assertEqual(used + self.settings.max_backend_operations,
+                         final["investigation_runtime"]["bounds"]["physical_operation_limit"])
+        self.assertTrue(investigation_continuation(self.settings, final)["required"])
+
+    def test_continuation_cannot_bypass_duplicates_wrong_wave_or_identity_validation(self) -> None:
+        _, path, request = self._paused_continuation_fixture()
+        for invalid in ("true", 1, None):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(BrainError, "boolean user action"):
+                create_context(self.settings, "CONTINUE", request, continue_investigation=invalid)
+        with self.assertRaisesRegex(BrainError, "wave must be 5"):
+            create_context(self.settings, "CONTINUE", self.request("Wrong counter", wave=1), continue_investigation=True)
+        create_context(self.settings, "CONTINUE", request, continue_investigation=True)
+        duplicate = self.request("Additional CustomerController evidence", base="CTX-001", wave=6)
+        # Wave is part of the signature, so omit it in a repeated request instead.
+        no_wave = self.request("A distinct request without an explicit wave")
+        create_context(self.settings, "CONTINUE", no_wave, continue_investigation=True)
+        with self.assertRaisesRegex(BrainError, "already ran"):
+            create_context(self.settings, "CONTINUE", no_wave, continue_investigation=True)
+        state = session_state(self.settings, "CONTINUE")
+        state["stable_identities"] = {"schema_version": -1}
+        path.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(BrainError, "stable identity registry is corrupt"):
+            create_context(self.settings, "CONTINUE", duplicate, continue_investigation=True)
+
+    def test_continuation_failed_wave_keeps_approval_state_and_prior_evidence(self) -> None:
+        _, path, request = self._paused_continuation_fixture()
+        before = path.read_bytes()
+        approval = investigation_continuation(self.settings, session_state(self.settings, "CONTINUE"))
+        with mock.patch("brain.core.retrieve_context", return_value=ContextBundle(
+            "Over budget", trace={"physical_backend_operations": self.settings.max_backend_operations + 1},
+        )), self.assertRaisesRegex(BrainError, "approved physical-operation budget"):
+            create_context(self.settings, "CONTINUE", request, continue_investigation=True)
+        self.assertEqual(before, path.read_bytes())
+        with mock.patch("brain.investigation.build_ticket_runtime", side_effect=RuntimeError("runtime validation failed")), \
+                self.assertRaisesRegex(RuntimeError, "runtime validation failed"):
+            create_context(self.settings, "CONTINUE", request,
+                           continue_investigation=True, continuation_token=approval["token"])
+        failed = session_state(self.settings, "CONTINUE")
+        self.assertEqual(4, failed["investigation_runtime"]["wave"])
+        self.assertEqual("CTX-001", failed["last_context_id"])
+        self.assertEqual(approval["physical_operations_used"], investigation_continuation(self.settings, failed)["physical_operations_used"])
+        create_context(self.settings, "CONTINUE", request,
+                       continue_investigation=True, continuation_token=approval["token"])
+        self.assertEqual(5, session_state(self.settings, "CONTINUE")["investigation_runtime"]["wave"])
+
+    def test_checkpoint_retry_keeps_reserved_context_when_retrieval_coverage_changes(self) -> None:
+        generation = self.publish("sha-g1", "G1_ONLY")
+        start_session(self.settings, "RETRY-COVERAGE", "Retry the same operation without changing its public context ID.")
+        request = self.request("Trace CustomerController G1_ONLY", wave=1)
+
+        def retry_bundle(*, partial=False):
+            # Fix the two coverage outcomes explicitly; this regression tests
+            # checkpoint identity, not how much search fits a host's deadline.
+            paths = ["src/main/java/demo/CustomerController.java", "src/test/java/demo/CustomerControllerTest.java"]
+            evidence = []
+            for path in paths[:1] if partial else paths:
+                content = (self.settings.repo("customer-api").source_path / path).read_text(encoding="utf-8")
+                evidence.append(Evidence("customer-api", path, 1, len(content.splitlines()), content, "code", 100,
+                                         [], content))
+            return ContextBundle("Checkpoint retry", evidence=evidence, atlas_generation=generation)
+
+        with mock.patch("brain.core.retrieve_context", side_effect=lambda *a, **k: retry_bundle(partial=True)), \
+                mock.patch("brain.investigation.build_ticket_runtime", side_effect=RuntimeError("after checkpoint")), \
+                self.assertRaisesRegex(RuntimeError, "after checkpoint"):
+            create_context(self.settings, "RETRY-COVERAGE", request)
+        failed = session_state(self.settings, "RETRY-COVERAGE")
+        checkpoint = failed["progressive_checkpoint"]
+        artifact = self.settings.runs_dir / "RETRY-COVERAGE" / checkpoint["artifact"]
+        before = artifact.read_bytes()
+        reserved = checkpoint["context_id"]
+        original_identities = set(failed["stable_identities"]["contexts"])
+        self.assertEqual("failed", checkpoint["continuation_status"])
+        # A pending retry must not rebind an ID already marked as completed.
+        state_path = self.settings.runs_dir / "RETRY-COVERAGE" / "session.json"
+        tampered = json.loads(json.dumps(failed))
+        tampered["last_context_id"] = reserved
+        state_path.write_text(json.dumps(tampered), encoding="utf-8")
+        before_retry = state_path.read_bytes()
+        with mock.patch("brain.core.retrieve_context", side_effect=lambda *a, **k: retry_bundle()), \
+                self.assertRaisesRegex(BrainError, "uncommitted context reservation"):
+            create_context(self.settings, "RETRY-COVERAGE", request)
+        self.assertEqual(before_retry, state_path.read_bytes())
+        self.assertEqual(before, artifact.read_bytes())
+        state_path.write_text(json.dumps(failed), encoding="utf-8")
+        with mock.patch("brain.core.retrieve_context", side_effect=lambda *a, **k: retry_bundle()):
+            content, _, _ = create_context(self.settings, "RETRY-COVERAGE", request)
+        final = session_state(self.settings, "RETRY-COVERAGE")
+        self.assertEqual(reserved, final["last_context_id"])
+        self.assertEqual(generation.identity, final["atlas_generation_id"])
+        self.assertEqual(before, artifact.read_bytes())
+        self.assertEqual("published", final["progressive_checkpoint"]["continuation_status"])
+        self.assertNotEqual(original_identities, set(final["stable_identities"]["contexts"]))
+        self.assertEqual(1, len(final["stable_identities"]["contexts"]))
+        self.assertIn("G1_ONLY", content)
+        validate_stable_identity_registry(final)
 
     def test_first_legacy_protocol_v5_request_signature_binds_resolved_generation(self) -> None:
         generation = self.publish("sha-g1", "G1_ONLY")
@@ -2638,7 +2866,7 @@ None.
             "evidence_verified", "packing_context",
         ]
         self.assertEqual(expected, [phase for phase in phases if phase in expected])
-        self.assertIn(phases[-1], {"wave_complete", "investigation_complete"})
+        self.assertIn(phases[-1], {"wave_complete", "investigation_paused"})
         published = session_state(self.settings, "RECOVERY")["progressive_checkpoint"]
         self.assertEqual("published", published["continuation_status"])
         continuation = self.settings.runs_dir / "RECOVERY" / published["continuation_artifact"]
@@ -2752,6 +2980,7 @@ None.
         self.assertNotIn("continuation_published", phases)
         self.assertNotIn("wave_complete", phases)
         self.assertNotIn("investigation_complete", phases)
+        self.assertNotIn("investigation_paused", phases)
         persisted = session_state(self.settings, ticket)
         self.assertEqual(0, persisted["requests"])
         self.assertEqual("failed", persisted["progressive_checkpoint"]["continuation_status"])

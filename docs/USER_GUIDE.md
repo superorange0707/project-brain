@@ -45,8 +45,8 @@ toolchain. Homebrew maps `superorange0707/tap` to the separate
 ### Linux installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.13/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.13
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.14/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.14
 ```
 
 This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
@@ -55,7 +55,7 @@ adjacent executables in `~/.local/bin` without changing Brain workspace state.
 ### Standalone macOS/Linux archive
 
 Use the verified
-[v1.0.13 archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.13)
+[v1.0.14 archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.14)
 for macOS arm64/amd64 or Linux arm64/amd64. Keep `brain`,
 `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the same directory on
 `PATH`.
@@ -66,9 +66,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.13 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.14 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.13
+.\scripts\install-project-brain.ps1 -Version 1.0.14
 brain.exe --version
 ```
 
@@ -86,7 +86,7 @@ For a ZIP already downloaded in a browser or transferred from another machine,
 put its published `SHA256SUMS.txt` in the same directory and run the same script:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.13-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.14-windows-amd64.zip"
 ```
 
 The version is read from the official filename. This path performs no network
@@ -102,14 +102,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.13-windows-amd64.zip` and the published
+Download `project-brain-v1.0.14-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.13-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.13-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.14-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.14-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -132,7 +132,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.13"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.14"
 ```
 
 Upgrade later with:
@@ -144,7 +144,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.13"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.14"
 ```
 
 ### From a source checkout
@@ -896,10 +896,10 @@ The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
 sent into Brain, while `generated/handoffs/ABC-1234/context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
-The v1.0.13 operational patch does not change Agent Kit v4 or Investigation
-Protocol v5, so an existing M365 Agent does not need to be regenerated. If you
-choose to rerun `brain agent-kit m365`, `AGENT_KIT.json` records Brain 1.0.13;
-replace the generated files only when you want that metadata refresh.
+The v1.0.14 continuation patch keeps Agent Kit v4 and Investigation Protocol v5,
+but updates the instructions to permit user-approved evidence requests beyond
+four waves. Regenerate the kit and replace your existing Agent's INSTRUCTIONS.md
+and PROJECT_KNOWLEDGE.md. You do not need a new Agent or a new ticket.
 
 ```bash
 brain agent-kit m365 --json
@@ -946,6 +946,36 @@ Old investigations can be removed from **Project overview** with **Delete
 history**. The confirmation names the ticket; this deletes only `.runs/TICKET`
 and that ticket's generated handoffs. Repositories, branches, and source files
 are never deleted.
+
+### Continue after an investigation pauses
+
+The automatic allowance is three normal waves and a justified fourth. It does
+not permanently close the ticket or mean that enough evidence exists. If a
+material question remains, keep the same ticket and submit a new focused request.
+In **Continue with AI**, choose **Classify reply**, then **Continue gathering
+evidence**. The confirmation shows the next wave, pinned generation and per-wave
+operation/context limits. Each confirmation runs one bounded wave only; it does
+not authorize an automatic loop. A changed ticket/context requires a new preview.
+
+For the equivalent explicit CLI approval:
+
+```bash
+brain continue ABC-1234 --file ai-response.txt --target m365 --continue-investigation
+# Or, for a request-only file:
+brain ctx ABC-1234 --file request.yml --target m365 --continue-investigation
+```
+
+The original Atlas/Semantic pin, evidence IDs, hypothesis ledger and context
+lineage remain in use. Old four-wave sessions work without a reset or index
+refresh. Omit the optional `wave` field or use the next sequential integer (5,
+6, and later); do not restart at 1. Repeated requests, corrupt evidence, unavailable
+pinned components, source authority and per-wave resource checks still apply.
+Old artifacts are not overwritten. Cumulative operation accounting is retained
+even when the bounded request-history view rolls forward.
+
+After installing a build containing this change, update an existing M365 Agent's
+instructions with `brain agent-kit m365 --json` so it no longer treats four waves
+as a lifetime limit. No new Agent, ticket, model pack or Semantic rebuild is needed.
 
 ### `INVESTIGATION_REQUEST` v5 format
 

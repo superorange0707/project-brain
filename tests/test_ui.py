@@ -16,13 +16,14 @@ from urllib.request import Request, urlopen
 
 from brain.auto_refresh import AutoRefreshService, FreshnessDecision
 from brain.cli import _refresh_all, main
-from brain.core import BrainError, load_settings, session_dir, start_session
+from brain.core import BrainError, create_context, load_settings, session_dir, session_state, start_session
 from brain.ops import RefreshOutcome, format_refresh_progress, refresh_brain
 from brain.sync import SyncResult
 from brain.ui import (
     MAX_SESSION_ARTIFACT_RESULTS,
     MAX_SESSION_RESULTS,
     _OperationCoordinator,
+    _continuation_options,
     _NoUiRedirect,
     _probe_ui_instance,
     _Server,
@@ -37,6 +38,15 @@ from brain.ui import (
 
 
 class OperationCoordinatorTest(unittest.TestCase):
+    def test_continuation_requires_explicit_boolean_and_preview_token(self) -> None:
+        self.assertEqual({"continue_investigation": False, "continuation_token": None}, _continuation_options({}))
+        for value in ("true", "false", 1, None):
+            with self.subTest(value=value), self.assertRaisesRegex(BrainError, "boolean user action"):
+                _continuation_options({"continue_investigation": value})
+        for token in (None, "", "old-preview", 42):
+            with self.subTest(token=token), self.assertRaisesRegex(BrainError, "Classify"):
+                _continuation_options({"continue_investigation": True, "continuation_token": token})
+
     def test_latest_refresh_wins_when_jobs_start_in_the_same_millisecond(self) -> None:
         coordinator = _OperationCoordinator()
         with patch("brain.ui.time.time", return_value=1.0):
@@ -930,6 +940,52 @@ None beyond the stated boundary.
         finally:
             self.settings.runs_dir.unlink(missing_ok=True)
             preserved.rename(self.settings.runs_dir)
+
+    def test_paused_ticket_can_continue_through_every_ui_context_entry_point(self) -> None:
+        _refresh_all(self.settings, fetch=False, discover=False)
+        start_session(self.settings, "UI-PAUSED", "Gather more HelloService evidence.")
+
+        def request(wave):
+            return json.dumps({"INVESTIGATION_REQUEST": {
+                "version": 5, "mode": "root_cause", "objective": f"Investigate HelloService evidence question {wave}",
+                "resolve": ["HelloService"], "required": ["tests"], "wave": wave,
+            }})
+
+        create_context(self.settings, "UI-PAUSED", request(1))
+        path = session_dir(self.settings, "UI-PAUSED") / "session.json"
+        state = session_state(self.settings, "UI-PAUSED")
+        generation = state["atlas_generation_id"]
+        state["investigation_runtime"]["wave"] = 4
+        path.write_text(json.dumps(state), encoding="utf-8")
+        body = {"ticket": "UI-PAUSED", "text": request(5), "target": "m365"}
+        _, unapproved, _ = self.post("/api/retrieval", body)
+        failed = self.job(unapproved["data"]["id"])
+        self.assertEqual("failed", failed["status"])
+        self.assertEqual("continue_investigation", failed["recovery"]["action"])
+        self.assertEqual(4, session_state(self.settings, "UI-PAUSED")["investigation_runtime"]["wave"])
+        with self.assertRaises(HTTPError) as denied:
+            self.post("/api/context", {**body, "continue_investigation": True})
+        with denied.exception as response:
+            self.assertIn("Classify", json.load(response)["error"])
+
+        for wave, endpoint in ((5, "/api/retrieval"), (6, "/api/context"), (7, "/api/continue")):
+            with self.subTest(endpoint=endpoint):
+                body["text"] = request(wave)
+                _, preview, _ = self.post("/api/preview", body)
+                approval = preview["data"]["continuation"]
+                self.assertTrue(approval["required"])
+                self.assertEqual(wave, approval["next_wave"])
+                body.update(continue_investigation=True, continuation_token=approval["token"])
+                _, result, _ = self.post(endpoint, body)
+                if endpoint == "/api/retrieval":
+                    self.assertEqual("succeeded", self.job(result["data"]["id"])["status"])
+                current = session_state(self.settings, "UI-PAUSED")
+                self.assertEqual(wave, current["investigation_runtime"]["wave"])
+                self.assertEqual(generation, current["atlas_generation_id"])
+                with self.assertRaises(HTTPError) as stale:
+                    self.post("/api/context", {**body, "text": request(wave + 1)})
+                with stale.exception as response:
+                    self.assertIn("changed after approval", json.load(response)["error"])
 
     def test_progressive_checkpoint_and_continuation_are_both_reachable_in_ui(self) -> None:
         source = self.root / "service-a/src/main/java/demo/HelloService.java"

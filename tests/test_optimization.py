@@ -279,6 +279,39 @@ if (!elements["run-request"].disabled || elements["review-ticket"].value !== "TI
 ctx.api("/api/status").then(() => {throw Error("connection failure hidden");}, error => {
   if (!error.message.includes("may still be running")) throw error;
 });
+(async function () {
+  await Promise.resolve();
+  const paused = {valid:true, kind:"context_request", operation_count:1, actions:[],
+    objective:"Additional evidence", continuation:{required:true, reason:"Automatic allowance reached",
+      next_wave:5, generation:1, physical_operations_per_wave:32, context_bytes_per_wave:48000, token:"a".repeat(64)}};
+  ctx.state.ticket = "TICKET-B";
+  elements["request-ticket"].value = "TICKET-B";
+  elements["request-text"].value = "new focused request";
+  ctx.renderPreview(paused);
+  if (elements["run-request"].textContent !== "Continue gathering evidence") throw Error("continuation action hidden");
+  if (!elements["request-message"].innerHTML.includes("no refresh or reset")) throw Error("wrong continuation guidance");
+  let calls = [];
+  ctx.api = async (path, options) => {calls.push({path, body:JSON.parse(options.body)}); return {id:"job"};};
+  ctx.waitForJob = async () => ({kind:"context_request"});
+  ctx.loadStatus = async () => {};
+  ctx.window.confirm = () => false;
+  await elements["run-request"].listeners.click.call(elements["run-request"]);
+  if (calls.length) throw Error("cancelled continuation ran retrieval");
+  ctx.window.confirm = message => {
+    if (!message.includes("wave 5") || !message.includes("generation 1") || !message.includes("32 backend")) throw Error("approval is not scoped");
+    return true;
+  };
+  await elements["run-request"].listeners.click.call(elements["run-request"]);
+  if (calls.length !== 1 || calls[0].body.continue_investigation !== true || calls[0].body.continuation_token !== paused.continuation.token) throw Error("approval not sent");
+  if (ctx.state.preview || !elements["run-request"].disabled) throw Error("approval remains armed after use");
+  await elements["run-request"].listeners.click.call(elements["run-request"]);
+  if (calls.length !== 1) throw Error("approval reused without preview");
+  ctx.renderPreview(paused);
+  elements["request-text"].listeners.input();
+  if (ctx.state.preview) throw Error("changed request retains approval");
+  ctx.report({message:"Investigation paused", recovery:{action:"continue_investigation", message:"Continue with AI"}});
+  if (elements["error-recovery"].dataset.go !== "request" || elements["page-title"].textContent !== "Continue with AI") throw Error("wave pause routed to health/refresh");
+})().catch(error => {console.error(error); process.exitCode = 1;});
 '''], input=json.dumps({"script": script, "ids": ids}), capture_output=True, text=True, timeout=10)
         self.assertEqual(0, result.returncode, result.stderr)
 

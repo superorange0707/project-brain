@@ -194,6 +194,7 @@ def _parser() -> argparse.ArgumentParser:
     context.add_argument("--target", choices=("claude", "m365"), default="claude")
     context.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     context.add_argument("--include-diff", action="store_true")
+    context.add_argument("--continue-investigation", action="store_true", help="approve one more bounded wave on this ticket's original generation; do not reset its evidence or wave counter")
     context.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
     continue_command = commands.add_parser("continue", help="route a complete AI reply for an existing investigation")
@@ -204,6 +205,7 @@ def _parser() -> argparse.ArgumentParser:
     continue_command.add_argument("--target", choices=("claude", "m365"), default="claude")
     continue_command.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     continue_command.add_argument("--include-diff", action="store_true")
+    continue_command.add_argument("--continue-investigation", action="store_true", help="approve one more bounded wave on this ticket's original generation; do not reset its evidence or wave counter")
     continue_command.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
     preview = commands.add_parser("preview", help="classify and preview a complete AI reply")
@@ -799,6 +801,7 @@ def execute(args: argparse.Namespace) -> int:
 
         content, path, number = create_context(
             settings, args.ticket, _request_text(args), args.include_diff, progress=checkpoint_progress,
+            continue_investigation=args.continue_investigation,
         )
         copy = args.copy if args.copy is not None else args.target == "claude"
         parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)
@@ -857,6 +860,7 @@ def execute(args: argparse.Namespace) -> int:
 
         content, path, number = create_context(
             settings, args.ticket, text, args.include_diff, progress=checkpoint_progress,
+            continue_investigation=args.continue_investigation,
         )
         copy = args.copy if args.copy is not None else args.target == "claude"
         parts, current = deliver(settings, args.ticket, content, args.target, copy=copy)

@@ -113,6 +113,10 @@ class BrainError(RuntimeError):
     pass
 
 
+class InvestigationContinuationRequired(BrainError):
+    """A paused investigation can run one more bounded, human-approved wave."""
+
+
 def _bounded_utf8_text(text: str, max_bytes: int, marker: str) -> tuple[str, bool]:
     """Bound generated/model input by encoded bytes without splitting UTF-8."""
     payload = text.encode("utf-8")
@@ -1848,8 +1852,8 @@ def _request_body(text: str) -> dict[str, Any]:
                 raise BrainError(f"mode must be one of: {', '.join(sorted(modes))}")
             request["mode"] = mode
             wave = request.get("wave")
-            if wave is not None and (not isinstance(wave, int) or isinstance(wave, bool) or not 1 <= wave <= 4):
-                raise BrainError("wave must be an integer from 1 through 4")
+            if wave is not None and (not isinstance(wave, int) or isinstance(wave, bool) or wave < 1):
+                raise BrainError("wave must be a positive integer; omit it to use the ticket's next wave")
             request["wave"] = wave
             raw_anchors = request.get("anchors") or []
             anchors: list[dict[str, str]] = []
@@ -4443,6 +4447,50 @@ def _required_coverage_key(value: str) -> str | None:
     return next((key for terms, key in mappings if any(term in normalized for term in terms)), None)
 
 
+def investigation_continuation(settings: Settings, state: dict[str, Any]) -> dict[str, Any]:
+    """Derive pause/approval state from the existing session, never from AI text."""
+    from .investigation import AUTOMATIC_MAX_WAVES
+
+    runtime = state.get("investigation_runtime") or {}
+    wave = int(runtime.get("wave") or 0)
+    used = max(
+        int(state.get("physical_operations_total") or 0),
+        int((runtime.get("bounds") or {}).get("physical_operations_used") or 0),
+        sum(int((item.get("retrieval") or {}).get("physical_backend_operations") or 0)
+            for item in state.get("request_history") or [] if isinstance(item, dict)),
+    )
+    reason = ""
+    if wave >= AUTOMATIC_MAX_WAVES:
+        reason = "Automatic wave allowance reached."
+    elif used >= settings.max_backend_operations * AUTOMATIC_MAX_WAVES:
+        reason = "Automatic physical-operation allowance reached."
+    elif runtime.get("stop_reason") in {"coverage_satisfied", "no_progress", "awaiting_user_continuation"}:
+        reason = "The previous wave paused: " + str(runtime["stop_reason"]).replace("_", " ") + "."
+    elif wave + 1 == AUTOMATIC_MAX_WAVES:
+        justified = any(
+            isinstance(item, dict) and item.get("status") == "contradicted"
+            for item in (runtime.get("hypothesis_ledger") or {}).get("items") or []
+        ) or any(
+            isinstance(item, dict) and item.get("status") == "unresolved" and item.get("priority") == "high"
+            for item in (runtime.get("evidence_frontier") or {}).get("items") or []
+        )
+        if not justified:
+            reason = "The next automatic wave has no contradiction or high-value unresolved blocker."
+    return {
+        "required": bool(reason), "reason": reason, "completed_wave": wave, "next_wave": wave + 1,
+        "token": hashlib.sha256(json.dumps({
+            "ticket": state.get("ticket"), "generation": state.get("atlas_generation_id"),
+            "started_at": state.get("started_at"),
+            "sources": state.get("source_signature"), "context": state.get("last_context_id"),
+            "wave": wave, "physical_operations": used,
+            "operation_limit": settings.max_backend_operations, "context_limit": settings.hard_context_chars,
+        }, sort_keys=True).encode("utf-8")).hexdigest(),
+        "generation": state.get("generation"), "physical_operations_used": used,
+        "physical_operations_per_wave": settings.max_backend_operations,
+        "context_bytes_per_wave": settings.hard_context_chars,
+    }
+
+
 @ticket_retrieval_exclusive
 def create_context(
     settings: Settings,
@@ -4450,7 +4498,12 @@ def create_context(
     request_text: str,
     include_diff: bool = False,
     progress: Any | None = None,
+    *,
+    continue_investigation: bool = False,
+    continuation_token: str | None = None,
 ) -> tuple[str, Path, int]:
+    if not isinstance(continue_investigation, bool):
+        raise BrainError("continue_investigation must be a boolean user action")
     progress_callback = progress
     directory = session_dir(settings, ticket)
     if not directory.is_dir():
@@ -4465,6 +4518,10 @@ def create_context(
     if migrated:
         save_session(settings, ticket, state)
     pre_wave_state = json.loads(json.dumps(state))
+    continuation = investigation_continuation(settings, state)
+    if continue_investigation and continuation_token is not None and continuation_token != continuation["token"]:
+        raise InvestigationContinuationRequired("Investigation changed after approval; classify the latest request and confirm continuation again")
+    prior_physical_operations = continuation["physical_operations_used"]
     from .atlas import initial_coverage_map, initial_investigation_memory
 
     memory = dict(state.get("investigation_memory") or initial_investigation_memory(plan["objective"]))
@@ -4500,35 +4557,23 @@ def create_context(
             raise BrainError("Protocol v5 stable identity registry is corrupt; start a new ticket instead of reusing lineage") from error
         if atlas_generation is None:
             raise BrainError("Protocol v5 requires an available pinned Atlas generation")
-        prior_physical_operations = sum(
-            int((item.get("retrieval") or {}).get("physical_backend_operations") or 0)
-            for item in state.get("request_history") or [] if isinstance(item, dict)
-        )
-        global_physical_limit = settings.max_backend_operations * 4
-        if prior_physical_operations >= global_physical_limit:
-            raise BrainError("Protocol v5 investigation reached its global physical-operation budget")
-        previous_runtime = state.get("investigation_runtime") or {}
-        completed_wave = int(previous_runtime.get("wave") or 0)
-        if completed_wave >= 4:
-            raise BrainError("Protocol v5 investigation reached the hard four-wave limit")
-        prior_stop_reason = str(previous_runtime.get("stop_reason") or "")
-        if prior_stop_reason in {"coverage_satisfied", "no_progress"}:
-            raise BrainError(
-                f"Protocol v5 investigation is terminal ({prior_stop_reason}); do not run another retrieval wave"
+        from .investigation import AUTOMATIC_MAX_WAVES
+
+        if continuation["required"] and not continue_investigation:
+            raise InvestigationContinuationRequired(
+                continuation["reason"] + " Existing evidence and the pinned generation are preserved. "
+                "Review the new request and choose Continue gathering evidence in the UI, or pass "
+                "--continue-investigation to brain ctx/continue, to approve one more bounded wave. No refresh or reset is needed."
             )
-        expected_wave = completed_wave + 1
-        if request.get("wave") is not None and int(request["wave"]) != expected_wave:
-            raise BrainError(f"Protocol v5 wave must be {expected_wave} for this ticket")
-        previous_frontier = (previous_runtime.get("evidence_frontier") or {}).get("items") or []
-        prior_hypotheses = (previous_runtime.get("hypothesis_ledger") or {}).get("items") or []
-        wave_four_justified = any(
-            isinstance(item, dict) and item.get("status") == "contradicted" for item in prior_hypotheses
-        ) or any(
-            isinstance(item, dict) and item.get("status") == "unresolved" and item.get("priority") == "high"
-            for item in previous_frontier
+        global_physical_limit = (
+            prior_physical_operations + settings.max_backend_operations if continue_investigation
+            else settings.max_backend_operations * AUTOMATIC_MAX_WAVES
         )
-        if expected_wave == 4 and not wave_four_justified:
-            raise BrainError("Protocol v5 wave 4 requires a contradiction or high-value unresolved blocker")
+        expected_wave = continuation["next_wave"]
+        if request.get("wave") is not None and int(request["wave"]) != expected_wave:
+            raise InvestigationContinuationRequired(
+                f"Protocol v5 wave must be {expected_wave} for this ticket; use that number or omit wave, then classify the request again"
+            )
         if progress_callback is not None:
             progress_callback({"phase": "wave_started", "wave": expected_wave, "generation": atlas_generation.generation})
         remaining_physical_operations = global_physical_limit - prior_physical_operations
@@ -4623,7 +4668,7 @@ def create_context(
     try:
         bundle = retrieve_context(retrieval_settings, request, include_diff=include_diff, progress=progress_callback)
         if request.get("version") == 5 and int(bundle.trace.get("physical_backend_operations") or 0) > remaining_physical_operations:
-            raise BrainError("Protocol v5 wave exceeded the remaining global physical-operation budget")
+            raise BrainError("Protocol v5 wave exceeded its approved physical-operation budget")
         from .query import merge_evidence
 
         bundle.evidence = merge_evidence(bundle.evidence + _external_evidence(settings, ticket))
@@ -4709,7 +4754,31 @@ def create_context(
             registry = state.setdefault("stable_identities", {}).setdefault("contexts", {})
             from .investigation import _allocate
 
-            context_id = _allocate({"contexts": registry}, "contexts", context_hash, "CTX-", 3)
+            if (
+                isinstance(failed_checkpoint, dict)
+                and failed_checkpoint.get("continuation_status") in {"pending", "failed"}
+                and failed_checkpoint.get("request_signature") == plan["signature"]
+            ):
+                # The early artifact has already promised this operation's ID.
+                # Retry coverage may change with budgets/cache warmth; finalize
+                # only this uncommitted reservation, never a completed context.
+                context_id = str(failed_checkpoint.get("context_id") or "")
+                reserved = [key for key, value in registry.items() if value == context_id]
+                # Older early-checkpoint writers may not have reserved a hash.
+                # Accept only the next normal allocation, never an arbitrary ID.
+                if not reserved and _allocate({"contexts": registry}, "contexts", context_hash, "CTX-", 3) == context_id:
+                    reserved = [context_hash]
+                if (
+                    len(reserved) != 1
+                    or context_id == state.get("last_context_id")
+                    or any(row.get("context_id") == context_id for row in state.get("context_lineage") or [])
+                    or registry.get(context_hash, context_id) != context_id
+                ):
+                    raise BrainError("Pending checkpoint has no uncommitted context reservation")
+                del registry[reserved[0]]
+                registry[context_hash] = context_id
+            else:
+                context_id = _allocate({"contexts": registry}, "contexts", context_hash, "CTX-", 3)
         else:
             context_id = "ctx-" + context_hash.removeprefix("sha256:")
         from .atlas import next_best_evidence, update_investigation
@@ -4775,6 +4844,7 @@ def create_context(
                 settings, atlas_generation, request, bundle, state, context_id=context_id,
                 next_best_evidence=next_evidence,
                 validated_prior_evidence_ids=validated_prior_evidence_ids,
+                continue_investigation=continue_investigation,
             )
             from .editions import current_edition as runtime_edition
 
@@ -4955,6 +5025,7 @@ def create_context(
         _atomic_session_text_write(settings, ticket, request_path, request_text.rstrip() + "\n")
         _atomic_session_text_write(settings, ticket, path, content)
         state["requests"] = number
+        state["physical_operations_total"] = prior_physical_operations + int(bundle.trace.get("physical_backend_operations") or 0)
         state["status"] = "waiting_for_ai"
         state["no_progress_rounds"] = no_progress_rounds
         retained_evidence_keys = [*sorted(evidence_keys), *sorted(known_keys - evidence_keys)][:1_000]
@@ -5027,6 +5098,7 @@ def create_context(
             "checkpoint_reason": checkpoint_reason,
             "next_best_evidence": next_evidence,
             "wave": runtime.get("wave") if runtime else None,
+            "user_approved_continuation": bool(request.get("version") == 5 and continue_investigation),
             "first_useful_checkpoint": runtime.get("first_useful_checkpoint") if runtime else None,
         }
         history = list(state.get("request_history") or [])
@@ -5043,7 +5115,7 @@ def create_context(
         })
         state["request_history"] = history[-500:]
         if runtime is not None and progress_callback is not None:
-            phase = "investigation_complete" if runtime.get("stop_reason") != "continue" else "wave_complete"
+            phase = "investigation_paused" if runtime.get("stop_reason") != "continue" else "wave_complete"
             completion_event = {
                 "phase": phase, "wave": runtime["wave"], "context_id": context_id,
                 "stop_reason": runtime.get("stop_reason"),

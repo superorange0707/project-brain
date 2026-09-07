@@ -26,6 +26,7 @@ from .platforms import atomic_managed_text_write, read_managed_text
 from .agent import archive_final_solution, create_m365_agent_kit, response_preview
 from .core import (
     BrainError,
+    InvestigationContinuationRequired,
     MAX_START_TICKET_BYTES,
     Settings,
     create_context,
@@ -34,6 +35,7 @@ from .core import (
     delivery_artifact,
     load_index_state,
     load_source_state,
+    request_preview,
     request_repair_prompt,
     _read_session_json,
     _read_session_artifact,
@@ -72,10 +74,26 @@ def _display_path(settings: Settings, path: Path) -> str:
         return path.name
 
 
+def _continuation_options(body: dict[str, Any]) -> dict[str, Any]:
+    approved = body.get("continue_investigation", False)
+    token = body.get("continuation_token")
+    if not isinstance(approved, bool):
+        raise BrainError("continue_investigation must be a boolean user action")
+    if approved and (not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None):
+        raise BrainError("Classify the request before approving continuation")
+    return {"continue_investigation": approved, "continuation_token": token if approved else None}
+
+
 def _recovery(error: Exception) -> dict[str, str] | None:
     """Offer existing safe operations, never infer a destructive reset."""
     if isinstance(error, StateCapacityError):
         return error.recovery()
+    if isinstance(error, InvestigationContinuationRequired):
+        return {
+            "code": "investigation_paused", "title": "Investigation paused — more evidence is allowed",
+            "message": "Your evidence and original generation are preserved. In Continue with AI, classify the new focused request, then choose Continue gathering evidence to approve one bounded wave. Do not refresh, reset or create another ticket.",
+            "action": "continue_investigation", "action_label": "Continue with AI",
+        }
     if isinstance(error, PermissionError):
         return {
             "code": "permission_denied", "title": "Local access was denied",
@@ -972,6 +990,7 @@ class _Handler(BaseHTTPRequestHandler):
             text,
             bool(body.get("include_diff")),
             progress=progress,
+            **_continuation_options(body),
         )
         deliver(settings, ticket, content, _target(body), copy=False)
         checkpoint = session_state(settings, ticket).get("progressive_checkpoint") or {}
@@ -1067,7 +1086,8 @@ class _Handler(BaseHTTPRequestHandler):
             ticket = str(body.get("ticket") or "").strip()
             text = str(body.get("text") or "")
             plan = request_preview(text, settings)
-            content, artifact, number = create_context(settings, ticket, text, bool(body.get("include_diff")))
+            content, artifact, number = create_context(settings, ticket, text, bool(body.get("include_diff")),
+                                                      **_continuation_options(body))
             deliver(settings, ticket, content, _target(body), copy=False)
             self._json({
                 "ok": True,
@@ -1096,7 +1116,8 @@ class _Handler(BaseHTTPRequestHandler):
                     "Clear any old reply and paste only the AI's latest complete response. If the latest reply "
                     "is a human question, answer it directly in the AI chat; Brain should not create a new request."
                 )
-            content, artifact, number = create_context(settings, ticket, text, bool(body.get("include_diff")))
+            content, artifact, number = create_context(settings, ticket, text, bool(body.get("include_diff")),
+                                                      **_continuation_options(body))
             deliver(settings, ticket, content, _target(body), copy=False)
             self._json({
                 "ok": True,

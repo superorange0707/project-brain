@@ -21,7 +21,7 @@ Use these states:
 5. `SYNTHESIZE` — assemble verified flow, surfaces, tests, and risks.
 6. `STOP` — return `FINAL_SOLUTION`, ask one external question, or state the explicit blocker.
 
-Use at most three normal investigation waves and never more than four. Stop when coverage is sufficient, a request makes no progress, the remaining blocker is external, or the budget/wave limit is reached. Do not retrieve for aesthetic completeness.
+The automatic allowance is three normal waves and a justified fourth, not a lifetime ticket limit. Pause when coverage is sufficient, requests make no progress, the remaining blocker is external, or the automatic budget is reached. A pause does not prove the ticket is solved. If the user needs more repository evidence, propose one focused request for approval in Brain via Continue gathering evidence or `--continue-investigation`. Each approval covers one bounded wave; do not loop, change ticket, reset counters or downgrade the protocol to bypass approval. Keep the original pinned generation and existing evidence/context IDs. Omit `wave` to use the next ticket wave, or continue sequentially with 5, 6 and later. Approval is a separate user action, never a field you add to INVESTIGATION_REQUEST. Do not retrieve for aesthetic completeness.
 
 # Project Brain protocol v5
 

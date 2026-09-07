@@ -69,7 +69,8 @@ MAX_RUNTIME_DB_OPERATIONS = 128
 MAX_SLICE_INPUT_BYTES = 64_000
 MAX_SLICE_STATEMENTS = 160
 DEFAULT_MAX_WAVES = 3
-HARD_MAX_WAVES = 4
+AUTOMATIC_MAX_WAVES = 4
+HARD_MAX_WAVES = AUTOMATIC_MAX_WAVES  # Legacy import; not a lifetime ticket limit.
 EXECUTION_EDGE_TYPES = (
     "DEFINES", "CALLS", "IMPLEMENTS", "EXTENDS", "REFERENCES", "EXPOSES_ENDPOINT",
     "CALLS_ENDPOINT", "PUBLISHES", "CONSUMES", "READS_CONFIG", "WRITES_TABLE",
@@ -2539,6 +2540,7 @@ def build_ticket_runtime(
     context_id: str,
     next_best_evidence: dict[str, Any] | None = None,
     validated_prior_evidence_ids: set[str] | None = None,
+    continue_investigation: bool = False,
 ) -> dict[str, Any]:
     """Derive one bounded wave from the ticket's immutable generation."""
     existing = dict(state.get("investigation_runtime") or {})
@@ -2556,8 +2558,8 @@ def build_ticket_runtime(
     if pinned is not None and int(pinned) != generation.generation:
         raise RuntimeError("investigation runtime generation changed inside a pinned ticket")
     wave = int(existing.get("wave") or 0) + 1
-    if wave > HARD_MAX_WAVES:
-        raise RuntimeError("investigation wave limit exceeded")
+    if wave > AUTOMATIC_MAX_WAVES and continue_investigation is not True:
+        raise RuntimeError("investigation continuation requires user approval")
     values: list[object] = [
         *(item for item in request.get("anchors") or [] if isinstance(item, dict)),
         *(request.get("resolve") or []), *(request.get("runtime_facts") or []), request.get("objective"),
@@ -2987,6 +2989,8 @@ def build_ticket_runtime(
         stop_reason = "coverage_satisfied"
     elif int(state.get("no_progress_rounds") or 0) >= 2:
         stop_reason = "no_progress"
+    elif continue_investigation:
+        stop_reason = "awaiting_user_continuation"
     elif wave >= DEFAULT_MAX_WAVES:
         stop_reason = "default_wave_limit"
     else:
@@ -2996,16 +3000,17 @@ def build_ticket_runtime(
     )
     if database_operations > MAX_RUNTIME_DB_OPERATIONS:
         raise RuntimeError("investigation runtime exceeded its database operation contract")
-    prior_physical_operations = sum(
-        int((item.get("retrieval") or {}).get("physical_backend_operations") or 0)
-        for item in state.get("request_history") or [] if isinstance(item, dict)
-    )
+    from .core import investigation_continuation
+
+    prior_physical_operations = investigation_continuation(settings, state)["physical_operations_used"]
     total_physical_operations = prior_physical_operations + int(bundle.trace.get("physical_backend_operations") or 0)
     runtime = {
         "schema_version": INVESTIGATION_RUNTIME_SCHEMA_VERSION,
         "compatibility_identity": runtime_compatibility,
         "generation": generation.generation, "atlas_generation_id": generation.identity,
-        "wave": wave, "max_waves": DEFAULT_MAX_WAVES, "hard_max_waves": HARD_MAX_WAVES,
+        "wave": wave, "max_waves": DEFAULT_MAX_WAVES, "hard_max_waves": None,
+        "automatic_max_waves": AUTOMATIC_MAX_WAVES,
+        "user_approved_continuation": continue_investigation,
         "coverage": coverage,
         "coverage_proofs": coverage_proofs,
         "anchors": resolved, "execution_flow": execution, "integration_flow": integration,
@@ -3063,9 +3068,13 @@ def build_ticket_runtime(
             "database_operations": database_operations,
             "database_operation_limit": MAX_RUNTIME_DB_OPERATIONS,
             "physical_operations_used": total_physical_operations,
-            "physical_operation_limit": settings.max_backend_operations * HARD_MAX_WAVES,
+            "physical_operation_limit": (
+                prior_physical_operations + settings.max_backend_operations if continue_investigation
+                else settings.max_backend_operations * AUTOMATIC_MAX_WAVES
+            ),
+            "physical_operation_limit_per_wave": settings.max_backend_operations,
+            "budget_scope": "single_user_approved_wave" if continue_investigation else "automatic_investigation",
             "context_byte_limit_per_wave": settings.hard_context_chars,
-            "context_byte_limit_all_waves": settings.hard_context_chars * HARD_MAX_WAVES,
             "repo_scope_count": int(bundle.metrics.get("repo_scope_count") or 0),
             "repo_scope_limit": int(bundle.metrics.get("repo_scope_limit") or settings.widen_repo_limit),
             "candidate_count": int(bundle.metrics.get("raw_candidates") or 0),
@@ -3123,8 +3132,10 @@ def render_protocol_v5(runtime: dict[str, Any], *, delta: bool = False) -> str:
         "## Protocol v5 investigation state", "",
         f"- Runtime schema: `{runtime.get('schema_version')}`",
         f"- Pinned generation: `{runtime.get('generation')}`",
-        f"- Wave: `{runtime.get('wave')}` / `{runtime.get('max_waves')}` (hard `{runtime.get('hard_max_waves')}`)",
+        f"- Wave: `{runtime.get('wave')}` (automatic allowance: `{runtime.get('automatic_max_waves', AUTOMATIC_MAX_WAVES)}`; no lifetime ticket wave limit)",
+        f"- User-approved continuation: `{bool(runtime.get('user_approved_continuation'))}`; approval covers this wave only",
         f"- Stop reason: `{runtime.get('stop_reason')}`",
+        "- A stop reason pauses automatic investigation; it is not proof that enough evidence exists. The user can approve one focused continuation without resetting this ticket or changing its pinned generation.",
         f"- Context mode: `{'delta' if delta else 'full checkpoint'}`", "",
     ]
     serving = runtime.get("serving_state") or {}

@@ -2054,6 +2054,21 @@ path = "batch-service"
         self.assertIn("repository path index", context)
         self.assertIn("## Implementation readiness", context)
 
+    def test_cli_explicit_continuation_reaches_both_context_entry_points(self) -> None:
+        request_path = self.root / "request.yml"
+        request_path.write_text(REQUEST, encoding="utf-8")
+        for command in ("ctx", "continue"):
+            for approve in (False, True):
+                with self.subTest(command=command, approve=approve), \
+                        mock.patch("brain.cli.response_preview", return_value={"kind": "context_request"}), \
+                        mock.patch("brain.cli.create_context", side_effect=BrainError("test stops before retrieval")) as create, \
+                        redirect_stderr(io.StringIO()):
+                    args = ["-c", str(self.config), command, "MORE-EVIDENCE", "--file", str(request_path), "--no-copy"]
+                    if approve:
+                        args.append("--continue-investigation")
+                    self.assertEqual(2, main(args))
+                    self.assertIs(approve, create.call_args.kwargs["continue_investigation"])
+
     def test_cli_preview_and_status_json(self) -> None:
         request_path = self.root / "request.yml"
         request_path.write_text(REQUEST, encoding="utf-8")
