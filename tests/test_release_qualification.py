@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from brain import __version__
 from scripts.verify_model_pack_reuse import CONTRACTS, FILES, fingerprint
 
 
@@ -12,7 +13,8 @@ class ReleaseQualificationTest(unittest.TestCase):
         sources = {path: (root / path).read_text(encoding="utf-8") for path in {*FILES, *CONTRACTS, "pyproject.toml"}}
         expected = fingerprint(sources)
         # The executable version and unrelated ticket code do not change a pack.
-        changed = {**sources, "pyproject.toml": sources["pyproject.toml"].replace('version = "1.0.14"', 'version = "9.9.9"')}
+        changed = {**sources, "pyproject.toml": sources["pyproject.toml"].replace(f'version = "{__version__}"', 'version = "9.9.9"')}
+        self.assertNotEqual(sources["pyproject.toml"], changed["pyproject.toml"])
         changed["brain/core.py"] += "\ndef unrelated_ticket_helper(): pass\n"
         self.assertEqual(expected, fingerprint(changed))
         for path in FILES:

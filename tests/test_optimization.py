@@ -16,6 +16,686 @@ from brain.retrieval.ranker import fuse_and_rank
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_dense_atlas_call_ownership_avoids_repeated_definition_and_prefix_scans(self) -> None:
+        import hashlib
+        from brain import atlas
+
+        source = "class Outer {\n  void helper() {}\n  class Inner {\n    void helper() {}\n"
+        source += "    void nested() { this.helper(); peer.helper(); }\n  }\n"
+        source += "".join(f"  void action{number}() {{ this.helper(); other.missing(); }}\n" for number in range(500))
+        source += "}\nclass Sibling { void helper() {} void run() { this.helper(); } }\n"
+        accesses = [0]
+
+        class CountedEntity(dict):
+            def __getitem__(self, key):
+                if key in {"line_start", "line_end"}:
+                    accesses[0] += 1
+                return super().__getitem__(key)
+
+        extract = atlas._java_entities
+        search = re.search
+        receiver_bytes = []
+
+        def entities(*args, **kwargs):
+            return [CountedEntity(item) for item in extract(*args, **kwargs)]
+
+        def observe_search(pattern, value, *args, **kwargs):
+            if pattern == r"([A-Za-z_$][\w$]*)\.$":
+                receiver_bytes.append(len(value))
+            return search(pattern, value, *args, **kwargs)
+
+        with mock.patch("brain.atlas._java_entities", side_effect=entities), \
+                mock.patch("brain.atlas.re.search", side_effect=observe_search), \
+                mock.patch("brain.atlas.time.monotonic", return_value=0):
+            payload = atlas._file_intelligence("repo", "src/Outer.java", "blob", source)
+        # Pin the complete pre-optimization payload, including ambiguous and
+        # nested-class dispatch; performance must not change evidence identity.
+        self.assertEqual("1b25b361a50c333f10e914bbe19bb5fbf0474644ba6642703507ed6f37ff490b",
+                         hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest())
+        self.assertLess(accesses[0], 50_000, "ownership lookup must not multiply definitions by calls")
+        self.assertTrue(receiver_bytes)
+        self.assertLessEqual(max(receiver_bytes), len("other."), "receiver parsing must not scan the file prefix")
+
+    def test_slow_precision_keeps_verified_source_without_starting_later_reads(self) -> None:
+        from dataclasses import replace
+        from brain.core import parse_context_request, retrieve_context
+        from brain.index import read_generation_files
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo").mkdir()
+            for name in ("A", "B", "C", "Requested"):
+                (root / f"repo/{name}.java").write_text(
+                    f"class {name} {{\n  void execute() {{\n    original{name}(); // " + "界" * 2_000 + "\n  }\n}\n",
+                    encoding="utf-8")
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='slow-precision'\n[graph]\nenabled=false\n[experience]\nenabled=false\n"
+                              "[[repositories]]\nname='repo'\npath='repo'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            pinned = replace(settings, atlas_generation=current_generation_ref(settings), atlas_generation_mode="pinned",
+                             repositories=[replace(repo) for repo in settings.repositories])
+            for path in (root / "repo").glob("*.java"):
+                path.write_text("NEWER_GENERATION_IS_NOT_EVIDENCE\n", encoding="utf-8")
+            snapshot_indexes(settings)
+            self.assertNotEqual(pinned.atlas_generation.identity, current_generation_ref(settings).identity)
+
+            for protected, direct, hydrate_limit, context_bytes in (
+                (False, False, 18, 180_000), (True, False, 18, 180_000), (True, True, 18, 180_000),
+                (False, False, 1, 180_000), (False, False, 18, 20_000),
+            ):
+                with self.subTest(protected=protected, direct=direct, hydrate_limit=hydrate_limit, context_bytes=context_bytes):
+                    serving = replace(pinned, hydrate_limit=hydrate_limit, hard_context_chars=context_bytes)
+                    clock = [0.0]
+                    request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                        "version": 5, "mode": "root_cause", "objective": "Explain the refusal path",
+                        "resolve": ["review-marker"],
+                        "files": [{"repo": "repo", "path": "Requested.java"}] if direct else [],
+                    }}))
+                    route = {"candidates": [{"repo": "repo", "path": "A.java", "line": 2,
+                                             "kind": "definition", "score": 100,
+                                             "found_by": ["Atlas hierarchical router"]}]} if protected else {}
+                    paths = ["B.java", "C.java"] if protected else ["A.java", "B.java", "C.java"]
+
+                    def semantic(*args, **kwargs):
+                        kwargs["serving_status"]["status"] = "ready"
+                        return [{"repo": "repo", "path": path, "line": 2, "symbol": "execute",
+                                 "kind": "method", "score": 0.9} for path in paths]
+
+                    def rerank(query, documents, instruction=""):
+                        clock[0] = 20.0  # The optional call crosses the 10-second query deadline.
+                        return [0.5] * len(documents)
+
+                    runtime = mock.Mock()
+                    runtime.rerank.side_effect = rerank
+                    with mock.patch("brain.core.time.perf_counter", side_effect=lambda: clock[0]), \
+                            mock.patch("brain.editions.current_edition", return_value="precision"), \
+                            mock.patch("brain.atlas.route", return_value=route), \
+                            mock.patch("brain.semantic.search_semantic", side_effect=semantic), \
+                            mock.patch("brain.models.active_pack", return_value={"pack_id": "reranker"}), \
+                            mock.patch("brain.models.runtime_for_pack", return_value=runtime), \
+                            mock.patch("brain.index.read_generation_files", wraps=read_generation_files) as reads:
+                        bundle = retrieve_context(serving, request)
+                    delivered_paths = paths[:1] if hydrate_limit == 1 or context_bytes == 20_000 else paths
+                    expected = set(delivered_paths) | ({"Requested.java"} if direct else set())
+                    self.assertEqual(expected, {item.path for item in bundle.evidence})
+                    self.assertEqual(1, reads.call_count, "a slow model must not start a second optional source batch")
+                    self.assertEqual(set(paths), {path for _, path in reads.call_args.args[2]})
+                    self.assertEqual("context_budget" if context_bytes == 20_000 else "time_budget", bundle.trace["stop_reason"])
+                    self.assertEqual(pinned.atlas_generation.identity, bundle.atlas_generation.identity)
+                    self.assertEqual({"A.java", "B.java", "C.java"} - expected, {item.path for item in bundle.additional_candidates})
+                    self.assertLessEqual(sum(len(item.content.encode("utf-8")) for item in bundle.evidence),
+                                         max(10_000, context_bytes - 40_000))
+                    delivered = pack_context(serving, "SLOW-PRECISION", 1, bundle)
+                    for path in delivered_paths:
+                        self.assertIn("original" + Path(path).stem + "()", delivered)
+                    self.assertNotIn("NEWER_GENERATION_IS_NOT_EVIDENCE", delivered)
+                    self.assertLessEqual(len(delivered.encode("utf-8")), context_bytes)
+                    runtime.shutdown.assert_called_once()
+
+    def test_precision_reranks_semantic_candidates_from_pinned_code_not_only_names(self) -> None:
+        from dataclasses import replace
+        from brain.core import parse_context_request, retrieve_context
+        from brain.index import read_generation_files
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo").mkdir()
+            (root / "repo/A.java").write_text(
+                "class A {\n  void execute() {\n    submit();\n  }\n}\n", encoding="utf-8")
+            (root / "repo/B.java").write_text(
+                "class B {\n  void execute() {\n    if (requiresSecondSignature()) {\n      reject();\n    }\n    submit();\n  }\n}\n", encoding="utf-8")
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='precision-source'\n[graph]\nenabled=false\n[experience]\nenabled=false\n"
+                              "[[repositories]]\nname='repo'\npath='repo'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            pinned = replace(settings, atlas_generation=current_generation_ref(settings),
+                             atlas_generation_mode="pinned", hydrate_limit=1)
+            (root / "repo/B.java").write_text("CURRENT_CHECKOUT_IS_NOT_EVIDENCE\n", encoding="utf-8")
+            snapshot_indexes(settings)
+            self.assertNotEqual(pinned.atlas_generation.identity, current_generation_ref(settings).identity)
+            request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                "version": 5, "mode": "root_cause", "objective": "Which route refuses unapproved transfers?",
+            }}))
+
+            def semantic(*args, **kwargs):
+                kwargs["serving_status"]["status"] = "ready"
+                return [{"repo": "repo", "path": path, "line": 2, "symbol": "execute", "kind": "method", "score": score}
+                        for path, score in (("A.java", 0.95), ("B.java", 0.94))]
+
+            runtime = mock.Mock()
+            runtime.rerank.side_effect = lambda query, documents, instruction="": [
+                float("requiresSecondSignature()" in document) for document in documents
+            ]
+            with mock.patch("brain.editions.current_edition", return_value="precision"), \
+                    mock.patch("brain.atlas.route", return_value={}), \
+                    mock.patch("brain.semantic.search_semantic", side_effect=semantic), \
+                    mock.patch("brain.models.active_pack", return_value={"pack_id": "reranker"}), \
+                    mock.patch("brain.models.runtime_for_pack", return_value=runtime), \
+                    mock.patch("brain.index.read_generation_files", wraps=read_generation_files) as reads:
+                # Ablate only previews to reproduce the former label-only input.
+                with mock.patch("brain.query.rerank_snippets", side_effect=lambda settings, hits, positions, cache, **kwargs: {
+                    index: hits[index].text for index in positions
+                }):
+                    before = retrieve_context(pinned, request)
+                self.assertEqual(["A.java"], [item.path for item in before.evidence])
+                self.assertFalse(any("requiresSecondSignature()" in document for document in runtime.rerank.call_args.args[1]))
+                runtime.reset_mock()
+                reads.reset_mock()
+                bundle = retrieve_context(pinned, request)
+            documents = runtime.rerank.call_args.args[1]
+            self.assertTrue(any("requiresSecondSignature()" in document for document in documents))
+            self.assertFalse(any("CURRENT_CHECKOUT" in document for document in documents))
+            self.assertEqual(["B.java"], [item.path for item in bundle.evidence])
+            self.assertIn("requiresSecondSignature()", bundle.evidence[0].content)
+            self.assertEqual(1, reads.call_count, "final hydration should reuse the verified preview source")
+            runtime.shutdown.assert_called_once()
+
+    def test_rerank_source_previews_are_bounded_and_never_hold_the_model_lane(self) -> None:
+        from dataclasses import replace
+        from brain.models import rerank_candidates
+        from brain.retrieval.models import RetrievalTrace
+        from brain.index import read_generation_files
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo").mkdir()
+            for number in range(6):
+                (root / f"repo/file{number}.py").write_text(
+                    "def execute():\n    return '" + "界" * 2_000 + "'\n", encoding="utf-8")
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='preview-bounds'\n[graph]\nenabled=false\n"
+                              "[[repositories]]\nname='repo'\npath='repo'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            pinned = replace(settings, atlas_generation=current_generation_ref(settings), atlas_generation_mode="pinned")
+            hits = [SearchHit("repo", f"file{number}.py", 1, "execute", "semantic candidate", 90,
+                              ["local semantic index"]) for number in range(6)]
+            events = []
+
+            def read(*args, **kwargs):
+                self.assertEqual([], events)
+                return read_generation_files(*args, **kwargs)
+
+            runtime = mock.Mock()
+            runtime.rerank.return_value = [0.0, 0.1, 0.2]
+            trace, cache = RetrievalTrace(), {}
+            with mock.patch("brain.models.active_pack", return_value={"pack_id": "reranker"}), \
+                    mock.patch("brain.models._reranker_tuning", return_value=(3, 3)), \
+                    mock.patch("brain.models.runtime_for_pack", return_value=runtime) as start, \
+                    mock.patch("brain.index.read_generation_files", side_effect=read) as reads, \
+                    mock.patch("brain.models.model_lane") as lane:
+                lane.return_value.__enter__.side_effect = lambda: events.append("lane")
+                rerank_candidates(pinned, "question", hits, trace=trace, _source_cache=cache)
+            self.assertEqual(["lane"], events)
+            self.assertEqual(1, start.call_count)
+            self.assertEqual(1, reads.call_count)
+            self.assertEqual(3, len(reads.call_args.args[2]))
+            self.assertEqual(8 * 1024 * 1024, reads.call_args.kwargs["max_bytes"])
+            self.assertLessEqual(reads.call_args.kwargs["max_seconds"], 0.25)
+            self.assertEqual(3, len(cache))
+            self.assertEqual(1, trace.physical_backend_operations)
+            self.assertEqual(3, trace.rerank_input_count)
+            for document in runtime.rerank.call_args.args[1]:
+                self.assertLessEqual(len(document.split("Snippet: ", 1)[1].encode("utf-8")), 1_200)
+            self.assertEqual(["execute"] * 6, [hit.text for hit in hits])
+
+            runtime.reset_mock()
+            trace = RetrievalTrace()
+            with mock.patch("brain.index.read_generation_files", return_value=None), \
+                    mock.patch("brain.models.model_lane") as lane:
+                rerank_candidates(pinned, "question", hits, runtime=runtime, trace=trace, _source_cache={})
+            lane.assert_not_called()
+            runtime.rerank.assert_not_called()
+            self.assertEqual(0, trace.rerank_input_count)
+            self.assertIn("rerank_source_preview_incomplete", trace.fallback_reasons)
+
+    def test_rerank_preview_reads_shared_file_once_and_keeps_path_safety(self) -> None:
+        from dataclasses import replace
+        from brain.query import rerank_snippets
+        from brain.retrieval.models import RetrievalTrace
+
+        class CountedSource(str):
+            splits = 0
+
+            def splitlines(self, *args, **kwargs):
+                self.splits += 1
+                return super().splitlines(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo").mkdir()
+            (root / "repo/methods.py").write_text("def execute():\n    return 1\n", encoding="utf-8")
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='shared-preview'\n[graph]\nenabled=false\n"
+                              "[[repositories]]\nname='repo'\npath='repo'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            pinned = replace(settings, atlas_generation=current_generation_ref(settings), atlas_generation_mode="pinned")
+            source = CountedSource("def execute():\n    return 'original'\n" * 40)
+            hits = [SearchHit("repo", "methods.py", number + 1, "execute", "semantic candidate", 90,
+                              ["local semantic index"]) for number in range(40)]
+            hits += [SearchHit("repo", path, 1, "label", "semantic candidate", 90, ["local semantic index"])
+                     for path in (".env", "../outside.py")]
+            hits += [SearchHit("repo", "observed.py", 1, "observed original clues", "code", 90, ["sqlite trigram index"])]
+            cache = {}
+            with mock.patch("brain.index.read_generation_files", return_value={("repo", "methods.py"): source}) as reads:
+                snippets = rerank_snippets(pinned, hits, list(range(len(hits))), cache, trace=RetrievalTrace())
+            self.assertEqual([("repo", "methods.py")], reads.call_args.args[2])
+            self.assertEqual(1, source.splits)
+            self.assertEqual(41, len(snippets))
+            self.assertEqual("observed original clues", snippets[42])
+            self.assertNotIn(40, snippets)
+            self.assertNotIn(41, snippets)
+
+    def test_reranker_receives_distinct_local_clues_not_only_a_symbol_label(self) -> None:
+        from brain.models import rerank_candidates
+        from brain.query import prune_candidates
+
+        hits = [
+            SearchHit("repo", "policy.py", 40, "invoice_scope = record.customer", score=95,
+                      found_by=["sqlite trigram index", "lexical anchor 1"]),
+            SearchHit("repo", "policy.py", 41, "invoice_note = '" + "客户" * 1_200, score=96,
+                      found_by=["sqlite trigram index", "lexical anchor 1"]),
+            SearchHit("repo", "policy.py", 42, "invoice_audit = record.reference", score=96,
+                      found_by=["sqlite trigram index", "lexical anchor 1"]),
+            SearchHit("repo", "policy.py", 60, "if cancellation_requested: require_reversal()", score=95,
+                      found_by=["sqlite trigram index", "lexical anchor 2"]),
+            SearchHit("repo", "policy.py", 60, "Policy.cancel", "semantic candidate", 100,
+                      ["local semantic index"]),
+        ]
+        original = [hit.text for hit in hits]
+        fused = fuse_and_rank(hits[-2:])
+        self.assertIn("require_reversal()", fused[0].text)
+        candidates, _ = prune_candidates(mock.Mock(source_window_lines=150), hits, 20)
+        self.assertEqual(1, len(candidates))
+        self.assertIn("invoice", candidates[0].text)
+        self.assertIn("cancellation_requested", candidates[0].text)
+        self.assertLessEqual(len(candidates[0].text.encode("utf-8")), 1_200)
+        self.assertEqual(original, [hit.text for hit in hits])
+        runtime = mock.Mock()
+        runtime.rerank.return_value = [1.0]
+        with mock.patch("brain.models.model_lane"):
+            rerank_candidates(mock.Mock(), "Explain invoice cancellation", candidates, runtime=runtime)
+        documents = runtime.rerank.call_args.args[1]
+        self.assertIn("require_reversal()", documents[0])
+        self.assertIn("invoice", documents[0])
+
+    def test_large_file_matches_survive_region_merging_and_pinned_delivery(self) -> None:
+        from dataclasses import replace
+        from brain.core import parse_context_request, retrieve_context
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo").mkdir()
+            source = ["# unrelated source"] * 600
+            source[39] = "invoice_policy = 1"
+            source[129] = "if cancellation_requested: raise RuntimeError('reversal required')"
+            path = root / "repo/policy.py"
+            path.write_text("\n".join(source) + "\n", encoding="utf-8")
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='large-source-quality'\n[graph]\nenabled=false\n[[repositories]]\nname='repo'\npath='repo'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            pinned = replace(settings, atlas_generation=current_generation_ref(settings), atlas_generation_mode="pinned")
+            path.write_text("LATEST_SOURCE_MUST_NOT_APPEAR\n", encoding="utf-8")
+            request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                "version": 5, "mode": "root_cause", "objective": "invoice cancellation",
+            }}))
+            bundle = retrieve_context(pinned, request)
+            delivered = "\n".join(item.content for item in bundle.evidence)
+            self.assertIn("invoice_policy = 1", delivered)
+            self.assertIn("reversal required", delivered)
+            self.assertNotIn("LATEST_SOURCE_MUST_NOT_APPEAR", delivered)
+            self.assertIn("reversal required", pack_context(pinned, "QUALITY-LARGE", 1, bundle))
+            limited = retrieve_context(replace(pinned, hydrate_limit=1), request)
+            self.assertTrue(
+                any(item.line_start <= 130 <= item.line_end for item in limited.evidence)
+                or any(item.path == "policy.py" and item.line == 130 for item in limited.additional_candidates),
+                "A source match outside the delivered window must remain requestable, not disappear during merging",
+            )
+
+    def test_merged_candidate_windows_cover_all_original_matching_lines(self) -> None:
+        import random
+        from brain.query import _candidate_regions
+
+        settings = mock.Mock(source_window_lines=150)
+        rng = random.Random(2026)
+        for positions in ([10, 80, 150], *[sorted(rng.sample(range(1, 1_000), 20)) for _ in range(50)]):
+            hits = [SearchHit("repo", "large.py", line, f"line {line}", score=40 + index,
+                              found_by=["sqlite trigram index"]) for index, line in enumerate(positions)]
+            merged = _candidate_regions(settings, hits)
+            for hit in hits:
+                self.assertTrue(any(abs(hit.line - region.line) <= 75 for region in merged),
+                                (hit.line, [region.line for region in merged]))
+
+    def test_literal_batch_precedes_native_shards_and_preserves_fallback(self) -> None:
+        from dataclasses import replace
+        from brain.core import _ACTIVE_RETRIEVAL_CACHE, _ACTIVE_RETRIEVAL_TRACE, search
+        from brain.retrieval.models import RetrievalTrace
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo").mkdir()
+            (root / "repo/policy.py").write_text("invoice = 1\n", encoding="utf-8")
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='literal-batch'\n[graph]\nenabled=false\n[[repositories]]\nname='repo'\npath='repo'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            generation = current_generation_ref(settings)
+            generation = replace(generation, components={**generation.components, "zoekt": {
+                "status": "ready", "details": {"shards": [{"repo": "repo", "snapshot": settings.repo("repo").source_sha, "manifest_hash": "pinned-shard"}]},
+            }})
+            settings = replace(settings, atlas_generation=generation, atlas_generation_mode="pinned")
+            trace = RetrievalTrace()
+            trace_token = _ACTIVE_RETRIEVAL_TRACE.set(trace)
+            cache_token = _ACTIVE_RETRIEVAL_CACHE.set({})
+            try:
+                with mock.patch("brain.backends.zoekt.search", side_effect=AssertionError("literal query fanned out")):
+                    self.assertEqual(["policy.py"], [hit.path for hit in search(settings, "invoice", fixed=True)])
+                    self.assertTrue(search(settings, "invoice"))
+                    self.assertEqual([], search(settings, "nonexistent", fixed=True))
+                    self.assertEqual([], search(settings, "nonexistent"))
+                self.assertEqual(2, trace.physical_backend_operations)
+                self.assertEqual(0, trace.subprocess_count)
+            finally:
+                _ACTIVE_RETRIEVAL_CACHE.reset(cache_token)
+                _ACTIVE_RETRIEVAL_TRACE.reset(trace_token)
+            native_result = ([('policy.py', 1, 'invoice = 1', 1.0)], {"elapsed_ms": 0, "raw_hits": 1})
+            with mock.patch("brain.index.query_generation_indexes", return_value=None), mock.patch(
+                "brain.backends.zoekt.search", return_value=native_result,
+            ) as native:
+                self.assertTrue(search(settings, "invoice", fixed=True))
+                self.assertTrue(search(settings, "invoic[e]"))
+                self.assertEqual(2, native.call_count)
+                self.assertEqual([True, False], [call.kwargs["fixed"] for call in native.call_args_list])
+                self.assertTrue(all(call.kwargs["expected_manifest_hash"] == "pinned-shard" for call in native.call_args_list))
+
+    def test_joint_query_ranking_is_bounded_local_and_cache_isolated(self) -> None:
+        from brain.core import _ACTIVE_RETRIEVAL_CACHE, _cached_hits, _store_hits
+        from brain.query import _candidate_regions
+
+        settings = mock.Mock(source_window_lines=150)
+        base = SearchHit("repo", "policy.py", 10, "policy", score=95, found_by=["sqlite trigram index"])
+        baseline = _candidate_regions(settings, [base])[0].score
+        for anchors, bonus in (([1, 1], 0), ([1, 2], 5), (list(range(20)), 20)):
+            hits = [SearchHit(base.repo, base.path, base.line, base.text, score=95,
+                              found_by=[*base.found_by, f"lexical anchor {anchor}"]) for anchor in anchors]
+            self.assertAlmostEqual(baseline + bonus, _candidate_regions(settings, hits)[0].score, places=3)
+        far = [SearchHit("repo", "policy.py", line, "policy", score=95,
+                         found_by=["sqlite trigram index", f"lexical anchor {anchor}"])
+               for line, anchor in ((10, 1), (1_000, 2))]
+        regions = _candidate_regions(settings, far)
+        self.assertEqual(2, len(regions))
+        self.assertEqual([hit.score for hit in fuse_and_rank(far)], [hit.score for hit in regions])
+        token = _ACTIVE_RETRIEVAL_CACHE.set({})
+        try:
+            _store_hits(("query",), [base])
+            cached = _cached_hits(("query",))
+            cached[0].found_by.append("lexical anchor 1")
+            _candidate_regions(settings, cached)
+            self.assertEqual(["sqlite trigram index"], _cached_hits(("query",))[0].found_by)
+            self.assertEqual(95, base.score)
+        finally:
+            _ACTIVE_RETRIEVAL_CACHE.reset(token)
+
+    def test_hydration_preserves_requested_definitions_after_optional_ranking(self) -> None:
+        from brain.query import prune_candidates, select_candidates
+
+        settings = mock.Mock(source_window_lines=150, candidate_limit=20, hydrate_limit=1,
+                             max_regions_per_file=2, max_regions_per_repo=8)
+        hits = [SearchHit("repo", "policy.py", 1, "class InvoicePolicy:", "definition", 100, ["symbol"]),
+                SearchHit("repo", "noise.py", 1, "invoice notes", "code", 95,
+                          ["sqlite trigram index", *(f"lexical anchor {number}" for number in range(8))])]
+        candidates, _ = prune_candidates(settings, hits, 20)
+        for hit in candidates:
+            if hit.path == "noise.py":
+                hit.score += 20  # The optional reranker can add a bounded bonus too.
+        selected, omitted = select_candidates(settings, candidates, already_fused=True)
+        self.assertEqual(["policy.py"], [hit.path for hit in selected])
+        self.assertEqual(["noise.py"], [hit.path for hit in omitted])
+
+    def test_reranker_skips_protected_only_work_and_flat_scores_add_no_relevance(self) -> None:
+        from brain.models import rerank_candidates
+        from brain.retrieval.models import RetrievalTrace
+
+        protected = [SearchHit("repo", "policy.py", 1, "policy", "definition", 100),
+                     SearchHit("repo", "read.py", 1, "requested", "requested file", 100),
+                     SearchHit("repo", "known.py", 1, "known", "verified path", 100)]
+        with mock.patch("brain.models.model_lane") as lane, mock.patch("brain.models.active_pack", return_value=None) as pack:
+            self.assertIs(protected, rerank_candidates(mock.Mock(), "policy", protected, trace=RetrievalTrace()))
+            lane.assert_not_called()
+            pack.assert_not_called()
+        hits = [SearchHit("repo", f"file{index}.py", 1, "policy", score=90 + index) for index in range(3)]
+        runtime = mock.Mock()
+        runtime.rerank.return_value = [0.0, 0.0]
+        with mock.patch("brain.models.model_lane"):
+            rerank_candidates(mock.Mock(), "policy", hits, runtime=runtime, limit=2)
+        self.assertEqual([90, 91, 92], [hit.score for hit in hits])
+        runtime.shutdown.assert_not_called()  # Injected runtimes remain caller-owned.
+
+    def test_compound_evidence_quality_at_repository_scale(self) -> None:
+        from dataclasses import replace
+        from brain.core import parse_context_request, retrieve_context
+
+        for count in (10, 50, 100):
+            with self.subTest(repositories=count), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config_text = "[project]\nname='compound-scale'\n[graph]\nenabled=false\n"
+                for number in range(count):
+                    name = f"service-{number:03}"
+                    repo = root / name
+                    repo.mkdir()
+                    for index in range(12):
+                        (repo / f"audit_{index:02}.py").write_text(
+                            "def audit_invoice(invoice):\n    return invoice.reference\n", encoding="utf-8",
+                        )
+                    config_text += f"[[repositories]]\nname='{name}'\npath='{name}'\n"
+                (repo / "policy.py").write_text(
+                    "def invoice_policy(record):\n    # cancellation requires a reversal event\n    return record.cancelled\n", encoding="utf-8",
+                )
+                config = root / "brain.toml"
+                config.write_text(config_text, encoding="utf-8")
+                settings = load_settings(config)
+                snapshot_indexes(settings)
+                settings = replace(settings, atlas_generation=current_generation_ref(settings), atlas_generation_mode="pinned", hydrate_limit=1)
+                request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                    "version": 5, "mode": "root_cause", "objective": "Explain invoice cancellation",
+                }}))
+                for warm in (False, True):
+                    with self.subTest(warm=warm):
+                        bundle = retrieve_context(settings, request)
+                        self.assertEqual([(name, "policy.py")], [(item.repo, item.path) for item in bundle.evidence])
+                        self.assertIn("return record.cancelled", bundle.evidence[0].content)
+                        self.assertLessEqual(bundle.trace["physical_backend_operations"], 8)
+
+    def test_compound_query_prioritizes_joint_evidence_over_single_term_noise(self) -> None:
+        from brain.core import parse_context_request, retrieve_context
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "billing"
+            repo.mkdir()
+            for index in range(24):
+                (repo / f"audit_{index:02}.py").write_text(
+                    "def audit_invoice(invoice):\n    return invoice.reference\n", encoding="utf-8",
+                )
+            (repo / "z_policy.py").write_text(
+                "def invoice_policy(record):\n    # cancellation requires a reversal event\n    return record.cancelled\n", encoding="utf-8",
+            )
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='compound-quality'\n[graph]\nenabled=false\n[[repositories]]\nname='billing'\npath='billing'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            settings.hydrate_limit = 1
+            request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                "version": 5, "mode": "root_cause", "objective": "invoice cancellation",
+            }}))
+            # Isolate lexical ordering; the full pipeline must retain the same
+            # exact implementation even when no Atlas candidate rescues it.
+            for isolate_lexical in (True, False):
+                with self.subTest(isolate_lexical=isolate_lexical):
+                    if isolate_lexical:
+                        with mock.patch("brain.atlas.route", return_value={"repos": ["billing"]}):
+                            bundle = retrieve_context(settings, request)
+                    else:
+                        bundle = retrieve_context(settings, request)
+                    self.assertEqual([("billing", "z_policy.py")], [(item.repo, item.path) for item in bundle.evidence])
+                    self.assertIn("return record.cancelled", bundle.evidence[0].content)
+                    self.assertLessEqual(bundle.trace["physical_backend_operations"], 4)
+
+    def test_masker_reuses_delimiter_free_source_and_preserves_literal_offsets(self) -> None:
+        from brain.investigation import _mask_java_comments
+
+        content = "COMMON_TOKEN EXACT_USEFUL\n" + "x" * 700_000
+        for strings in (False, True):
+            self.assertIs(content, _mask_java_comments(content, strings=strings))
+        literal = '"https://example/path/*not-comment*/"'
+        source = "String url = " + literal + "; // comment\n/* block */\nchar slash = '/';\n"
+        self.assertEqual("String url = " + literal + "; " + " " * 10 + "\n" + " " * 11 + "\nchar slash = '/';\n", _mask_java_comments(source))
+        self.assertEqual("String url = " + " " * len(literal) + "; " + " " * 10 + "\n" + " " * 11 + "\nchar slash = " + " " * 3 + ";\n", _mask_java_comments(source, strings=True))
+
+    def test_documentation_only_route_widens_to_exact_implementation(self) -> None:
+        from brain.core import parse_context_request, retrieve_context
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("docs", "service"):
+                (root / name).mkdir()
+            (root / "docs/README.md").write_text("EligibilityAdaptor is mentioned here, but no implementation.\n", encoding="utf-8")
+            (root / "service/adaptor.py").write_text("class EligibilityAdaptor:\n    def eligible(self, customer):\n        return customer.active\n", encoding="utf-8")
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='quality'\n[graph]\nenabled=false\n[retrieval]\ninitial_repo_limit=1\nwiden_repo_limit=2\n"
+                              "[[repositories]]\nname='docs'\npath='docs'\n[[repositories]]\nname='service'\npath='service'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                "version": 5, "mode": "root_cause", "objective": "Find EligibilityAdaptor behavior",
+            }}))
+            with mock.patch("brain.atlas.route", return_value={"repos": ["docs", "service"]}):
+                bundle = retrieve_context(settings, request)
+            self.assertIn(("service", "adaptor.py"), {(item.repo, item.path) for item in bundle.evidence})
+            self.assertTrue(any("return customer.active" in item.content for item in bundle.evidence))
+            self.assertIn("lexical_documentation_only", bundle.trace["fallback_reasons"])
+            self.assertLessEqual(bundle.trace["physical_backend_operations"], settings.max_backend_operations)
+
+    def test_documentation_never_claims_production_or_test_source_coverage(self) -> None:
+        from brain.core import Evidence, _coverage
+
+        for path in ("README.md", "tests/setup.md", "architecture.rst", "guide.adoc", "LICENSE"):
+            coverage = _coverage(ContextBundle("Read source", evidence=[Evidence("repo", path, 1, 1, "Navigation only", "code", 100)]))
+            self.assertFalse(coverage["production_source"], path)
+            self.assertFalse(coverage["tests"], path)
+        coverage = _coverage(ContextBundle("Read source", evidence=[Evidence("repo", "main.py", 1, 1, "pass", "code", 100)]))
+        self.assertTrue(coverage["production_source"])
+
+    def test_history_mode_compiles_source_identity_not_whole_question(self) -> None:
+        from brain.core import parse_context_request
+
+        request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "history", "objective": "Find when EligibilityAdaptor changed",
+        }}))
+        self.assertEqual([{"query": "EligibilityAdaptor", "repos": []}], request["history"])
+        self.assertEqual("required", request["coverage"]["history"])
+
+    def test_symbol_reference_cannot_hide_definition_at_repository_scale(self) -> None:
+        from brain.core import parse_context_request, retrieve_context
+
+        for count in (10, 50, 100):
+            with self.subTest(repositories=count), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                repos = [f"service-{number:03}" for number in range(count)]
+                config_text = "[project]\nname='quality-scale'\n[graph]\nenabled=false\n[retrieval]\ninitial_repo_limit=1\nwiden_repo_limit=2\n"
+                for name in repos:
+                    (root / name).mkdir()
+                    (root / name / "usage.py").write_text("def caller():\n    return EligibilityAdaptor()\n", encoding="utf-8")
+                    config_text += f"[[repositories]]\nname='{name}'\npath='{name}'\n"
+                (root / repos[-1] / "adaptor.py").write_text(
+                    "class EligibilityAdaptor:\n    def eligible(self, customer):\n        return customer.active and not customer.blocked\n", encoding="utf-8",
+                )
+                config = root / "brain.toml"
+                config.write_text(config_text, encoding="utf-8")
+                settings = load_settings(config)
+                snapshot_indexes(settings)
+                settings.hydrate_limit = 1
+                request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                    "version": 5, "mode": "root_cause", "objective": "Find EligibilityAdaptor behavior",
+                }}))
+                with mock.patch("brain.atlas.route", return_value={"repos": repos}):
+                    bundle = retrieve_context(settings, request)
+                self.assertEqual([(repos[-1], "adaptor.py")], [(item.repo, item.path) for item in bundle.evidence])
+                self.assertIn("not customer.blocked", bundle.evidence[0].content)
+                self.assertIn("lexical_references_only", bundle.trace["fallback_reasons"])
+                self.assertLessEqual(bundle.trace["physical_backend_operations"], count + 2)
+                self.assertLessEqual(bundle.trace["physical_backend_operations"], settings.max_backend_operations)
+
+    def test_response_format_score_never_claims_causal_correctness(self) -> None:
+        from brain.evaluation import evaluate_m365_response
+
+        response = "FINAL_SOLUTION\nTicket interpretation\nVerified current behavior\nRoot cause\nExact repository\nTests\nValidation\nEdge cases\nImplementation order\nE0001\nNo actual argument."
+        result = evaluate_m365_response(response, ["E0001"])
+        self.assertEqual(1.0, result["final_contract_coverage"])
+        self.assertEqual("not_evaluated", result["causal_correctness"])
+        self.assertEqual("format_and_citation_presence_only", result["evaluation_scope"])
+
+    def test_fenced_json_requests_share_raw_json_validation_and_signature(self) -> None:
+        from brain.agent import response_preview
+        from brain.core import BrainError
+
+        raw = json.dumps({"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "root_cause", "objective": "Verify EligibilityAdaptor",
+            "files": [{"repo": "service", "path": "src/Adaptor.java"}],
+        }})
+        original = response_preview(raw)
+        for fence in ("```json", "```", "~~~~JSON"):
+            marker = fence[:4] if fence.startswith("~") else fence[:3]
+            with self.subTest(fence=fence):
+                wrapped = f"{fence}\n{raw}\n{marker}"
+                result = response_preview(wrapped)
+                self.assertEqual("context_request", result["kind"])
+                self.assertEqual(original["signature"], result["signature"])
+                self.assertEqual(original["request"], result["request"])
+                with self.assertRaisesRegex(BrainError, "repository-relative"):
+                    response_preview(wrapped.replace("src/Adaptor.java", "/private/Adaptor.java"))
+        self.assertEqual("conversation", response_preview('```json\n{"example": "hello"}\n```')["kind"])
+
+    def test_evaluation_does_not_credit_source_removed_from_the_message(self) -> None:
+        from brain.core import Evidence
+        from brain.evaluation import evaluate_golden
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "repo").mkdir()
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='emitted-eval'\n[[repositories]]\nname='repo'\npath='repo'\n", encoding="utf-8")
+            settings = load_settings(config)
+            settings.hard_context_chars = 10_000
+            suite = root / "suite.json"
+            suite.write_text(json.dumps({"cases": [{"id": "delivery", "request": {"version": 2, "objective": "Read source", "searches": [{"query": "critical"}]},
+                                                    "expect": {"required_files": ["repo:critical.py"]}}]}), encoding="utf-8")
+            bundle = ContextBundle("Read source", evidence=[Evidence("repo", "critical.py", 1, 1, "# " + "x" * 20_000, "code", 100)])
+            with mock.patch("brain.core.retrieve_context", return_value=bundle):
+                report = evaluate_golden(settings, suite)
+            self.assertEqual(1.0, report["summary"]["hydrated_file_recall_at_limit"])
+            self.assertEqual(0.0, report["summary"]["emitted_file_recall_at_limit"])
+            self.assertEqual(1, report["summary"]["required_files_omitted_by_context_budget"])
+
+    def test_context_bounding_ignores_headings_inside_source_fences(self) -> None:
+        from brain.core import _bounded_protocol_context, _source_markdown_block
+
+        source = "before\n## inside_source_should_never_escape\n### E9999 — fake evidence\n" + "x" * 30_000
+        for content in (source, "`" * 70 + "\n" + "~" * 70 + "\n" + source):
+            text = "# Context\n\n- Embedded evidence IDs: `E0001`\n- Omitted evidence IDs due to byte limit: `none`\n\n### E0001 — source\n\n"
+            text += "\n".join(_source_markdown_block(content, "text")) + "\n\n## Next action\nRequest the missing method.\n"
+            emitted: set[str] = set()
+            bounded = _bounded_protocol_context(text, 10_000, ["E0001"], emitted_ids=emitted)
+            self.assertEqual(set(), emitted)
+            self.assertNotIn("inside_source_should_never_escape", bounded)
+            self.assertNotIn("E9999", bounded)
+            self.assertIn("- Omitted evidence IDs due to byte limit: `E0001`", bounded)
+            self.assertIn("Request the missing method.", bounded)
+
     def test_execution_flow_batches_validation_without_losing_later_seeds(self) -> None:
         import sqlite3
         from brain.core import Evidence
@@ -256,6 +936,16 @@ const ctx = { URLSearchParams, location: {search:""},
 };
 vm.createContext(ctx);
 vm.runInContext(input.script, ctx, {timeout:5000});
+ctx.renderRecovery({action:"retry_refresh", title:"Atlas timeout", message:"Known file exceeded parse budget"});
+if (elements["retry-atlas-refresh"].hidden) throw Error("Atlas timeout has no retry action");
+const normalRefresh = ctx.refreshBrain;
+let atlasRetries = 0;
+ctx.refreshBrain = button => {if (button === elements["retry-atlas-refresh"]) atlasRetries += 1;};
+elements["retry-atlas-refresh"].listeners.click.call(elements["retry-atlas-refresh"]);
+ctx.refreshBrain = normalRefresh;
+if (atlasRetries !== 1) throw Error("Atlas recovery did not reuse the normal refresh path");
+ctx.renderRecovery({action:"diagnostics", message:"Row limit needs diagnosis"});
+if (!elements["retry-atlas-refresh"].hidden) throw Error("Permanent row limit must not suggest blind retry");
 if (ctx.document.documentElement.dataset.theme !== "light") throw Error("system theme ignored");
 elements["theme-button"].listeners.click();
 if (ctx.document.documentElement.dataset.theme !== "dark") throw Error("theme toggle failed");
@@ -318,6 +1008,37 @@ if (!elements["run-request"].disabled || elements["review-ticket"].value !== "TI
   if (ctx.state.preview) throw Error("changed request retains approval");
   ctx.report({message:"Investigation paused", recovery:{action:"continue_investigation", message:"Continue with AI"}});
   if (elements["error-recovery"].dataset.go !== "request" || elements["page-title"].textContent !== "Continue with AI") throw Error("wave pause routed to health/refresh");
+  ctx.api = async () => ({delivery:{target:"m365"}, artifacts:[], session_path:".runs/TICKET-B", handoff_path:"generated/handoffs/TICKET-B"});
+  elements["session-select"].value = "TICKET-B";
+  await ctx.openSession();
+  if (elements["request-target"].value !== "m365") throw Error("reopened ticket lost its delivery target");
+  calls = [];
+  ctx.api = async (path, options) => {calls.push({path, body:JSON.parse(options.body)}); return {delivery:{content:"handover"}};};
+  elements["review-ticket"].value = "TICKET-B";
+  await elements["create-feedback"].listeners.click.call(elements["create-feedback"]);
+  if (calls[0].body.target !== "m365") throw Error("feedback silently switched to clipboard");
+  elements["resume-notes"].value = "Next blocker: verify retry";
+  await elements["resume-chat"].listeners.click.call(elements["resume-chat"]);
+  if (calls[1].path !== "/api/resume" || calls[1].body.target !== "m365" || calls[1].body.notes !== "Next blocker: verify retry") throw Error("new-chat handover lost ticket settings");
+  ctx.renderPreview({...paused, continuation:{required:false}});
+  elements["request-text"].value = "A fresh retrieval";
+  ctx.api = async path => path.startsWith("/api/artifact") ? {content:path.includes("delta") ? "CONTINUATION_ONLY" : "EARLY_SOURCE"} : {id:"job"};
+  ctx.waitForJob = async (job, onProgress) => {
+    await onProgress({progress:{checkpoint_artifact:"checkpoint-001.md"}});
+    if (ctx.state.deliveries["view-request"].content !== "EARLY_SOURCE") throw Error("early evidence missing");
+    return {kind:"context_request", delivery:{current:1,total:1,content:"COMPLETE_ROUND_SOURCE"},
+      progressive_delivery:{continuation_artifact:"checkpoint-delta-001.md"}};
+  };
+  await elements["run-request"].listeners.click.call(elements["run-request"]);
+  if (ctx.state.deliveries["view-request"].content !== "COMPLETE_ROUND_SOURCE") throw Error("showing an early checkpoint incorrectly assumed it was delivered");
+  ctx.window.confirm = () => false;
+  await elements["checkpoint-continuation"].listeners.click.call(elements["checkpoint-continuation"]);
+  if (ctx.state.deliveries["view-request"].content !== "COMPLETE_ROUND_SOURCE") throw Error("cancelled continuation discarded source");
+  ctx.window.confirm = () => true;
+  await elements["checkpoint-continuation"].listeners.click.call(elements["checkpoint-continuation"]);
+  if (ctx.state.deliveries["view-request"].content !== "CONTINUATION_ONLY") throw Error("explicit checkpoint continuation unavailable");
+  ctx.selectTicket("TICKET-C");
+  if (ctx.state.checkpointContinuation || !elements["checkpoint-continuation"].hidden) throw Error("checkpoint continuation crossed tickets");
   for (const fn of timers.values()) fn();
   timers.clear();
 })().then(() => {

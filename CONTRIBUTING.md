@@ -27,6 +27,9 @@ On Windows, activate with `.venv\Scripts\activate`.
 
 ## Pull requests
 
+Maintainers follow the [release procedure](docs/RELEASING.md) for builds,
+artifact verification and publication.
+
 Keep pull requests focused. Include:
 
 - the retrieval or workflow problem being solved;

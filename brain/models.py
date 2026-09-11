@@ -1824,53 +1824,66 @@ def rerank_candidates(
     runtime: ModelRuntime | None = None,
     limit: int = DEFAULT_RERANK_POOL,
     trace: Any | None = None,
+    _source_cache: dict[tuple[str, str], str] | None = None,
 ) -> list[Any]:
     """Apply a local reranker to a bounded candidate shortlist only.
 
-    This function intentionally receives the already-found candidate snippets,
-    never full source files, and only changes a candidate score.  Direct file
-    requests and symbol definitions are protected from a learned score so a
-    Precision profile cannot discard explicitly requested evidence.
+    Only byte-bounded snippets reach the model. The retrieval caller can supply
+    its request-local source cache to replace navigation-only labels with
+    verified pinned previews before acquiring the model lane. Direct evidence
+    remains protected, and verified files can be reused for final hydration.
     """
+    from .core import _bounded_utf8_text
+
     if not query or not hits:
+        return hits
+    protected = [any(value in str(hit.kind).lower() for value in ("requested", "verified path", "definition")) for hit in hits]
+    if all(protected):
+        if trace is not None:
+            trace.rerank_input_count = 0
+        return hits
+    owns_runtime = runtime is None
+    manifest = active_pack(settings, "reranker") if runtime is None else None
+    if runtime is None and manifest is None:
+        raise RuntimeError("Precision edition requires a verified local reranker pack")
+    pack_id = str(manifest["pack_id"]) if manifest is not None else ""
+    batch_size, recommended_pool = _reranker_tuning(settings, pack_id, manifest) if pack_id else (DEFAULT_RERANK_POOL, DEFAULT_RERANK_POOL)
+    limit = max(1, min(limit, recommended_pool, MAX_RERANK_POOL))
+    positions: list[int] = []
+    seen: set[tuple[str, str, int]] = set()
+    for index, hit in enumerate(hits):
+        key = (str(hit.repo), str(hit.path), int(hit.line))
+        if protected[index] or key in seen or len(positions) >= limit:
+            continue
+        seen.add(key)
+        positions.append(index)
+    snippets = {index: str(hits[index].text) for index in positions}
+    if _source_cache is not None:
+        from .query import rerank_snippets
+
+        snippets = rerank_snippets(settings, hits, positions, _source_cache, trace=trace)
+        positions = [index for index in positions if index in snippets]
+    documents: list[str] = []
+    for index in positions:
+        hit = hits[index]
+        snippet = _bounded_utf8_text(snippets[index][:1_200].strip().replace("\x00", " "), 1_200, "…")[0]
+        extension = Path(str(hit.path)).suffix.lower().lstrip(".") or "text"
+        documents.append(f"Repository: {hit.repo}\nPath: {hit.path}\nLanguage: {extension}\nKind: {hit.kind}\nSnippet: {snippet}")
+    if trace is not None:
+        trace.rerank_input_count = len(positions)
+    if not documents:
         return hits
     lane_started = time.perf_counter()
     lane = model_lane(settings)
     lane.__enter__()
     if trace is not None:
         trace.add_stage("model_lane_wait_ms", (time.perf_counter() - lane_started) * 1000)
-    owns_runtime = runtime is None
-    pack_id = ""
-    manifest: dict[str, Any] | None = None
     try:
         if runtime is None:
-            manifest = active_pack(settings, "reranker")
-            if manifest is None:
-                raise RuntimeError("Precision edition requires a verified local reranker pack")
-            pack_id = str(manifest["pack_id"])
             runtime_started = time.perf_counter()
             runtime = runtime_for_pack(manifest)
             if trace is not None:
                 trace.add_stage("reranker_runtime_start_ms", (time.perf_counter() - runtime_started) * 1000)
-        batch_size, recommended_pool = _reranker_tuning(settings, pack_id, manifest) if pack_id else (DEFAULT_RERANK_POOL, DEFAULT_RERANK_POOL)
-        limit = max(1, min(limit, recommended_pool, MAX_RERANK_POOL))
-        protected = ["requested" in str(hit.kind).lower() or "definition" in str(hit.kind).lower() for hit in hits]
-        positions: list[int] = []
-        documents: list[str] = []
-        seen: set[tuple[str, str, int]] = set()
-        for index, hit in enumerate(hits):
-            key = (str(hit.repo), str(hit.path), int(hit.line))
-            if protected[index] or key in seen or len(positions) >= limit:
-                continue
-            seen.add(key)
-            positions.append(index)
-            snippet = str(hit.text).strip().replace("\x00", " ")[:1_200]
-            extension = Path(str(hit.path)).suffix.lower().lstrip(".") or "text"
-            documents.append(f"Repository: {hit.repo}\nPath: {hit.path}\nLanguage: {extension}\nKind: {hit.kind}\nSnippet: {snippet}")
-        if trace is not None:
-            trace.rerank_input_count = len(positions)
-        if not documents:
-            return hits
         # Production conformance compares a batch with one-document calls before
         # a pack becomes usable.  Splitting a calibrated shortlist is therefore
         # a memory bound, not a change to its relevance semantics.
@@ -1884,7 +1897,8 @@ def rerank_candidates(
         for position, score in zip(positions, scores, strict=True):
             # A bounded tie-breaker leaves lexical/definition/request features and
             # downstream diversity limits in charge of the final evidence set.
-            normalized = 1.0 if high == low else (float(score) - low) / (high - low)
+            # Equal scores supply no comparative relevance, including pool=1.
+            normalized = 0.0 if high == low else (float(score) - low) / (high - low)
             hits[position].score = round(float(hits[position].score) + 20 * normalized, 3)
             hits[position].found_by = sorted(set(hits[position].found_by + ["local reranker"] ))
         return hits

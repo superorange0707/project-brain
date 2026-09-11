@@ -282,7 +282,7 @@
         <div class="grid">
           <article class="card wide">
             <div class="section-heading"><div><h2>Recovery center</h2><p class="help" id="recovery-guidance">Check the cause, then run the matching safe operation. No reset or model reinstall is automatic.</p></div></div>
-            <div class="row"><button class="button" id="reload-config">Re-read brain.toml</button><button class="button" id="recovery-doctor">Run diagnostics</button><button class="button" data-go="models">Verify local packs</button></div>
+            <div class="row"><button class="button" id="reload-config">Re-read brain.toml</button><button class="button" id="recovery-doctor">Run diagnostics</button><button class="button" data-go="models">Verify local packs</button><button class="button" id="retry-atlas-refresh" hidden>Retry Refresh Brain</button></div>
             <p class="help" style="margin-top:14px">Configuration changes are validated before use. New repositories require Refresh Brain; existing tickets retain their original source generation.</p>
             <div id="recovery-message" role="status"></div>
           </article>
@@ -386,6 +386,12 @@
               <button class="button primary" id="run-request" disabled>Run retrieval</button>
             </div>
             <div id="request-message"></div>
+            <details class="field"><summary>Continue in a fresh AI conversation</summary>
+              <p class="help">Keep this ticket, its pinned generation and evidence IDs. Export a bounded handover instead of pasting the whole history. Brain cannot see decisions or answers left only in your old chat.</p>
+              <label for="resume-notes">Optional handover notes from the old conversation</label>
+              <textarea id="resume-notes" placeholder="Current conclusion, supporting/refuting evidence IDs, decisions, and the next blocking question…"></textarea>
+              <button class="button secondary" id="resume-chat">Prepare new-chat handover</button>
+            </details>
           </article>
           <article class="card one-third">
             <span class="eyebrow">Retrieval plan</span>
@@ -395,6 +401,7 @@
           </article>
           <article class="card wide">
             <div class="row"><div class="grow"><h2>Evidence context</h2></div><button class="button secondary" data-copy-output>Copy for AI</button></div>
+            <button class="button ghost" id="checkpoint-continuation" hidden>Use continuation — I already sent the early checkpoint</button>
             <pre class="output" data-output>No evidence retrieved in this UI session.</pre>
             <div class="deliverybar" data-deliverybar><button class="button ghost" data-prev>Previous part</button><span data-part>0 / 0</span><button class="button ghost" data-next>Next part</button></div>
           </article>
@@ -562,6 +569,7 @@
       ].map(function (item) { return '<div class="action"><strong>' + esc(item[0]) + '</strong><div>' + esc(item[1]) + '</div></div>'; }).join("");
     }
     function renderRecovery(recovery, message) {
+      document.getElementById("retry-atlas-refresh").hidden = !(recovery && recovery.action === "retry_refresh");
       var target = document.getElementById(recovery && recovery.action === "continue_investigation" ? "request-message" : recovery && recovery.action === "safe_gc" ? "storage-recovery-message" : "recovery-message");
       if (!target) return;
       if (!recovery) {
@@ -689,7 +697,7 @@
         return;
       }
       state.refreshJobId = job.id;
-      var buttons = [document.getElementById("sync-button"), document.getElementById("brain-refresh")];
+      var buttons = [document.getElementById("sync-button"), document.getElementById("brain-refresh"), document.getElementById("retry-atlas-refresh")];
       buttons.forEach(function (button) { busy(button, true, "Refreshing…"); });
       waitForJob(job).then(function (result) {
         state.status = result.status || state.status;
@@ -905,7 +913,9 @@
       view.querySelectorAll("[data-output]").forEach(function (output) { output.textContent = delivery.content || "No context available."; });
       view.querySelectorAll("[data-deliverybar]").forEach(function (bar) { bar.classList.toggle("visible", delivery.total > 0); });
       view.querySelectorAll("[data-part]").forEach(function (part) {
-        part.textContent = delivery.current + " / " + delivery.total + (delivery.path ? " · " + delivery.path : "");
+        part.textContent = delivery.current + " / " + delivery.total + (delivery.artifact ? " · AI handoff: " + delivery.artifact : (delivery.path ? " · " + delivery.path : "")) +
+          (delivery.bytes ? " · " + delivery.bytes.toLocaleString() + " UTF-8 bytes" : "") +
+          (delivery.usage ? " · Prepared since handover: " + Number(delivery.usage.since_resume_bytes || 0).toLocaleString() + " bytes (not AI window usage)" : "");
       });
       view.querySelectorAll("[data-prev]").forEach(function (button) { button.disabled = delivery.current <= 1; });
       view.querySelectorAll("[data-next]").forEach(function (button) { button.disabled = delivery.current >= delivery.total; });
@@ -913,6 +923,10 @@
     function selectTicket(ticket) {
       if (state.ticket !== ticket) {
         state.ticket = ticket;
+        document.getElementById("request-target").value = "";
+        document.getElementById("resume-notes").value = "";
+        document.getElementById("checkpoint-continuation").hidden = true;
+        state.checkpointContinuation = null;
         state.preview = null;
         document.getElementById("run-request").disabled = true;
         ["view-overview", "view-request", "view-review", "view-ticket"].forEach(function (id) { setDelivery(null, id); });
@@ -923,7 +937,7 @@
       ["session-select", "request-ticket", "review-ticket"].forEach(function (id) { document.getElementById(id).value = ticket; });
     }
     ["request-ticket", "review-ticket"].forEach(function (id) {
-      document.getElementById(id).addEventListener("change", function () { selectTicket(this.value); });
+      document.getElementById(id).addEventListener("change", function () { selectTicket(this.value); openSession().catch(report); });
     });
     async function moveDelivery(delta, button) {
       var viewId = button.closest(".view").id;
@@ -993,6 +1007,7 @@
     }
     document.getElementById("sync-button").addEventListener("click", function () { refreshBrain(this); });
     document.getElementById("brain-refresh").addEventListener("click", function () { refreshBrain(this); });
+    document.getElementById("retry-atlas-refresh").addEventListener("click", function () { refreshBrain(this); });
     document.getElementById("set-edition").addEventListener("click", async function () {
       var button = this; busy(button, true, "Switching…");
       try {
@@ -1095,6 +1110,8 @@
           continuation_token: approveContinuation ? continuation.token : null,
           target: document.getElementById("request-target").value
         };
+        state.checkpointContinuation = null;
+        document.getElementById("checkpoint-continuation").hidden = true;
         var job = await api("/api/retrieval", {method:"POST",body:JSON.stringify(body)});
         var shownCheckpoint = "";
         var data = await waitForJob(job, async function (current) {
@@ -1111,13 +1128,11 @@
           showToast(body.ticket + " completed. Open its history to retrieve the result.");
           return;
         }
-        if (shownCheckpoint && data.progressive_delivery && data.progressive_delivery.continuation_artifact) {
-          var continuationName = data.progressive_delivery.continuation_artifact;
-          var continuation = await api("/api/artifact?ticket=" + encodeURIComponent(body.ticket) + "&name=" + encodeURIComponent(continuationName));
-          if (state.ticket !== body.ticket) return;
-          setDelivery({current:1,total:1,content:continuation.content,path:continuationName}, "view-request");
-          showToast("Checkpoint continuation ready — apply it to the first useful checkpoint");
-        } else if (data.delivery) setDelivery(data.delivery, "view-request");
+        if (data.delivery) setDelivery(data.delivery, "view-request");
+        if (data.progressive_delivery && data.progressive_delivery.continuation_artifact) {
+          state.checkpointContinuation = {ticket:body.ticket, name:data.progressive_delivery.continuation_artifact};
+          document.getElementById("checkpoint-continuation").hidden = false;
+        }
         if (data.session) { renderRetrieval(data.session.retrieval); renderCockpit(data.session.cockpit); }
         await loadStatus();
         completed = true;
@@ -1135,6 +1150,17 @@
       }
     });
 
+    document.getElementById("checkpoint-continuation").addEventListener("click", async function () {
+      var selection = state.checkpointContinuation;
+      if (!selection || selection.ticket !== state.ticket || !window.confirm("Use this delta only if you already sent the matching early checkpoint to this AI conversation. Otherwise keep the normal result. Continue?")) return;
+      try {
+        var data = await api("/api/artifact?ticket=" + encodeURIComponent(selection.ticket) + "&name=" + encodeURIComponent(selection.name));
+        if (state.ticket !== selection.ticket || state.checkpointContinuation !== selection) return;
+        setDelivery({current:1,total:1,content:data.content,path:selection.name}, "view-request");
+        this.hidden = true;
+      } catch (error) { report(error); }
+    });
+
     document.getElementById("create-feedback").addEventListener("click", async function () {
       var button = this; busy(button, true, "Packaging…");
       try {
@@ -1145,12 +1171,27 @@
           test_output: document.getElementById("test-output").value,
           include_diff: document.getElementById("feedback-diff").checked,
           repos: [],
-          target: "claude"
+          target: document.getElementById("request-target").value
         };
         var data = await api("/api/feedback", {method:"POST",body:JSON.stringify(body)});
         if (state.ticket === body.ticket) setDelivery(data.delivery, "view-review");
         await loadStatus();
         showToast("Review package ready");
+      } catch (error) { report(error); } finally { busy(button, false); }
+    });
+
+    document.getElementById("resume-chat").addEventListener("click", async function () {
+      var button = this, ticket = document.getElementById("request-ticket").value;
+      if (!ticket) { showToast("Select an existing ticket first"); return; }
+      busy(button, true, "Preparing…");
+      state.checkpointContinuation = null;
+      document.getElementById("checkpoint-continuation").hidden = true;
+      try {
+        var data = await api("/api/resume", {method:"POST", body:JSON.stringify({ticket:ticket,
+          target:document.getElementById("request-target").value, notes:document.getElementById("resume-notes").value})});
+        if (state.ticket !== ticket) return;
+        setDelivery(data.delivery, "view-request");
+        showToast("Handover ready — copy it into a fresh AI chat. Keep using this ticket.");
       } catch (error) { report(error); } finally { busy(button, false); }
     });
 
@@ -1160,6 +1201,7 @@
       selectTicket(ticket);
       var detail = await api("/api/session?ticket=" + encodeURIComponent(ticket));
       if (state.ticket !== ticket) return;
+      document.getElementById("request-target").value = (detail.delivery || {}).target || "claude";
       document.getElementById("ticket-location").textContent = "Ticket files: " + detail.session_path + " · AI handoff folder: " + detail.handoff_path;
       renderRetrieval(detail.retrieval);
       renderCockpit(detail.cockpit);

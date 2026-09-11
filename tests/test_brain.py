@@ -3045,6 +3045,14 @@ path = "batch-service"
             distance = 0.1
 
         class FakeIndex:
+            ndim = 2
+
+            def __len__(self):
+                return 1
+
+            def reset(self):
+                pass
+
             @classmethod
             def restore(cls, path, view=True):
                 return cls()

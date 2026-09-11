@@ -259,6 +259,8 @@ def _line(content: str, position: int) -> int:
 
 def _mask_java_comments(content: str, *, strings: bool = False) -> str:
     """Mask comments, and optionally literals, without changing source offsets."""
+    if "//" not in content and "/*" not in content and (not strings or ('"' not in content and "'" not in content)):
+        return content
     output = list(content)
     index = 0
     state = "code"
@@ -2064,8 +2066,6 @@ def validate_stable_identity_registry(state: dict[str, Any]) -> None:
             raise ValueError("Protocol v5 persisted evidence public ID is not registered")
     context_registry = registry.get("contexts") or {}
     context_values = set(context_registry.values())
-    if state.get("last_context_id") and str(state["last_context_id"]) not in context_values:
-        raise ValueError("Protocol v5 persisted context ID is not registered")
     lineage = state.get("context_lineage") or []
     if not isinstance(lineage, list) or len(lineage) > 100 or not all(isinstance(item, dict) for item in lineage):
         raise ValueError("Protocol v5 context lineage is invalid or exceeds its bound")
@@ -2087,12 +2087,26 @@ def validate_stable_identity_registry(state: dict[str, Any]) -> None:
         except (TypeError, ValueError):
             raise ValueError("Protocol v5 context lineage metadata is invalid") from None
         if (
-            not context_id or context_id in seen_ids or number < 1 or protocol_version != 5
+            not context_id or context_id in seen_ids or number < 1 or protocol_version not in {1, 2, 3, 4, 5}
             or pinned_generation is None or generation != int(pinned_generation)
             or (base is not None and base not in seen_contexts)
         ):
             raise ValueError("Protocol v5 context lineage order or generation is invalid")
-        if kind == "first_useful_checkpoint":
+        if protocol_version != 5:
+            # Legacy contexts already carry their deterministic content identity.
+            # Validate that identity in place; do not rename old public IDs or
+            # require them to appear in the newer CTX allocation namespace.
+            content_hash = str(item.get("content_hash") or "")
+            if (
+                kind not in {"checkpoint", "delta"} or number <= previous_number
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash)
+                or context_id != "ctx-" + content_hash.removeprefix("sha256:")
+                or item.get("progressive_parent_id") is not None
+            ):
+                raise ValueError("Legacy context lineage identity is invalid")
+            seen_contexts.add(context_id)
+            previous_number = number
+        elif kind == "first_useful_checkpoint":
             match = re.fullmatch(r"(CTX-[0-9]{3,})-P1", context_id)
             pending_parent = progressive.get("continuation_status") in {"pending", "failed"}
             if (
@@ -2116,6 +2130,8 @@ def validate_stable_identity_registry(state: dict[str, Any]) -> None:
         else:
             raise ValueError("Protocol v5 context lineage kind is invalid")
         seen_ids.add(context_id)
+    if state.get("last_context_id") and str(state["last_context_id"]) not in context_values | seen_contexts:
+        raise ValueError("Protocol v5 persisted context ID is not registered")
     if state.get("last_context_id") and seen_contexts and str(state["last_context_id"]) != next(
         reversed([str(item.get("context_id")) for item in lineage if item.get("kind") in {"checkpoint", "delta"}])
     ):

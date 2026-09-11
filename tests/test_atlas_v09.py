@@ -84,6 +84,249 @@ class AtlasV09Tests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_capacity_refusal_names_the_file_and_preserves_the_published_generation(self) -> None:
+        from brain.atlas import AtlasCapacityError, MAX_ATLAS_ENTITIES_PER_FILE
+        from brain.core import SearchHit, read_source
+        from brain.ops import refresh_brain
+
+        generation = current_generation_ref(self.settings)
+        pinned = replace(self.settings, atlas_generation=generation, atlas_generation_mode="pinned",
+                         repositories=[replace(repo) for repo in self.settings.repositories])
+        (self.root / "service/src/service.py").write_text("UNPUBLISHED_NEW_SOURCE = True\n", encoding="utf-8")
+        (self.root / "service/src/generated.py").write_text("".join(
+            f"def generated_{number}():\n    return {number}\n" for number in range(MAX_ATLAS_ENTITIES_PER_FILE + 1)
+        ), encoding="utf-8")
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                events = []
+                with mock.patch("brain.editions.current_edition", return_value="precision"), \
+                        mock.patch("brain.atlas.MAX_ATLAS_PARSE_SECONDS_PER_FILE", 0 if timed_out else 2), \
+                        mock.patch("brain.semantic.build_semantic_index") as semantic, \
+                        self.assertRaisesRegex(AtlasCapacityError, "parse time" if timed_out else "derived-row") as raised:
+                    refresh_brain(self.settings, fetch=False, discover=False, progress=events.append)
+                semantic.assert_not_called()
+                self.assertEqual("atlas", events[-1]["phase"])
+                self.assertEqual("service", raised.exception.repo)
+                self.assertEqual("src/generated.py", raised.exception.path)
+                self.assertEqual(0 if timed_out else MAX_ATLAS_ENTITIES_PER_FILE, raised.exception.limit)
+                self.assertEqual(None if timed_out else MAX_ATLAS_ENTITIES_PER_FILE + 1, raised.exception.observed)
+                self.assertEqual(generation.identity, current_generation_ref(self.settings).identity)
+                evidence = read_source(pinned, SearchHit("service", "src/service.py", 1, ""), full=True)
+                self.assertIn("return policy(customer)", evidence.content)
+                self.assertNotIn("UNPUBLISHED_NEW_SOURCE", evidence.content)
+
+    def test_v5_valid_lineage_stays_delta_at_checkpoint_interval(self) -> None:
+        service_path = self.root / "service/src/service.py"
+        service_path.write_text(service_path.read_text(encoding="utf-8") + "# background detail " + "x" * 100 + "\n" +
+                                ("# unchanged supporting detail " + "x" * 100 + "\n") * 290, encoding="utf-8")
+        snapshot_indexes(self.settings)
+        start_session(self.settings, "LONG-CHAT", "Establish service behavior and configuration")
+        request = {"version": 5, "mode": "root_cause", "objective": "Read service", "files": [{"repo": "service", "path": "src/service.py"}]}
+        first, _, _ = create_context(self.settings, "LONG-CHAT", json.dumps({"INVESTIGATION_REQUEST": request}))
+        before = session_state(self.settings, "LONG-CHAT")
+        self.settings.context_checkpoint_interval = 2
+        request.update(objective="Read configuration", base_context_id=before["last_context_id"],
+                       files=[{"repo": "service", "path": "config.yml"}])
+        with mock.patch("brain.core._restore_checkpoint_evidence", side_effect=AssertionError("valid v5 delta must not rehydrate old source")):
+            second, _, _ = create_context(self.settings, "LONG-CHAT", json.dumps({"INVESTIGATION_REQUEST": request}), continue_investigation=True)
+        self.assertIn("class EligibilityService", first)
+        self.assertNotIn("class EligibilityService", second)
+        self.assertTrue(second.startswith("# PROJECT BRAIN CONTEXT DELTA"))
+        self.assertLess(len(second.encode("utf-8")), len(first.encode("utf-8")) // 2)
+        self.assertIn('"added"', second)
+        self.assertIsNone(session_state(self.settings, "LONG-CHAT")["request_history"][-1]["retrieval"]["checkpoint_reason"])
+        request.update(objective="Recover explicitly", checkpoint=True,
+                       base_context_id=session_state(self.settings, "LONG-CHAT")["last_context_id"])
+        recovered, _, _ = create_context(self.settings, "LONG-CHAT", json.dumps({"INVESTIGATION_REQUEST": request}), continue_investigation=True)
+        self.assertTrue(recovered.startswith("# PROJECT BRAIN CONTEXT\n"))
+        self.assertIn("class EligibilityService", recovered)
+
+    def test_new_chat_handover_keeps_old_generation_ids_and_does_not_retrieve(self) -> None:
+        from brain.core import BrainError, deliver, delivery_target, resume_session
+        from brain.ui import _delivery
+
+        start_session(self.settings, "CHAT-RESUME", "Trace EligibilityService. 验证原始源码")
+        request = {"version": 5, "mode": "root_cause", "objective": "Read service", "files": [{"repo": "service", "path": "src/service.py"}]}
+        first, _, _ = create_context(self.settings, "CHAT-RESUME", json.dumps({"INVESTIGATION_REQUEST": request}))
+        deliver(self.settings, "CHAT-RESUME", first, "m365", copy=False)
+        old = session_state(self.settings, "CHAT-RESUME")
+        (self.root / "service/src/service.py").write_text("def newer_generation():\n    return 'G2_ONLY'\n", encoding="utf-8")
+        snapshot_indexes(self.settings)
+        self.assertNotEqual(old["generation"], current_generation_ref(self.settings).generation)
+        def delivery_under_ticket_lease(*args, **kwargs):
+            from brain.locks import _held
+
+            held = list(_held())
+            self.assertTrue(any("ticket-locks" in path for path in held))
+            self.assertTrue(any(path.endswith("operations.lock") for path in held))
+            return deliver(*args, **kwargs)
+
+        with mock.patch("brain.core.retrieve_context", side_effect=AssertionError("resume must not search or invoke models")), \
+                mock.patch("brain.core.deliver", side_effect=delivery_under_ticket_lease):
+            content, path = resume_session(self.settings, "CHAT-RESUME", "The customer is active; inspect policy next.")
+        after = session_state(self.settings, "CHAT-RESUME")
+        for key in ("generation", "atlas_generation_id", "requests", "last_context_id", "context_lineage", "stable_identities", "evidence_records", "physical_operations_total"):
+            self.assertEqual(old[key], after[key], key)
+        self.assertIn("class EligibilityService", content)
+        self.assertNotIn("G2_ONLY", content)
+        self.assertIn("bounded, non-replacing handover", content)
+        self.assertIn(old["last_context_id"], content)
+        self.assertIn("E0001", content)
+        self.assertLessEqual(len(content.encode("utf-8")), 64_000)
+        self.assertEqual(content, path.read_text(encoding="utf-8"))
+
+        self.assertEqual("m365", delivery_target(self.settings, "CHAT-RESUME"))
+        deliver(self.settings, "CHAT-RESUME", content, None, copy=False)
+        self.assertEqual(("handoffs", "CHAT-RESUME", "resume.md"), Path(_delivery(self.settings, "CHAT-RESUME")["artifact"]).parts[-3:])
+        deliver(self.settings, "CHAT-RESUME", content, "claude", copy=False)
+        delivery = _delivery(self.settings, "CHAT-RESUME")
+        self.assertEqual("claude", delivery["target"])
+        self.assertEqual(content, delivery["content"])
+        self.assertEqual(len(content.encode("utf-8")), delivery["usage"]["since_resume_bytes"])
+        self.assertTrue(Path(delivery["artifact"]).is_file())
+        import io
+        from contextlib import redirect_stdout
+        from brain.cli import main
+
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            self.assertEqual(0, main(["-c", str(self.root / "brain.toml"), "resume", "CHAT-RESUME", "--no-copy", "--json"]))
+        cli_result = json.loads(captured.getvalue())
+        self.assertEqual("claude", cli_result["delivery"]["target"])
+        self.assertEqual("resume.md", Path(cli_result["handoff"]).name)
+        # Failed validation must leave the last successfully prepared handover.
+        content = path.read_text(encoding="utf-8")
+        with self.assertRaisesRegex(BrainError, "8,000-byte"):
+            resume_session(self.settings, "CHAT-RESUME", "测" * 3_000)
+        with mock.patch("brain.catalog.resolve_generation", return_value=None), self.assertRaisesRegex(BrainError, "pinned Atlas generation is unavailable"):
+            resume_session(self.settings, "CHAT-RESUME")
+        self.assertEqual(content, path.read_text(encoding="utf-8"))
+
+    def test_handover_source_budget_is_utf8_and_corrupt_source_is_not_evidence(self) -> None:
+        from brain.core import BrainError, _evidence_id, _restore_checkpoint_evidence, resume_session
+
+        item = Evidence("service", "src/service.py", 1, 1, "测试", "code", 1)
+        record = {"repo": item.repo, "path": item.path, "line_start": 1, "line_end": 1,
+                  "content_hash": hashlib.sha256(item.content.encode("utf-8")).hexdigest(), "evidence_id": _evidence_id(item)}
+        with mock.patch("brain.core.read_source", return_value=item):
+            self.assertEqual(([], 1), _restore_checkpoint_evidence(self.settings, [record], max_chars=5))
+            restored, missed = _restore_checkpoint_evidence(self.settings, [record], max_chars=6)
+            self.assertEqual([item], restored)
+            self.assertEqual(0, missed)
+        start_session(self.settings, "CORRUPT-CHAT", "Inspect the original service")
+        request = {"version": 5, "objective": "Read source", "mode": "root_cause", "files": [{"repo": "service", "path": "src/service.py"}]}
+        create_context(self.settings, "CORRUPT-CHAT", json.dumps({"INVESTIGATION_REQUEST": request}))
+        with mock.patch("brain.core.read_source", side_effect=BrainError("pinned file corrupt")):
+            content, _ = resume_session(self.settings, "CORRUPT-CHAT")
+        self.assertIn("- Embedded evidence IDs: `none`", content)
+        self.assertNotIn("### E0001 —", content)
+        self.assertIn("Recent regions unavailable, changed, or outside the source budget: `1`", content)
+
+    def test_no_progress_checkpoint_does_not_force_final_or_external_only(self) -> None:
+        start_session(self.settings, "NO-PROGRESS", "Establish the eligibility branch")
+        request = {"version": 5, "mode": "root_cause", "objective": "Read service",
+                   "files": [{"repo": "service", "path": "src/service.py"}]}
+        create_context(self.settings, "NO-PROGRESS", json.dumps({"INVESTIGATION_REQUEST": request}))
+        request.update(objective="Re-examine the policy branch", checkpoint=True)
+        content, _, _ = create_context(self.settings, "NO-PROGRESS", json.dumps({"INVESTIGATION_REQUEST": request}), continue_investigation=True)
+        self.assertEqual(1, session_state(self.settings, "NO-PROGRESS")["no_progress_rounds"])
+        self.assertIn("that is not proof of completeness", content)
+        self.assertIn("request its exact source range", content)
+        self.assertNotIn("either ask the user", content)
+        self.assertIn("class EligibilityService", content)
+
+    def test_byte_omitted_source_is_emitted_on_later_delta_then_deduplicated(self) -> None:
+        from brain.core import ContextBundle
+
+        source = self.root / "service/src/service.py"
+        source.write_text(source.read_text(encoding="utf-8") + "\n# " + "x" * 30_000, encoding="utf-8")
+        snapshot_indexes(self.settings)
+        generation = current_generation_ref(self.settings)
+        start_session(self.settings, "OMITTED-CHAT", "Verify service and policy configuration")
+        self.settings.hard_context_chars = 10_000
+        large = source.read_text(encoding="utf-8").rstrip("\n")
+        small = (self.root / "service/config.yml").read_text(encoding="utf-8").rstrip("\n")
+        large_evidence = Evidence("service", "src/service.py", 1, len(large.splitlines()), large, "code", 100, verification_content=large)
+        small_evidence = Evidence("service", "config.yml", 1, 1, small, "configuration", 99, verification_content=small)
+        request = {"version": 5, "mode": "root_cause", "objective": "Verify the policy configuration"}
+        with mock.patch("brain.core.retrieve_context", return_value=ContextBundle(
+            request["objective"], evidence=[large_evidence, small_evidence], atlas_generation=generation,
+        )):
+            first, _, _ = create_context(self.settings, "OMITTED-CHAT", json.dumps({"INVESTIGATION_REQUEST": request}))
+        state = session_state(self.settings, "OMITTED-CHAT")
+        record = next(item for item in state["evidence_records"] if item["path"] == "config.yml")
+        self.assertFalse(record["emitted_in_context"])
+        self.assertNotIn(small, first)
+        request.update(objective="Focus on the omitted configuration", base_context_id=state["last_context_id"])
+        with mock.patch("brain.core.retrieve_context", return_value=ContextBundle(
+            request["objective"], evidence=[small_evidence], atlas_generation=generation,
+        )):
+            second, _, _ = create_context(self.settings, "OMITTED-CHAT", json.dumps({"INVESTIGATION_REQUEST": request}), continue_investigation=True)
+        self.assertIn(small, second)
+        state = session_state(self.settings, "OMITTED-CHAT")
+        record = next(item for item in state["evidence_records"] if item["path"] == "config.yml")
+        self.assertTrue(record["emitted_in_context"])
+        request.update(objective="Check if additional configuration exists", base_context_id=state["last_context_id"])
+        with mock.patch("brain.core.retrieve_context", return_value=ContextBundle(
+            request["objective"], evidence=[small_evidence], atlas_generation=generation,
+        )):
+            third, _, _ = create_context(self.settings, "OMITTED-CHAT", json.dumps({"INVESTIGATION_REQUEST": request}), continue_investigation=True)
+        self.assertNotIn(small, third)
+
+    def test_legacy_and_v5_requests_keep_valid_pinned_lineage_without_id_rewrites(self) -> None:
+        from brain.core import resume_session
+        from brain.investigation import validate_stable_identity_registry
+
+        start_session(self.settings, "MIXED-CHAT", "Verify EligibilityService and policy")
+        legacy = {"version": 4, "objective": "Read EligibilityService"}
+        create_context(self.settings, "MIXED-CHAT", json.dumps({"INVESTIGATION_REQUEST": legacy}))
+        original = session_state(self.settings, "MIXED-CHAT")
+        validate_stable_identity_registry(original)
+        handover, _ = resume_session(self.settings, "MIXED-CHAT")
+        self.assertIn(original["last_context_id"], handover)
+        request = {"version": 5, "mode": "root_cause", "objective": "Read exact source",
+                   "base_context_id": original["last_context_id"], "files": [{"repo": "service", "path": "src/service.py"}]}
+        create_context(self.settings, "MIXED-CHAT", json.dumps({"INVESTIGATION_REQUEST": request}), continue_investigation=True)
+        modern = session_state(self.settings, "MIXED-CHAT")
+        validate_stable_identity_registry(modern)
+        (self.root / "service/src/service.py").write_text("def newer():\n    return 'G2_ONLY'\n", encoding="utf-8")
+        snapshot_indexes(self.settings)
+        old_form = {"version": 2, "objective": "Read same source with the older request format", "files": request["files"]}
+        old_content, _, _ = create_context(self.settings, "MIXED-CHAT", json.dumps({"CONTEXT_REQUEST": old_form}), continue_investigation=True)
+        after_legacy = session_state(self.settings, "MIXED-CHAT")
+        validate_stable_identity_registry(after_legacy)
+        self.assertEqual(modern["stable_identities"]["evidence"], after_legacy["stable_identities"]["evidence"])
+        self.assertEqual([item.get("public_id") for item in modern["evidence_records"]],
+                         [item.get("public_id") for item in after_legacy["evidence_records"]])
+        request.update(objective="Resume modern protocol on the same source", base_context_id=after_legacy["last_context_id"])
+        content, _, _ = create_context(self.settings, "MIXED-CHAT", json.dumps({"INVESTIGATION_REQUEST": request}), continue_investigation=True)
+        final = session_state(self.settings, "MIXED-CHAT")
+        validate_stable_identity_registry(final)
+        self.assertEqual(original["atlas_generation_id"], final["atlas_generation_id"])
+        self.assertEqual(original["context_lineage"][0], final["context_lineage"][0])
+        self.assertIn("return policy(customer)", old_content)
+        self.assertIn("return policy(customer)", content)
+        self.assertNotIn("G2_ONLY", content)
+        corrupted = json.loads(json.dumps(final))
+        corrupted["context_lineage"][0]["content_hash"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(ValueError, "Legacy context lineage identity"):
+            validate_stable_identity_registry(corrupted)
+
+    def test_next_evidence_prioritizes_requested_fact_not_generic_entry_point(self) -> None:
+        from brain.atlas import next_best_evidence
+
+        for mode, required, expected in (("history", [], "history"), ("test_surface", ["tests"], "tests"),
+                                         ("impact_analysis", ["configuration"], "configuration"),
+                                         ("root_cause", ["data schema"], "data_schema")):
+            with self.subTest(mode=mode, required=required):
+                coverage = initial_coverage_map()
+                request = {"mode": mode, "required": required}
+                self.assertEqual(expected, next_best_evidence(coverage, request)["coverage"])
+                coverage[expected] = "verified"
+                self.assertEqual("stop", next_best_evidence(coverage, request)["action"])
+        result = next_best_evidence(initial_coverage_map(), {"required": ["Explain the retry decision"]})
+        self.assertNotEqual("stop", result["action"])
+
     def test_hierarchy_graph_cards_cache_and_incremental_reuse_are_generation_scoped(self) -> None:
         generation = current_generation_ref(self.settings)
         self.assertIsNotNone(generation)
@@ -727,10 +970,11 @@ class AtlasV09Tests(unittest.TestCase):
             })
 
         self.assertIn("repo49", bundle.trace["initial_repo_scope"])
-        semantic_scope = semantic_search.call_args.kwargs["repos"]
-        self.assertIn("repo49", semantic_scope)
-        self.assertLessEqual(len(semantic_scope), settings.widen_repo_limit)
-        self.assertEqual(sorted(semantic_scope), sorted(bundle.trace["semantic_repo_scope"]))
+        self.assertIsNone(semantic_search.call_args.kwargs["repos"])
+        self.assertEqual(settings.widen_repo_limit, semantic_search.call_args.kwargs["repo_limit"])
+        semantic_hints = semantic_search.call_args.kwargs["repo_hints"]
+        self.assertIn("repo49", semantic_hints[:settings.widen_repo_limit])
+        self.assertEqual(semantic_hints[:settings.widen_repo_limit], bundle.trace["semantic_repo_scope"])
         self.assertTrue(any(
             item.repo == "repo49" and "ONLY_RELEVANT_EVIDENCE" in item.content
             for item in bundle.evidence

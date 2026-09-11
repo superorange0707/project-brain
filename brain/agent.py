@@ -12,6 +12,7 @@ from . import __version__
 from .core import (
     BrainError,
     Settings,
+    _unwrap_request_fence,
     investigation_continuation,
     mark_active_artifacts,
     protocol_request_signature,
@@ -105,8 +106,9 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
             "operation_count": 0,
             "actions": [],
         }
+    request_text = _unwrap_request_fence(text)
     looks_like_request = request_position >= 0 or (
-        stripped.startswith("{") and ("CONTEXT_REQUEST" in stripped or "INVESTIGATION_REQUEST" in stripped or '"objective"' in stripped)
+        request_text.startswith("{") and ("CONTEXT_REQUEST" in request_text or "INVESTIGATION_REQUEST" in request_text or '"objective"' in request_text)
     )
     if looks_like_request:
         result = request_preview(text, settings)

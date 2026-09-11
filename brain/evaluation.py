@@ -206,7 +206,7 @@ def _runtime_metrics(runtime: dict[str, Any], expect: dict[str, Any]) -> dict[st
 
 
 def evaluate_m365_response(response: str, required_evidence_ids: Iterable[str] = ()) -> dict[str, Any]:
-    """Deterministically score an attached M365 response without invoking a model."""
+    """Measure response structure only; this is not a causal-correctness judge."""
     required = {str(value) for value in required_evidence_ids}
     present = {value for value in required if re.search(r"(?<![\w-])" + re.escape(value) + r"(?![\w-])", response)}
     final_sections = (
@@ -214,6 +214,8 @@ def evaluate_m365_response(response: str, required_evidence_ids: Iterable[str] =
         "Tests", "Validation", "Edge cases", "Implementation order",
     )
     return {
+        "evaluation_scope": "format_and_citation_presence_only",
+        "causal_correctness": "not_evaluated",
         "final_solution": "FINAL_SOLUTION" in response,
         "evidence_id_recall": len(present) / len(required) if required else None,
         "final_contract_coverage": sum(section.casefold() in response.casefold() for section in final_sections) / len(final_sections),
@@ -354,7 +356,8 @@ def evaluate_golden(
             request["_evaluation_ablation"] = sorted(ablations)
         bundle = retrieve_context(ranking_settings, request)
         pack_started = time.perf_counter()
-        full_context = pack_context(ranking_settings, f"EVAL-{case['id']}", 1, bundle)
+        emitted_ids: set[str] = set()
+        full_context = pack_context(ranking_settings, f"EVAL-{case['id']}", 1, bundle, emitted_ids=emitted_ids)
         context_pack_ms = (time.perf_counter() - pack_started) * 1000
         ranking = _ranking(bundle)
         raw_ranking = _raw_ranking(bundle)
@@ -396,6 +399,12 @@ def evaluate_golden(
         hydrated_ranking = list(dict.fromkeys(
             f"{item.repo}:{item.path}" for item in bundle.evidence
             if item.repo not in {"external", "knowledge"}
+        ))
+        from .core import _evidence_id
+
+        emitted_ranking = list(dict.fromkeys(
+            f"{item.repo}:{item.path}" for item in bundle.evidence
+            if item.repo not in {"external", "knowledge"} and _evidence_id(item) in emitted_ids
         ))
         required_repos = {item.split(":", 1)[0] for item in required}
         required_modules = _values(expect.get("required_modules"))
@@ -439,8 +448,11 @@ def evaluate_golden(
             "candidate_file_recall_at_limit": _recall(set(top), required),
             "hydrated_file_recall_at_limit": _recall(set(hydrated_ranking[:limit]), required),
             "hydrated_precision_at_10": _precision(hydrated_ranking, required, 10),
+            "emitted_file_recall_at_limit": _recall(set(emitted_ranking[:limit]), required),
+            "emitted_precision_at_10": _precision(emitted_ranking, required, 10),
+            "required_files_omitted_by_context_budget": len((set(hydrated_ranking) & required) - set(emitted_ranking)),
             "required_files_only_in_candidates": len((set(ranking) & required) - set(hydrated_ranking)),
-            "ranking_scope": "legacy file metrics include metadata candidates; hydrated metrics count verified source regions only (before context byte trimming)",
+            "ranking_scope": "candidate metrics include navigation; hydrated metrics precede byte trimming; emitted metrics count actual source blocks in the packed ranking context, not final AI-answer correctness",
             "file_recall_at_5": _recall(set(ranking[:5]), required),
             "file_recall_at_10": _recall(set(ranking[:10]), required),
             "file_recall_at_20": _recall(set(ranking[:20]), required),
@@ -527,6 +539,9 @@ def evaluate_golden(
             "candidate_file_recall_at_limit": average("candidate_file_recall_at_limit"),
             "hydrated_file_recall_at_limit": average("hydrated_file_recall_at_limit"),
             "hydrated_precision_at_10": average("hydrated_precision_at_10"),
+            "emitted_file_recall_at_limit": average("emitted_file_recall_at_limit"),
+            "emitted_precision_at_10": average("emitted_precision_at_10"),
+            "required_files_omitted_by_context_budget": average("required_files_omitted_by_context_budget"),
             "required_files_only_in_candidates": average("required_files_only_in_candidates"),
             "file_recall_at_5": average("file_recall_at_5"),
             "file_recall_at_10": average("file_recall_at_10"),

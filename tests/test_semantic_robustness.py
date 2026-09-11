@@ -1069,6 +1069,13 @@ class SemanticRobustnessTest(unittest.TestCase):
 
         class Index:
             restored: list[str] = []
+            ndim = 2
+
+            def __len__(self):
+                return 1
+
+            def reset(self):
+                pass
 
             @classmethod
             def restore(cls, path: str, view: bool = True) -> object:

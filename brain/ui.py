@@ -32,6 +32,8 @@ from .core import (
     create_context,
     create_feedback,
     deliver,
+    delivery_target,
+    resume_session,
     delivery_artifact,
     load_index_state,
     load_source_state,
@@ -47,6 +49,7 @@ from .core import (
 from .experience import load_experience_index
 from .locks import WorkspaceOperationBusy, ticket_exclusive
 from .ops import StateCapacityError, progress_event
+from .atlas import AtlasCapacityError
 
 
 MAX_REQUEST_BYTES = 4 * 1024 * 1024
@@ -87,6 +90,8 @@ def _continuation_options(body: dict[str, Any]) -> dict[str, Any]:
 def _recovery(error: Exception) -> dict[str, str] | None:
     """Offer existing safe operations, never infer a destructive reset."""
     if isinstance(error, StateCapacityError):
+        return error.recovery()
+    if isinstance(error, AtlasCapacityError):
         return error.recovery()
     if isinstance(error, InvestigationContinuationRequired):
         return {
@@ -303,11 +308,13 @@ def _delivery(settings: Settings, ticket: str, part: int | None = None) -> dict[
     delivery = state.get("delivery") or {}
     paths = [Path(value) for value in delivery.get("parts") or []]
     if not paths:
-        return {"current": 0, "total": 0, "content": "", "path": None}
+        return {"current": 0, "total": 0, "content": "", "path": None, "target": delivery_target(settings, ticket)}
     current = part or int(delivery.get("current") or 1)
     current = max(1, min(len(paths), current))
     path, content = delivery_artifact(settings, ticket, paths[current - 1])
-    return {"current": current, "total": len(paths), "content": content, "path": str(path)}
+    return {"current": current, "total": len(paths), "content": content, "path": str(path),
+            "target": delivery_target(settings, ticket), "artifact": delivery.get("latest"),
+            "bytes": delivery.get("bytes", len(content.encode("utf-8"))), "usage": state.get("delivery_usage") or {}}
 
 
 def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
@@ -558,10 +565,10 @@ class _OperationCoordinator:
                     "error": None, "recovery": None,
                 })
             else:
-                # Errors from refresh/model runtimes can contain a local path or
-                # transport context.  The UI receives only a safe class label.
-                message = str(error).strip()
-                safe_validation = (
+                # Runtime errors can contain private paths or transport context.
+                # Only validated, bounded diagnostics receive a detailed message.
+                message = error.public_message() if isinstance(error, AtlasCapacityError) else str(error).strip()
+                safe_validation = isinstance(error, AtlasCapacityError) or (
                     job.get("name") != "auto-refresh"
                     and isinstance(error, (BrainError, StateCapacityError, ValueError))
                     and "://" not in message
@@ -874,7 +881,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._action(parsed.path, body)
             else:
                 ticket = str(body.get("ticket") or "").strip() or None
-                ticket_paths = {"/api/start", "/api/context", "/api/continue", "/api/feedback", "/api/session/delete"}
+                ticket_paths = {"/api/start", "/api/context", "/api/continue", "/api/feedback", "/api/resume", "/api/session/delete"}
                 kind = "retrieval" if parsed.path in ticket_paths else "mutation"
                 self.server.operations.foreground(
                     parsed.path,
@@ -979,8 +986,7 @@ class _Handler(BaseHTTPRequestHandler):
             return {"ticket": ticket, **preview, "session": _session_detail(settings, ticket)}
         if preview["kind"] == "final_solution":
             artifact = archive_final_solution(settings, ticket, text)
-            if _target(body) == "m365":
-                deliver(settings, ticket, text, "m365", copy=False)
+            deliver(settings, ticket, text, _target(body, settings), copy=False)
             return {"ticket": ticket, **preview, "path": artifact.name, "session": _session_detail(settings, ticket)}
         if preview.get("duplicate_of"):
             raise BrainError(f"This retrieval plan already ran as request {preview['duplicate_of']:03d}.")
@@ -992,7 +998,7 @@ class _Handler(BaseHTTPRequestHandler):
             progress=progress,
             **_continuation_options(body),
         )
-        deliver(settings, ticket, content, _target(body), copy=False)
+        deliver(settings, ticket, content, _target(body, settings), copy=False)
         checkpoint = session_state(settings, ticket).get("progressive_checkpoint") or {}
         return {
             "ticket": ticket,
@@ -1025,6 +1031,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _action(self, path: str, body: dict[str, Any]) -> None:
         settings = self.server.settings
+        if path == "/api/resume":
+            ticket = str(body.get("ticket") or "").strip()
+            content, artifact = resume_session(settings, ticket, str(body.get("notes") or ""), target=body.get("target"))
+            self._json({"ok": True, "data": {"ticket": ticket, "path": artifact.name,
+                                            "delivery": _delivery(settings, ticket), "session": _session_detail(settings, ticket)}})
+            return
         if path == "/api/sync":
             from .ops import refresh_brain
 
@@ -1068,7 +1080,7 @@ class _Handler(BaseHTTPRequestHandler):
                 refresh = {"discovered": [], "sync": [], "graph": [], "semantic": None}
                 degraded = False
             content, artifact = start_session(settings, ticket, ticket_text)
-            target = _target(body)
+            target = _target(body, settings)
             deliver(settings, ticket, content, target, copy=False)
             self._json({
                 "ok": True,
@@ -1088,7 +1100,7 @@ class _Handler(BaseHTTPRequestHandler):
             plan = request_preview(text, settings)
             content, artifact, number = create_context(settings, ticket, text, bool(body.get("include_diff")),
                                                       **_continuation_options(body))
-            deliver(settings, ticket, content, _target(body), copy=False)
+            deliver(settings, ticket, content, _target(body, settings), copy=False)
             self._json({
                 "ok": True,
                 "data": {"ticket": ticket, "request": number, "path": artifact.name, "plan": plan, "delivery": _delivery(settings, ticket), "session": _session_detail(settings, ticket)},
@@ -1103,8 +1115,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if preview["kind"] == "final_solution":
                 artifact = archive_final_solution(settings, ticket, text)
-                if _target(body) == "m365":
-                    deliver(settings, ticket, text, "m365", copy=False)
+                deliver(settings, ticket, text, _target(body, settings), copy=False)
                 self._json({
                     "ok": True,
                     "data": {"ticket": ticket, **preview, "path": artifact.name, "session": _session_detail(settings, ticket)},
@@ -1118,7 +1129,7 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             content, artifact, number = create_context(settings, ticket, text, bool(body.get("include_diff")),
                                                       **_continuation_options(body))
-            deliver(settings, ticket, content, _target(body), copy=False)
+            deliver(settings, ticket, content, _target(body, settings), copy=False)
             self._json({
                 "ok": True,
                 "data": {
@@ -1148,7 +1159,7 @@ class _Handler(BaseHTTPRequestHandler):
                 repos=[str(repo) for repo in repos],
                 include_diff=bool(body.get("include_diff", True)),
             )
-            deliver(settings, ticket, content, _target(body), copy=False)
+            deliver(settings, ticket, content, _target(body, settings), copy=False)
             self._json({
                 "ok": True,
                 "data": {"ticket": ticket, "feedback": number, "path": artifact.name, "delivery": _delivery(settings, ticket), "session": _session_detail(settings, ticket)},
@@ -1164,7 +1175,9 @@ def _one(query: dict[str, list[str]], key: str) -> str:
     return values[0]
 
 
-def _target(body: dict[str, Any]) -> str:
+def _target(body: dict[str, Any], settings: Settings | None = None) -> str:
+    if settings is not None:
+        return delivery_target(settings, str(body.get("ticket") or ""), body.get("target"))
     target = str(body.get("target") or "claude")
     if target not in {"claude", "m365"}:
         raise BrainError("target must be claude or m365")

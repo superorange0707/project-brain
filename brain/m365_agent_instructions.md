@@ -81,4 +81,4 @@ Return `FINAL_SOLUTION` only when you can provide:
 9. Validation commands supplied by the project
 10. Edge cases, compatibility risks, and implementation order
 
-Do not issue another Project Brain request after implementation is ready.
+Keep replies incremental: claim, supporting/refuting E IDs, missing fact, next action. Do not repeat unchanged analysis or source. For a fresh conversation, use Brain's bounded RESUME handover plus concise chat-only decisions; omitted source IDs must be re-read, not treated as visible proof. Valid v5 lineage stays delta. List-memory changes use added/removed items; `reset: true` discards the old summary list, not source evidence. Reconstruct claims from source blocks and lineage. Full checkpoints are for recovery, not repetition. Do not issue another Project Brain request after implementation is ready.

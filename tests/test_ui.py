@@ -38,6 +38,52 @@ from brain.ui import (
 
 
 class OperationCoordinatorTest(unittest.TestCase):
+    def test_atlas_capacity_retains_actionable_detail_without_suggesting_disk_cleanup(self) -> None:
+        from brain.atlas import AtlasCapacityError
+
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            coordinator = _OperationCoordinator(state_dir=state)
+            job_id = coordinator._claim("refresh")
+            coordinator._progress(job_id, {"phase": "atlas"})
+            error = AtlasCapacityError("Atlas per-file derived-row budget exceeded")
+            error.limit, error.observed = 2_048, 2_049
+            error.repo, error.path = "service", "src/Large.java"
+            coordinator._finish(job_id, error=error)
+            job = _OperationCoordinator(state_dir=state).get(job_id)
+            self.assertEqual("failed", job["status"])
+            self.assertIn("Building Workspace Atlas", job["phase"])
+            self.assertIn("derived-row", job["error"])
+            self.assertIn("2049", job["error"])
+            self.assertIn("2048", job["error"])
+            self.assertIn("service:src/Large.java", job["error"])
+            self.assertEqual("atlas_capacity", job["recovery"]["code"])
+            self.assertEqual("diagnostics", job["recovery"]["action"])
+            self.assertIn("not a disk-space", job["recovery"]["message"])
+            self.assertIn("Do not reset", job["recovery"]["message"])
+            with patch("brain.cli.execute", side_effect=error), patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                self.assertEqual(2, main(["refresh"]))
+            self.assertIn("service:src/Large.java", stderr.getvalue())
+            self.assertIn("2048", stderr.getvalue())
+
+            timed_out = AtlasCapacityError("Atlas per-file parse time budget exceeded", limit=2,
+                                          repo="service", path="src/Slow.java")
+            timeout_id = coordinator._claim("refresh")
+            coordinator._finish(timeout_id, error=timed_out)
+            timeout_job = _OperationCoordinator(state_dir=state).get(timeout_id)
+            self.assertIn("limit: 2 seconds", timeout_job["error"])
+            self.assertEqual("retry_refresh", timeout_job["recovery"]["action"])
+            self.assertEqual("Retry Refresh Brain", timeout_job["recovery"]["action_label"])
+
+            private = AtlasCapacityError("private-source https://internal/token=secret")
+            private_path = (state / "Secret.java").as_posix()
+            private.repo, private.path = "service", private_path
+            private_id = coordinator._claim("refresh")
+            coordinator._finish(private_id, error=private)
+            saved = (state / "ui-refresh.json").read_text(encoding="utf-8")
+            for value in ("private-source", "https://", "token=secret", private_path):
+                self.assertNotIn(value, saved)
+
     def test_continuation_requires_explicit_boolean_and_preview_token(self) -> None:
         self.assertEqual({"continue_investigation": False, "continuation_token": None}, _continuation_options({}))
         for value in ("true", "false", 1, None):
@@ -312,6 +358,35 @@ class SessionSummaryTest(unittest.TestCase):
 
 
 class LocalUiTest(unittest.TestCase):
+    def test_resume_and_feedback_inherit_ticket_delivery_without_reset(self) -> None:
+        self.post("/api/start", {"ticket": "CHAT-UI", "ticket_text": "Investigate hello", "sync": False, "target": "m365"})
+        before = session_state(self.settings, "CHAT-UI")
+        _, result, _ = self.post("/api/resume", {"ticket": "CHAT-UI", "notes": "Check the greeting contract next"})
+        delivery = result["data"]["delivery"]
+        self.assertEqual("m365", delivery["target"])
+        self.assertEqual("resume.md", Path(delivery["artifact"]).name)
+        self.assertIn("Check the greeting contract next", delivery["content"])
+        after = session_state(self.settings, "CHAT-UI")
+        self.assertEqual(before["requests"], after["requests"])
+        self.assertEqual(before["sources"], after["sources"])
+        self.assertIsNone(after["atlas_generation_id"])
+        # Exercise the actual exported request, not just the export endpoint.
+        request_text = delivery["content"].split("```yaml\n", 1)[1].split("```", 1)[0]
+        self.assertIn("version: 2", request_text)
+        self.assertNotIn("version: 5", delivery["content"])
+        _, continued, _ = self.post("/api/continue", {
+            "ticket": "CHAT-UI", "text": request_text.replace("KnownSymbolOrLiteral", "HelloService"), "include_diff": False,
+        })
+        self.assertIn('return "hello"', continued["data"]["delivery"]["content"])
+        self.assertEqual("m365", continued["data"]["delivery"]["target"])
+        self.assertEqual(1, session_state(self.settings, "CHAT-UI")["requests"])
+        self.assertIsNone(session_state(self.settings, "CHAT-UI")["atlas_generation_id"])
+        _, feedback, _ = self.post("/api/feedback", {"ticket": "CHAT-UI", "notes": "Observed test failure", "include_diff": False})
+        self.assertEqual("m365", feedback["data"]["delivery"]["target"])
+        _, detail, _ = self.get("/api/session?ticket=CHAT-UI")
+        self.assertEqual("m365", detail["data"]["delivery"]["target"])
+        self.assertIn("resume.md", {item["name"] for item in detail["data"]["artifacts"]})
+
     def test_config_reload_validates_without_rewriting_or_discarding_settings(self) -> None:
         original = self.config.read_text()
         updated = original.replace('name="ui-demo"', 'name="renamed-demo"')

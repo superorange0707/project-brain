@@ -9,12 +9,16 @@ class Hit(Protocol):
     repo: str
     path: str
     line: int
+    text: str
     kind: str
     score: int | float
     found_by: list[str]
 
 
 T = TypeVar("T", bound=Hit)
+_SOURCE_CHANNELS = frozenset({
+    "sqlite trigram index", "ripgrep literal", "ripgrep regex", "python exact search", "zoekt local shard",
+})
 
 
 def fuse_and_rank(hits: list[T]) -> list[T]:
@@ -25,6 +29,8 @@ def fuse_and_rank(hits: list[T]) -> list[T]:
         key = (hit.repo, hit.path, hit.line)
         groups[key].append(hit)
         for channel in hit.found_by:
+            if channel.startswith("lexical anchor "):
+                continue  # Correlated query matches are not independent retrieval backends.
             channel_scores[channel][key] = max(channel_scores[channel].get(key, float("-inf")), float(hit.score))
     ranks = {
         channel: {key: rank for rank, key in enumerate(sorted(scores, key=lambda key: (-scores[key], key)), 1)}
@@ -33,8 +39,13 @@ def fuse_and_rank(hits: list[T]) -> list[T]:
     fused: list[T] = []
     for key, values in groups.items():
         primary = copy(max(values, key=lambda item: (item.score, item.kind, item.found_by)))
+        source_hits = [item for item in values if item.text and _SOURCE_CHANNELS.intersection(item.found_by)]
+        if source_hits:
+            # Preserve the observed line for reranking instead of replacing it
+            # with a semantic symbol label. Hydration still verifies final proof.
+            primary.text = max(source_hits, key=lambda item: (item.score, item.text)).text
         channels = sorted({channel for item in values for channel in item.found_by})
-        rrf = sum(1 / (60 + ranks[channel][key]) for channel in channels)
+        rrf = sum(1 / (60 + ranks[channel][key]) for channel in channels if channel in ranks)
         feature = 0
         if "definition" in primary.kind:
             feature += 14

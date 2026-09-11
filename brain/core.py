@@ -1077,6 +1077,9 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
     from .index import query_generation_indexes, query_index
     from .backends.zoekt import search as zoekt_search
 
+    # A regex without metacharacters is the same literal query. Share its cache
+    # and batched index path, including a verified empty result.
+    fixed = fixed or re.escape(pattern) == pattern
     if settings.atlas_generation is None and settings.atlas_generation_mode == "current":
         from .catalog import current_generation_ref
 
@@ -1091,9 +1094,10 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
     if (
         fixed
         and generation is not None
-        and all(_zoekt_manifest_hash(settings, repo) is None for repo in selected)
         and (trace is None or trace.try_reserve_backend())
     ):
+        # One registered lexical query covers all requested snapshots. Installed
+        # Zoekt shards remain a fallback, not one subprocess per repo per literal.
         indexed_started = time.perf_counter()
         indexed_stats: dict[str, object] = {}
         indexed = query_generation_indexes(
@@ -1341,18 +1345,28 @@ def path_hits(settings: Settings, query: str, repos: Iterable[str] | None = None
     return _clone_hits(hits)
 
 
+def _is_documentation_path(path: str) -> bool:
+    value = Path(path)
+    return value.suffix.lower() in {".md", ".rst", ".txt", ".adoc"} or value.stem.casefold() in {"readme", "license", "changelog"}
+
+
+def _symbol_declaration(name: str) -> re.Pattern[str]:
+    escaped = re.escape(name)
+    declaration = (
+        rf"\b(?:class|interface|enum|record|trait|struct|type|object|def|fn|func|function|fun)\s+{escaped}\b"
+        rf"|\b{escaped}\s*[:=]\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)"
+        rf"|\b(?!(?:return|new|throw|await|yield)\b)(?:public|protected|private|static|final|abstract|synchronized|native\s+)*[A-Za-z_$][\w$<>, ?\[\].]*\s+{escaped}\s*\("
+    )
+    return re.compile(declaration)
+
+
 def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
     from .graph import graph_symbol_hits
 
     scope = list(repos or [])
     name = query.rsplit(".", 1)[-1]
     escaped = re.escape(name)
-    declaration = (
-        rf"\b(?:class|interface|enum|record|trait|struct|type|object|def|fn|func|function|fun)\s+{escaped}\b"
-        rf"|\b{escaped}\s*[:=]\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)"
-        rf"|\b(?:public|protected|private|static|final|abstract|synchronized|native\s+)*[A-Za-z_$][\w$<>, ?\[\].]*\s+{escaped}\s*\("
-    )
-    declaration_re = re.compile(declaration)
+    declaration_re = _symbol_declaration(name)
     hits = [hit for hit in search(settings, name, scope, fixed=True) if declaration_re.search(hit.text)]
     for hit in hits:
         hit.kind = "definition"
@@ -1404,6 +1418,16 @@ def test_hits(settings: Settings, name: str, repos: Iterable[str] | None = None)
 _INDEXED_SOURCE_UNSET = object()
 
 
+def _retrieval_source_path(repo: Repository, relative: str) -> Path:
+    root = repo.scan_path.resolve()
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root):
+        raise BrainError(f"Unsafe or missing file: {repo.name}:{relative}")
+    if path.name.lower() in SENSITIVE_FILE_NAMES or path.suffix.lower() in SENSITIVE_SUFFIXES:
+        raise BrainError(f"Sensitive source path is excluded from automatic retrieval: {repo.name}:{relative}")
+    return path
+
+
 def read_source(
     settings: Settings,
     hit: SearchHit,
@@ -1413,12 +1437,7 @@ def read_source(
     _indexed_source: object = _INDEXED_SOURCE_UNSET,
 ) -> Evidence:
     repo = settings.repo(hit.repo)
-    root = repo.scan_path.resolve()
-    path = (root / hit.path).resolve()
-    if not path.is_relative_to(root):
-        raise BrainError(f"Unsafe or missing file: {hit.repo}:{hit.path}")
-    if path.name.lower() in SENSITIVE_FILE_NAMES or path.suffix.lower() in SENSITIVE_SUFFIXES:
-        raise BrainError(f"Sensitive source path is excluded from automatic retrieval: {hit.repo}:{hit.path}")
+    path = _retrieval_source_path(repo, hit.path)
     indexed_only = settings.atlas_generation_mode == "pinned"
     if indexed_only:
         if _indexed_source is not _INDEXED_SOURCE_UNSET:
@@ -1725,6 +1744,12 @@ def generate_map(settings: Settings) -> str:
     return text
 
 
+def _unwrap_request_fence(text: str) -> str:
+    stripped = text.strip()
+    match = re.fullmatch(r"(`{3,}|~{3,})(?:json)?[ \t]*\r?\n(.*?)\r?\n\1[ \t]*", stripped, re.DOTALL | re.IGNORECASE)
+    return match.group(2).strip() if match and match.group(2).lstrip().startswith("{") else stripped
+
+
 def _request_body(text: str) -> dict[str, Any]:
     """Extract a versioned request from a whole chat response or request file."""
     # Windows PowerShell 5.1 writes ``Set-Content -Encoding UTF8`` files with
@@ -1738,6 +1763,7 @@ def _request_body(text: str) -> dict[str, Any]:
         raise BrainError(f"Project Brain request exceeds the {MAX_REQUEST_TEXT_CHARS:,}-character input limit")
 
     loaded: Any = None
+    stripped = _unwrap_request_fence(text)
     if stripped.startswith("{"):
         try:
             loaded = json.loads(stripped)
@@ -1915,6 +1941,10 @@ def _request_body(text: str) -> dict[str, Any]:
             {"query": value, "repos": []} for value in request["resolve"]
             if any(token in value.lower() for token in ("history", "commit", "change", "ticket"))
         ][:4]
+        if version == 5 and request.get("mode") == "history" and not requested_files:
+            request["history"] = [{"query": value, "repos": []} for value in objective_terms(
+                " ".join([*exact_anchor_terms, *request["resolve"], objective]), limit=2,
+            )]
         request["expand"] = []
         required_text = " ".join(request["required"]).lower()
         request["coverage"] = {
@@ -1922,7 +1952,7 @@ def _request_body(text: str) -> dict[str, Any]:
             "tests": "required" if "test" in required_text else "auto",
             "relationships": "required" if any(value in required_text for value in ("flow", "integration", "relationship", "graph")) else "auto",
             "configuration": "required" if "config" in required_text else "auto",
-            "history": "required" if any(value in required_text for value in ("history", "change", "commit")) else "auto",
+            "history": "required" if request.get("mode") == "history" or any(value in required_text for value in ("history", "change", "commit")) else "auto",
         }
     elif version == 3:
         hints = request.get("hints") or {}
@@ -2462,6 +2492,9 @@ def retrieve_context(
         emit("global_discovery", requested_operations=trace.requested_operations, effective_operations=trace.effective_operations)
         discovery_started = time.perf_counter()
         search_operations = [item for item in compiled_plan.operations if item.kind == "search"]
+        lexical_anchors = {
+            value: index for index, value in enumerate(dict.fromkeys(item.value.casefold() for item in search_operations), 1)
+        }
         lexical_started = time.perf_counter()
         for operation in search_operations:
             if time_budget_exhausted():
@@ -2473,12 +2506,48 @@ def retrieve_context(
                     hits = search(settings, operation.value, repos)
                 except BrainError:
                     hits = []
-            if not hits and not operation.repos and repos and len(repos) < len(settings.repositories):
-                hits = search(settings, operation.value, atlas_repo_scope[: settings.widen_repo_limit], fixed=True)
-            if not hits and not operation.repos and len(atlas_repo_scope) < len(settings.repositories):
-                hits = search(settings, operation.value, [], fixed=True)
+            symbol_query = operation.value in {
+                item["value"] for item in request.get("anchors") or [] if item.get("kind") == "symbol"
+            } or bool(re.fullmatch(r"[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+", operation.value))
+            declaration = _symbol_declaration(operation.value.rsplit(".", 1)[-1]) if symbol_query else None
+
+            def source_match() -> bool:
+                return any(
+                    not _is_documentation_path(hit.path)
+                    and (declaration is None or declaration.search(hit.text))
+                    for hit in hits
+                )
+
+            # A README mentioning an adaptor is not enough to stop before its
+            # implementation repo. Keep those hits, but widen disjoint scopes.
+            searched_repos = set(repos or [repo.name for repo in settings.repositories])
+            if hits and not source_match():
+                reason = "lexical_references_only" if declaration is not None and any(
+                    not _is_documentation_path(hit.path) for hit in hits
+                ) else "lexical_documentation_only"
+                if reason not in trace.fallback_reasons:
+                    trace.fallback_reasons.append(reason)
+            if not operation.repos:
+                for scope in (atlas_repo_scope[:settings.widen_repo_limit], [repo.name for repo in settings.repositories]):
+                    pending = [name for name in scope if name not in searched_repos]
+                    if source_match() or time_budget_exhausted() or trace.physical_budget_remaining <= 0:
+                        break
+                    if pending:
+                        hits.extend(search(settings, operation.value, pending, fixed=True))
+                        searched_repos.update(pending)
+                        trace.widening_rounds += 1
+            if declaration is not None:
+                for hit in hits:
+                    if not _is_documentation_path(hit.path) and declaration.search(hit.text):
+                        hit.kind = "definition"
+                        hit.score = max(hit.score, 100)
+                        hit.found_by = sorted(set([*hit.found_by, "symbol declaration"]))
             if not hits:
                 bundle.unresolved.append(f"Search `{operation.value}` returned no code matches in {repos or ['all repositories']}")
+            for hit in hits:
+                # Request-local opaque ordinals retain joint-query coverage
+                # without copying private search text into provenance/metrics.
+                hit.found_by = sorted(set([*hit.found_by, f"lexical anchor {lexical_anchors[operation.value.casefold()]}"]))
             candidates.extend(hits)
             bundle.evidence.extend(knowledge_hits(settings, operation.value, deadline=deadline))
         trace.add_stage("exact_lexical_ms", (time.perf_counter() - lexical_started) * 1000)
@@ -2512,12 +2581,19 @@ def retrieve_context(
                         *explicit_semantic_repos,
                         *atlas_repo_scope,
                         *(repo.name for repo in settings.repositories),
-                    ]))[:max(1, settings.widen_repo_limit)]
-                    trace.semantic_repo_scope = semantic_repo_scope
+                    ]))
+                    # An explicit scope is a hard filter. Otherwise rank the
+                    # global Repo vectors before bounding source-shard search.
+                    scoped_semantic_repos = set(explicit_semantic_repos) if (
+                        compiled_plan.operations and all(operation.repos for operation in compiled_plan.operations)
+                    ) else None
+                    trace.semantic_repo_scope = semantic_repo_scope[:max(1, settings.widen_repo_limit)]
                     semantic = search_semantic(
                         settings,
                         bundle.objective,
-                        repos=set(semantic_repo_scope),
+                        repos=scoped_semantic_repos,
+                        repo_hints=semantic_repo_scope,
+                        repo_limit=max(1, settings.widen_repo_limit),
                         trace=trace,
                         generation=bundle.atlas_generation,
                         serving_status=semantic_status,
@@ -2539,6 +2615,9 @@ def retrieve_context(
                     )
                     if trace.semantic_status == "degraded":
                         bundle.warnings.append(
+                            "Global Semantic repository routing was incomplete because its budget or pinned routing data was unavailable; "
+                            "results may omit repositories. Continue with a focused repository, path or symbol request."
+                            if "semantic_repo_routing_incomplete" in trace.fallback_reasons else
                             "Semantic serving is degraded; healthy-shard candidates may be used, but the effective edition is degraded."
                         )
                     elif trace.semantic_status != "ready":
@@ -2728,6 +2807,7 @@ def retrieve_context(
 
         emit("reranking", pruned_candidate_count=len(candidates))
         rerank_started = time.perf_counter()
+        rerank_sources: dict[tuple[str, str], str] = {}
         try:
             from .editions import current_edition
 
@@ -2736,7 +2816,12 @@ def retrieve_context(
 
                 requested = [name for name in ("searches", "paths", "symbols", "files", "history") if request.get(name)]
                 rerank_query = bundle.objective + ("\nRequested evidence: " + ", ".join(requested) if requested else "")
-                candidates = rerank_candidates(settings, rerank_query, candidates, trace=trace)
+                candidates = rerank_candidates(settings, rerank_query, candidates, trace=trace, _source_cache=rerank_sources)
+                if "rerank_source_preview_incomplete" in trace.fallback_reasons:
+                    bundle.warnings.append(
+                        "Some pinned candidate code could not be previewed within the reranking budget; "
+                        "those candidates retain their original retrieval scores. Request a focused file or line range if needed."
+                    )
         except (OSError, ValueError, RuntimeError):
             bundle.warnings.append("Local reranker failed; used semantic/lexical candidate ranking.")
             trace.fallback_reasons.append("reranker_runtime")
@@ -2753,20 +2838,29 @@ def retrieve_context(
         if settings.atlas_generation_mode == "pinned" and bundle.atlas_generation is not None:
             from .index import read_generation_files
 
-            indexed_sources = read_generation_files(
-                settings, bundle.atlas_generation, ((hit.repo, hit.path) for hit in selected),
-                max_bytes=MAX_PINNED_HYDRATION_BYTES,
-                max_seconds=MAX_PINNED_HYDRATION_SECONDS,
-            )
+            indexed_sources = dict(rerank_sources)
+            missing = [(hit.repo, hit.path) for hit in selected if (hit.repo, hit.path) not in indexed_sources]
+            buffered = any((hit.repo, hit.path) in indexed_sources for hit in selected)
+            if missing and (
+                not time_budget_exhausted() or (first_verified_evidence_ms is None and not buffered)
+            ):
+                indexed_sources.update(read_generation_files(
+                    settings, bundle.atlas_generation, missing,
+                    max_bytes=MAX_PINNED_HYDRATION_BYTES,
+                    max_seconds=MAX_PINNED_HYDRATION_SECONDS,
+                ) or {})
         source_budget = max(10_000, settings.hard_context_chars - 40_000)
-        source_chars = sum(len(item.content) for item in bundle.evidence)
-        for index, hit in enumerate(selected):
-            # An optional model call can cross the soft query deadline after it
-            # starts.  Preserve exact-source authority by hydrating the first
-            # surviving source candidate before stopping later reads.
-            if time_budget_exhausted() and first_verified_evidence_ms is not None:
-                omitted.extend(selected[index:])
-                break
+        source_bytes = sum(len(item.content.encode("utf-8")) for item in bundle.evidence)
+        for hit in selected:
+            # Stop new reads after the soft deadline, not delivery of pinned
+            # source already read and verified. Later candidates may be buffered
+            # even when an earlier one is not. Selection/context bounds still apply.
+            buffered = indexed_sources is not None and (hit.repo, hit.path) in indexed_sources
+            if time_budget_exhausted() and not buffered and (
+                indexed_sources is not None or first_verified_evidence_ms is not None
+            ):
+                omitted.append(hit)
+                continue
             try:
                 evidence = read_source(
                     settings,
@@ -2778,13 +2872,14 @@ def retrieve_context(
             except BrainError:
                 bundle.warnings.append(f"Candidate source disappeared before hydration: {hit.repo}:{hit.path}")
                 continue
-            if source_chars and source_chars + len(evidence.content) > source_budget:
+            evidence_bytes = len(evidence.content.encode("utf-8"))
+            if source_bytes and source_bytes + evidence_bytes > source_budget:
                 omitted.append(hit)
                 trace.stop_reason = "context_budget"
                 continue
             bundle.evidence.append(evidence)
-            source_chars += len(evidence.content)
-            trace.bytes_read += len(evidence.content.encode("utf-8", errors="replace"))
+            source_bytes += evidence_bytes
+            trace.bytes_read += evidence_bytes
             if first_verified_evidence_ms is None:
                 first_verified_evidence_ms = (time.perf_counter() - started) * 1000
         trace.add_stage("source_hydration_ms", (time.perf_counter() - hydrate_started) * 1000)
@@ -2896,7 +2991,7 @@ def _coverage(bundle: ContextBundle) -> dict[str, Any]:
             return False
         return generation is None or item.repo in generation.snapshots
 
-    repository_evidence = [item for item in bundle.evidence if authoritative(item)]
+    repository_evidence = [item for item in bundle.evidence if authoritative(item) and not _is_documentation_path(item.path)]
     tests = [item for item in repository_evidence if item.kind == "test" or is_test_path(item.path)]
     configs = [item for item in repository_evidence if Path(item.path).suffix.lower() in config_suffixes]
     production = [
@@ -2997,11 +3092,12 @@ def _restore_checkpoint_evidence(
             if hashlib.sha256(evidence.content.encode("utf-8")).hexdigest() != record.get("content_hash"):
                 missed += 1
                 continue
-            if max_chars is not None and restored_chars + len(evidence.content) > max_chars:
+            source_bytes = len(evidence.content.encode("utf-8"))
+            if max_chars is not None and restored_chars + source_bytes > max_chars:
                 missed += 1
                 continue
             restored.append(evidence)
-            restored_chars += len(evidence.content)
+            restored_chars += source_bytes
         except (BrainError, KeyError, OSError, TypeError, ValueError):
             missed += 1
     return restored, missed
@@ -3014,6 +3110,8 @@ def pack_delta_context(
     bundle: ContextBundle,
     progress: dict[str, Any],
     new_evidence_ids: set[str],
+    *,
+    emitted_ids: set[str] | None = None,
 ) -> str:
     """Render only newly verified source plus deterministic investigation deltas."""
     generation = bundle.atlas_generation
@@ -3039,7 +3137,7 @@ def pack_delta_context(
     if not memory_changes:
         output.append("- None")
     output.extend(["", "## Evidence lineage", ""])
-    output.append(f"- New evidence: `{len(new_evidence_ids)}`")
+    output.append(f"- New or not-yet-emitted evidence: `{len(new_evidence_ids)}`")
     superseded = progress.get("superseded_evidence_ids") or []
     output.append(f"- Invalidated/superseded evidence: `{', '.join(superseded) if superseded else 'none'}`")
     new_items = [item for item in bundle.evidence if _evidence_id(item) in new_evidence_ids or "direct file request" in item.found_by]
@@ -3078,6 +3176,7 @@ def pack_delta_context(
         "\n".join(output).rstrip() + "\n",
         settings.hard_context_chars,
         new_public_ids,
+        emitted_ids=emitted_ids,
     )
 
 
@@ -3416,12 +3515,35 @@ def _bounded_markdown_details(text: str, max_bytes: int) -> tuple[str, set[str]]
         return text, set()
     omitted_ids: list[str] = []
     heading = re.compile(r"(?m)^### (?:\d+\. )?(E(?:-|[0-9])[A-Za-z0-9-]*)\s+—")
-    while len(text.encode("utf-8")) > max_bytes and (matches := list(heading.finditer(text))):
-        match = matches[-1]
-        following = re.search(r"(?m)^#{2,3}\s", text[match.end():])
-        end = match.end() + following.start() if following else len(text)
+    while len(text.encode("utf-8")) > max_bytes:
+        # Source may itself contain Markdown headings or evidence-like IDs.
+        # Only outer sections are removable; never cut inside a source fence.
+        sections: list[tuple[int, re.Match[str] | None]] = []
+        offset = 0
+        fence: str | None = None
+        pre = False
+        for line in text.splitlines(keepends=True):
+            marker = re.match(r"^(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+            if pre:
+                pre = line.rstrip("\r\n") != "</code></pre>"
+            elif fence is not None:
+                if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip():
+                    fence = None
+            elif marker:
+                fence = marker[1]
+            elif line.startswith('<pre data-language="'):
+                pre = True
+            elif re.match(r"^#{2,3}\s", line):
+                sections.append((offset, heading.match(line)))
+            offset += len(line)
+        evidence_sections = [(index, start, match) for index, (start, match) in enumerate(sections) if match]
+        if not evidence_sections:
+            break
+        index, start, match = evidence_sections[-1]
+        assert match is not None
+        end = sections[index + 1][0] if index + 1 < len(sections) else len(text)
         omitted_ids.append(match.group(1))
-        text = text[:match.start()].rstrip() + "\n\n" + text[end:].lstrip()
+        text = text[:start].rstrip() + "\n\n" + text[end:].lstrip()
     if omitted_ids:
         text += (
             "\n\n## Omitted evidence IDs\n\n"
@@ -3469,7 +3591,9 @@ def _bounded_markdown(text: str, max_bytes: int) -> str:
     return _bounded_markdown_details(text, max_bytes)[0]
 
 
-def _bounded_protocol_context(text: str, max_bytes: int, evidence_ids: Iterable[str]) -> str:
+def _bounded_protocol_context(
+    text: str, max_bytes: int, evidence_ids: Iterable[str], *, emitted_ids: set[str] | None = None,
+) -> str:
     """Keep protocol delivery metadata consistent with the evidence that survived bounding."""
     known = {str(identifier) for identifier in evidence_ids if identifier}
     omitted: set[str] = set()
@@ -3500,6 +3624,8 @@ def _bounded_protocol_context(text: str, max_bytes: int, evidence_ids: Iterable[
         bounded, observed = _bounded_markdown_details(adjusted, max_bytes)
         expanded = omitted | (observed & known)
         if expanded == omitted:
+            if emitted_ids is not None:
+                emitted_ids.update(known - omitted)
             return bounded
         omitted = expanded
     return bounded
@@ -3511,6 +3637,8 @@ def pack_context(
     request_number: int,
     bundle: ContextBundle,
     progress: dict[str, Any] | None = None,
+    *,
+    emitted_ids: set[str] | None = None,
 ) -> str:
     output = [
         "# PROJECT BRAIN CONTEXT", "", f"Ticket: `{ticket}`", f"Request: `{request_number:03d}`", "",
@@ -3587,8 +3715,9 @@ def pack_context(
             )
         if progress["no_progress_rounds"]:
             output.append(
-                "- This request added no new repository evidence. Do not repeat open-ended retrieval; "
-                "either ask the user for the specific external/runtime fact that blocks the decision or produce FINAL_SOLUTION."
+                "- This request added no new repository evidence; that is not proof of completeness. "
+                "For a material repository blocker, change the discriminating anchor or request its exact source range. "
+                "Ask the user only for facts outside repository scope. Do not repeat open-ended retrieval or invent a final answer."
             )
         coverage = progress.get("coverage") or {}
         output.extend(
@@ -3610,7 +3739,7 @@ def pack_context(
         if not coverage.get("production_source"):
             output.append("- Suggested next action: continue repository retrieval with a more specific symbol, literal, or path query.")
         elif progress["no_progress_rounds"]:
-            output.append("- Suggested next action: ask for the external/runtime blocker or produce FINAL_SOLUTION; more identical searching will not help.")
+            output.append("- Suggested next action: name the missing decision-critical fact and seek focused exact evidence; produce FINAL_SOLUTION only when the evidence supports it.")
         else:
             output.append("- Suggested next action: the AI must decide whether remaining unknowns can change the implementation; if not, produce FINAL_SOLUTION.")
         coverage_map = progress.get("coverage_map") or {}
@@ -3720,6 +3849,7 @@ def pack_context(
         text,
         settings.hard_context_chars,
         (_public_evidence_id(progress, item) for item in bundle.evidence),
+        emitted_ids=emitted_ids,
     )
 
 
@@ -4335,6 +4465,33 @@ def _resolve_session_generation(settings: Settings, state: dict[str, Any]) -> tu
     return generation, before != json.dumps(state, sort_keys=True)
 
 
+def _session_prompt(generation: Any | None) -> str:
+    prompt = package_files("brain").joinpath("prompt.md").read_text(encoding="utf-8")
+    if generation is not None:
+        return prompt
+    # Share investigation discipline, but never advertise Atlas-only requests
+    # to a legacy source-pin ticket. This does not migrate or replace its pin.
+    common, marker, _ = prompt.partition("## Request contract\n")
+    if not marker:
+        raise BrainError("Packaged investigation prompt is missing its request contract")
+    return common + """## Request contract
+
+This ticket uses legacy source pinning, not an Atlas generation. This ticket-specific contract takes precedence over generic v5 examples. Continue it with CONTEXT_REQUEST version 2; do not send INVESTIGATION_REQUEST, mode, wave, checkpoint, or base_context_id. Do not refresh or restart the ticket to obtain evidence. Existing user-approval pauses still apply; never switch protocols to evade a pause.
+
+Use one focused source request, replacing the example query with a discriminating symbol or literal from this ticket:
+
+```yaml
+CONTEXT_REQUEST:
+  version: 2
+  objective: State the exact repository fact this request must establish.
+  searches:
+    - query: KnownSymbolOrLiteral
+```
+
+For an exact known file, replace searches with files entries containing repo, repository-relative path, and lines: "start-end". Request at most 2,000 lines per entry, preferably the relevant method. Follow returned line ranges and request missing ranges separately; do not assume a truncated excerpt is a whole file. Never guess paths or ask the user to copy source Brain can read. Only exact retained source blocks are evidence authority; search results are navigation, not proof. Never substitute a newer Atlas generation.
+"""
+
+
 @workspace_exclusive
 @ticket_exclusive
 def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[str, Path]:
@@ -4363,7 +4520,7 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
     current_atlas = current_generation_ref(settings)
     pinned_atlas = current_atlas if current_atlas is not None and current_atlas.snapshots == snapshots else None
     ticket_path = directory / "ticket.md"
-    prompt = package_files("brain").joinpath("prompt.md").read_text(encoding="utf-8")
+    prompt = _session_prompt(pinned_atlas)
     sections = ["# PROJECT BRAIN — START", "", f"Project: `{settings.name}`", f"Ticket: `{ticket}`", ""]
     sections.extend(["## Repository snapshot manifest", ""])
     for repo in settings.repositories:
@@ -4400,10 +4557,12 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
         ("Glossary", settings.knowledge_dir / "glossary.md"),
     ):
         if path.is_file():
-            text, omitted = _bounded_text_file(path, MAX_START_KNOWLEDGE_ITEM_BYTES)
+            # Global maps are navigation hints, not the ticket's evidence. A
+            # whole workspace graph need not occupy every new chat window.
+            text, omitted = _bounded_text_file(path, min(MAX_START_KNOWLEDGE_ITEM_BYTES, 8_000))
             sections.extend([f"## {title}", "", text.strip()])
             if omitted:
-                sections.append("[Project Brain omitted unsafe or excess bytes from this knowledge section.]")
+                sections.append("[Project Brain omitted unsafe or excess bytes. Navigation excerpt only; ask Brain for focused evidence instead of copying the full workspace map.]")
             sections.append("")
     content, _ = _bounded_utf8_text(
         "\n".join(sections).rstrip() + "\n",
@@ -4744,7 +4903,7 @@ def create_context(
         elif requested_base != current_base:
             full_checkpoint = True
             checkpoint_reason = "base_mismatch"
-        elif number % settings.context_checkpoint_interval == 0:
+        elif request.get("version") == 4 and number % settings.context_checkpoint_interval == 0:
             full_checkpoint = True
             checkpoint_reason = "checkpoint_interval"
     request_path = directory / f"request-{number:03d}.yml"
@@ -4779,7 +4938,7 @@ def create_context(
                 0,
                 settings.hard_context_chars
                 - 40_000
-                - sum(len(item.content) for item in bundle.evidence),
+                - sum(len(item.content.encode("utf-8")) for item in bundle.evidence),
             )
             restored, missed = _restore_checkpoint_evidence(
                 retrieval_settings,
@@ -4828,7 +4987,17 @@ def create_context(
             str(item.get("evidence_id")): item for item in state.get("evidence_records") or []
             if isinstance(item, dict) and item.get("evidence_id")
         }
+        if request.get("version") != 5:
+            for identifier, record in evidence_records.items():
+                if previous_records.get(identifier, {}).get("public_id"):
+                    record["public_id"] = previous_records[identifier]["public_id"]
         new_evidence_ids = set(evidence_records) - set(previous_records)
+        # Retrieval identity is not delivery: a whole region removed by the
+        # message byte ceiling must remain eligible for a later focused delta.
+        delivery_evidence_ids = new_evidence_ids | {
+            identifier for identifier in evidence_records
+            if not previous_records.get(identifier, {}).get("emitted_in_context")
+        }
         superseded = sorted(
             identifier for identifier, old in previous_records.items()
             if identifier not in evidence_records and any(
@@ -5048,6 +5217,23 @@ def create_context(
         memory_changes = {
             key: value for key, value in memory.items() if memory_before.get(key) != value
         }
+        if request.get("version") == 5 and not full_checkpoint:
+            for key, value in list(memory_changes.items()):
+                prior = memory_before.get(key)
+                if isinstance(value, list) and isinstance(prior, list):
+                    before_items = {json.dumps(item, sort_keys=True, ensure_ascii=False): item for item in prior}
+                    after_items = {json.dumps(item, sort_keys=True, ensure_ascii=False): item for item in value}
+                    memory_changes[key] = {
+                        "added": [item for identity, item in after_items.items() if identity not in before_items],
+                        "removed": [item for identity, item in before_items.items() if identity not in after_items],
+                    }
+                    if key in {"verified_facts", "verified_references", "implementation_surface", "test_surface"} and memory_changes[key]["removed"]:
+                        # Old session summaries may be forged or fail current
+                        # proof validation. Do not echo them, even as removals.
+                        memory_changes[key] = {
+                            "reset": True, "verified_count": len(value),
+                            "authority": "Use pinned source blocks and evidence lineage, not retained memory summaries.",
+                        }
         investigation_progress.update({
             "context_id": context_id, "base_context_id": requested_base, "checkpoint": full_checkpoint,
             "checkpoint_reason": checkpoint_reason, "coverage_map": coverage_map, "coverage_changes": coverage_changes,
@@ -5069,11 +5255,17 @@ def create_context(
         if progress_callback is not None:
             progress_callback({"phase": "packing_context", "elapsed_ms": bundle.metrics.get("total_ms", 0), "evidence_count": len(bundle.evidence)})
         pack_started = time.perf_counter()
+        emitted_ids: set[str] = set()
         content = (
-            pack_context(retrieval_settings, ticket, number, bundle, investigation_progress)
+            pack_context(retrieval_settings, ticket, number, bundle, investigation_progress, emitted_ids=emitted_ids)
             if full_checkpoint
-            else pack_delta_context(retrieval_settings, ticket, number, bundle, investigation_progress, new_evidence_ids)
+            else pack_delta_context(retrieval_settings, ticket, number, bundle, investigation_progress, delivery_evidence_ids, emitted_ids=emitted_ids)
         )
+        for identifier, record in lineage_records.items():
+            record["emitted_in_context"] = bool(
+                previous_records.get(identifier, {}).get("emitted_in_context")
+                or str(record.get("public_id") or identifier) in emitted_ids
+            )
         if progressive_checkpoint is not None:
             progressive_delta = dict(investigation_progress)
             progressive_delta["base_context_id"] = progressive_checkpoint["checkpoint_id"]
@@ -5544,61 +5736,161 @@ def clipboard_write(text: str) -> None:
         raise BrainError(f"Clipboard write failed: {result.stderr.strip()}")
 
 
+@ticket_retrieval_exclusive
+def resume_session(
+    settings: Settings, ticket: str, notes: str = "", *, target: str | None = None, copy: bool = False,
+) -> tuple[str, Path]:
+    """Export bounded chat recovery without searching, changing pins or spending a wave."""
+    from .atlas import _bounded_json_projection
+
+    directory = session_dir(settings, ticket)
+    if not directory.is_dir():
+        raise BrainError(f"Session {ticket} does not exist")
+    target = delivery_target(settings, ticket, target)
+    if len(notes.encode("utf-8")) > 8_000:
+        raise BrainError("Conversation handover notes exceed the 8,000-byte limit")
+    state = session_state(settings, ticket)
+    generation, _ = _resolve_session_generation(settings, state)
+    checkpoint = state.get("progressive_checkpoint") or {}
+    if checkpoint.get("continuation_status") in {"pending", "failed"}:
+        raise BrainError("Finish or retry the pending checkpoint continuation before exporting a new-chat handover")
+    if state.get("stable_identities"):
+        from .investigation import validate_stable_identity_registry
+
+        validate_stable_identity_registry(state)
+    pinned_paths = _validated_session_snapshot_paths(settings, state, generation)
+    pinned = replace(
+        settings, atlas_generation=generation,
+        atlas_generation_mode="pinned" if generation is not None else "legacy_source_pin",
+        repositories=[replace(repo, source_path=pinned_paths.get(repo.name),
+                              source_sha=str(((state.get("sources") or {}).get(repo.name) or {}).get("sha") or "") or None)
+                      for repo in settings.repositories],
+    )
+    records = [item for item in state.get("evidence_records") or [] if isinstance(item, dict)]
+    public_ids = {str(item.get("evidence_id")): str(item.get("public_id") or item.get("evidence_id")) for item in records}
+    # Rehydrate a small recent-ID working set, not every source ever seen. Hash
+    # verification is the same as checkpoint recovery; no newer-source fallback.
+    recent = sorted(records, key=lambda item: (str(item.get("public_id") or ""), str(item.get("evidence_id") or "")), reverse=True)[:8]
+    restored, missed = _restore_checkpoint_evidence(pinned, recent, max_chars=16_000)
+    embedded = {public_ids[_evidence_id(item)] for item in restored}
+    runtime = state.get("investigation_runtime") or {}
+    memory = state.get("investigation_memory") or {}
+    ticket_text = _read_session_artifact(settings, ticket, directory / "ticket.md", MAX_START_TICKET_BYTES)
+    ticket_excerpt, ticket_omitted = _bounded_utf8_text(ticket_text, 8_000, "\n[Ticket text omitted; ask for the remaining acceptance criteria.]\n")
+    output = [
+        "# PROJECT BRAIN — RESUME", "", f"Ticket: `{ticket}`", f"Request: `{int(state.get('requests') or 0):03d}`",
+        f"Context ID: `{state.get('last_context_id') or 'none'}`",
+        f"Pinned Atlas identity: `{state.get('atlas_generation_id') or 'legacy_source_pin'}`",
+        f"Pinned generation: `{state.get('generation')}`", f"Source signature: `{state.get('source_signature')}`", "",
+        "## New conversation contract", "",
+        "This is a bounded, non-replacing handover, not the complete previous conversation or a new investigation.",
+        "Continue this same ticket. Do not reset its wave or refresh to recover evidence.",
+        (f"Next wave: `{investigation_continuation(settings, state)['next_wave']}`; continue from the Context ID above."
+         if generation is not None else "Legacy source-pin requests do not send wave or base_context_id."),
+        "Existing user-approval pauses still apply.",
+        "Only source blocks embedded below have been re-read and hash-verified for this handover. IDs in the manifest are references, not visible proof.",
+        "Coverage, hypotheses and earlier decisions are navigation state, not a verified root cause. Re-read missing decision-critical source using files entries (repo, path, lines) in the request contract below. Known IDs requested this way are re-emitted.",
+        "Brain cannot recover reasoning or user answers that stayed only in the old chat. Ask for a concise handover of those decisions if absent; do not invent them.",
+        "Do not paste every old context into the new chat. Maintain a short decision ledger: claim, supporting/refuting E IDs, one material missing fact, and the next focused request.",
+        "", "## Operating protocol", "", _session_prompt(generation),
+        "", "## Ticket", "", *_source_markdown_block(ticket_excerpt, "text"),
+        f"Ticket text complete: `{not ticket_omitted}`", "", "## Conversation handover notes (user supplied; not source evidence)", "",
+        *_source_markdown_block(notes or "Not supplied. Prior chat-only reasoning is not available to Brain.", "text"),
+    ]
+    sections = (
+        ("Latest objective", [memory.get("objective") or ""], 1, 4_500),
+        ("Runtime observations (not repository proof)", memory.get("runtime_facts") or [], 12, 2_000),
+        ("Hypothesis Ledger", (runtime.get("hypothesis_ledger") or {}).get("items") or memory.get("hypotheses") or [], 12, 3_000),
+        ("Evidence Frontier", (runtime.get("evidence_frontier") or {}).get("items") or memory.get("blocking_unknowns") or [], 12, 4_000),
+    )
+    for title, values, count, size in sections:
+        projected = _bounded_json_projection(values, max_items=count, max_bytes=size)
+        output.extend(["", f"## {title} (bounded navigation)", "",
+                       *_source_markdown_block(json.dumps(projected, ensure_ascii=False), "json"),
+                       f"Items included: `{len(projected)}/{len(values)}`"])
+    manifest = [{"evidence_id": public_ids[str(item.get("evidence_id"))], "repo": item.get("repo"),
+                 "path": item.get("path"), "lines": f"{item.get('line_start')}-{item.get('line_end')}"}
+                for item in sorted(records, key=lambda item: str(item.get("public_id") or item.get("evidence_id")))]
+    projected_manifest = _bounded_json_projection(manifest, max_items=100, max_bytes=12_000)
+    output.extend(["", "## Retained evidence manifest (bounded)", "",
+                   f"Manifest entries included: `{len(projected_manifest)}/{len(manifest)}`; omitted entries remain in the local ticket session.",
+                   *_source_markdown_block(json.dumps(projected_manifest, ensure_ascii=False), "json"),
+                   "", "## Evidence lineage", "",
+                   f"- Embedded evidence IDs: `{', '.join(sorted(embedded)) or 'none'}`",
+                   "- Omitted evidence IDs due to byte limit: `none`",
+                   f"- Recent regions unavailable, changed, or outside the source budget: `{missed}`",
+                   "", "## Re-verified source evidence", ""])
+    for item in restored:
+        output.extend([f"### {public_ids[_evidence_id(item)]} — {item.repo} — `{item.path}:{item.line_start}-{item.line_end}`", "",
+                       *_source_markdown_block(item.content, _language(item.path)), ""])
+    content = _bounded_protocol_context("\n".join(output) + "\n", min(settings.hard_context_chars, 64_000), embedded)
+    path = directory / "resume.md"
+    _atomic_session_text_write(settings, ticket, path, content)
+    mark_active_artifacts(state, path)
+    save_session(settings, ticket, state)
+    # Keep export and delivery under the same ticket/workspace lease: another
+    # wave must not publish between reading this base and selecting its handoff.
+    deliver(settings, ticket, content, target, copy=copy)
+    return content, path
+
+
+def delivery_target(settings: Settings, ticket: str, target: str | None = None) -> str:
+    value = target or (session_state(settings, ticket).get("delivery") or {}).get("target") or "claude"
+    if not isinstance(value, str) or value not in {"claude", "m365"}:
+        raise BrainError("target must be claude or m365")
+    return str(value)
+
+
 @ticket_exclusive
-def deliver(settings: Settings, ticket: str, text: str, target: str, *, copy: bool) -> tuple[list[Path], int]:
+def deliver(settings: Settings, ticket: str, text: str, target: str | None, *, copy: bool) -> tuple[list[Path], int]:
+    from .agent import final_solution_contract
+
     directory = session_dir(settings, ticket)
     state = session_state(settings, ticket)
-    if target == "m365":
-        from .agent import final_solution_contract
-
-        handoff_directory = handoff_dir(settings, ticket)
-        current_handoff = handoff_directory / "current.md"
-        _validated_generated_artifact(settings, current_handoff)
-        internal_handoff = directory / "current-handoff.md"
-        _atomic_session_text_write(settings, ticket, internal_handoff, text)
-        _atomic_generated_text_write(settings, current_handoff, text)
-        if text.startswith("# PROJECT BRAIN — START"):
-            label = "start"
-        elif text.startswith("# PROJECT BRAIN — EXTERNAL EVIDENCE"):
-            match = re.search(r"(?m)^Evidence: `(\d+)`", text)
-            label = f"evidence-{int(match.group(1)):03d}" if match else "evidence"
-        elif text.startswith("# PROJECT BRAIN — IMPLEMENTATION FEEDBACK"):
-            match = re.search(r"(?m)^Feedback: `(\d+)`", text)
-            label = f"feedback-{int(match.group(1)):03d}" if match else "feedback"
-        elif final_solution_contract(text)[0]:
-            label = "final"
-        else:
-            match = re.search(r"(?m)^Request: `(\d+)`", text)
-            label = f"context-{int(match.group(1)):03d}" if match else "update"
-        handoff = handoff_directory / f"{label}.md"
-        _atomic_generated_text_write(settings, handoff, text)
-        paths = [handoff]
-        state["delivery"] = {
-            "target": target,
-            "parts": [str(handoff)],
-            "current": 1,
-            "handoff": str(current_handoff),
-            "latest": str(handoff),
-        }
-        save_session(settings, ticket, state)
-        if copy:
-            clipboard_write(text)
-        return paths, 1
-    parts = chunk_text(text, settings.clipboard_chunk_chars)
-    delivery_dir = directory / "delivery"
-    paths: list[Path] = []
-    total = len(parts)
-    for index, part in enumerate(parts, 1):
-        header = f"PROJECT BRAIN CONTEXT — PART {index} OF {total}\n\n" if total > 1 else ""
-        path = delivery_dir / f"part-{index:03d}.txt"
-        _atomic_session_text_write(settings, ticket, path, header + part)
-        paths.append(path)
-    state["delivery"] = {"target": target, "parts": [str(path) for path in paths], "current": 1}
+    target = delivery_target(settings, ticket, target)
+    # Both chat transports expose the same per-ticket handoff location. Retain
+    # clipboard parts and the internal copy for existing clients and sessions.
+    handoff_directory = handoff_dir(settings, ticket)
+    current_handoff = handoff_directory / "current.md"
+    _validated_generated_artifact(settings, current_handoff)
+    _atomic_session_text_write(settings, ticket, directory / "current-handoff.md", text)
+    _atomic_generated_text_write(settings, current_handoff, text)
+    if text.startswith("# PROJECT BRAIN — START"):
+        label = "start"
+    elif text.startswith("# PROJECT BRAIN — RESUME"):
+        label = "resume"
+    elif text.startswith("# PROJECT BRAIN — EXTERNAL EVIDENCE"):
+        match = re.search(r"(?m)^Evidence: `(\d+)`", text)
+        label = f"evidence-{int(match.group(1)):03d}" if match else "evidence"
+    elif text.startswith("# PROJECT BRAIN — IMPLEMENTATION FEEDBACK"):
+        match = re.search(r"(?m)^Feedback: `(\d+)`", text)
+        label = f"feedback-{int(match.group(1)):03d}" if match else "feedback"
+    elif final_solution_contract(text)[0]:
+        label = "final"
+    else:
+        match = re.search(r"(?m)^Request: `(\d+)`", text)
+        label = f"context-{int(match.group(1)):03d}" if match else "update"
+    handoff = handoff_directory / f"{label}.md"
+    _atomic_generated_text_write(settings, handoff, text)
+    paths = [handoff]
+    if target == "claude":
+        parts = chunk_text(text, settings.clipboard_chunk_chars)
+        paths = []
+        for index, part in enumerate(parts, 1):
+            header = f"PROJECT BRAIN CONTEXT — PART {index} OF {len(parts)}\n\n" if len(parts) > 1 else ""
+            path = directory / "delivery" / f"part-{index:03d}.txt"
+            _atomic_session_text_write(settings, ticket, path, header + part)
+            paths.append(path)
+    size = len(text.encode("utf-8"))
+    state["delivery"] = {"target": target, "parts": [str(path) for path in paths], "current": 1,
+                         "handoff": str(current_handoff), "latest": str(handoff), "bytes": size}
+    usage = dict(state.get("delivery_usage") or {})
+    usage["prepared_bytes"] = int(usage.get("prepared_bytes") or 0) + size
+    usage["since_resume_bytes"] = (0 if label == "resume" else int(usage.get("since_resume_bytes") or 0)) + size
+    state["delivery_usage"] = usage
     save_session(settings, ticket, state)
     if copy:
-        clipboard_write(_read_session_artifact(
-            settings, ticket, paths[0], MAX_DELIVERY_ARTIFACT_BYTES,
-        ))
+        clipboard_write(delivery_artifact(settings, ticket, paths[0])[1])
     return paths, 1
 
 
@@ -5628,7 +5920,7 @@ def delivery_artifact(
             rf"feedback-\d+|checkpoint-\d+|checkpoint-delta-\d+)\.md$"
         )
         ticket_label = re.compile(
-            r"^(?:current|start|final|update|context-\d+|evidence-\d+|feedback-\d+|"
+            r"^(?:current|start|final|update|resume|context-\d+|evidence-\d+|feedback-\d+|"
             r"checkpoint-\d+|checkpoint-delta-\d+)\.md$"
         )
         legacy = len(handoff_relative.parts) == 1 and legacy_label.fullmatch(path.name)

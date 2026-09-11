@@ -94,6 +94,8 @@ MAX_MEMORY_QUERY_VECTORS = 128
 MAX_MEMORY_QUERY_DIMENSION = 4096
 QUERY_CACHE_WRITE_SECONDS = 0.05
 QUERY_CACHE_SCAN_ENTRIES = 5_000
+SEMANTIC_ROUTING_SECONDS = 2.0
+SEMANTIC_ROUTING_RECOVERY_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -1922,6 +1924,180 @@ def semantic_component_available(settings: Settings, generation: Any | None) -> 
     return _serving_state(settings, generation) is not None
 
 
+def _repo_card_scores(
+    settings: Settings, shards: list[dict[str, object]], generation: Any,
+    vector: list[float], *, manifest: dict[str, object] | None, state: dict[str, object],
+    backend: tuple[Any, Any], trace: Any | None, reserve_operations: int,
+) -> tuple[dict[str, float], bool]:
+    """Route globally using existing exact-input cache rows and sealed root vectors.
+
+    Navigation only: source search still validates the selected pinned artifacts.
+    No new persistence format, document inference, or scan of source bodies.
+    """
+    from .atlas import MAX_ATLAS_REPOSITORIES, _card
+    from .catalog import connect
+    from datetime import UTC, datetime
+
+    started = time.monotonic()
+    deadline = started + SEMANTIC_ROUTING_SECONDS
+    dimension = int(state["dimension"])
+    if generation is None or len(shards) > MAX_ATLAS_REPOSITORIES or dimension > MAX_MEMORY_QUERY_DIMENSION:
+        return {}, False
+    if trace is not None and trace.physical_budget_remaining <= reserve_operations:
+        return {}, False
+    roots = {}
+    entries_seen = 0
+    for shard in shards:
+        entries = shard.get("entries") or []
+        entries_seen += len(entries)
+        if entries_seen > MAX_SEMANTIC_CHUNKS_TOTAL or time.monotonic() >= deadline:
+            return {}, False
+        selected = [(position, entry) for position, entry in enumerate(entries)
+                    if entry.get("kind") == "atlas_repo_card"]
+        if len(selected) == 1 and _valid_shard_manifest_entry(shard, root=_shard_root(settings)):
+            position, entry = selected[0]
+            roots[str(entry["chunk_id"])] = (shard, position, entry)
+    if not roots:
+        return {}, False
+    pack_id = str(state["pack_id"])
+    inputs = {}
+    vectors = {}
+    recovered = {}
+    touched = []
+    used_at = datetime.now(UTC).isoformat()
+    try:
+        with closing(connect(settings)) as connection:
+            connection.execute("PRAGMA busy_timeout=50")
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            slots = ",".join("?" for _ in roots)
+            rows = connection.execute(
+                "SELECT c.card_id,c.level,c.target_id,c.repo,c.module_id,c.entity_id,c.path,c.content,"
+                "c.content_hash,c.metadata_json,g.snapshot_sha FROM atlas_cards c "
+                "JOIN generation_cards g ON g.card_id=c.card_id "
+                f"WHERE g.generation=? AND c.card_id IN ({slots}) AND c.level='repo' "
+                "AND length(CAST(c.content AS BLOB))<=48000 AND length(CAST(c.metadata_json AS BLOB))<=65536 "
+                "AND length(CAST(c.card_id AS BLOB))+length(CAST(c.target_id AS BLOB))+length(CAST(c.repo AS BLOB)) "
+                "+length(CAST(COALESCE(c.module_id,'') AS BLOB))+length(CAST(COALESCE(c.entity_id,'') AS BLOB)) "
+                "+length(CAST(COALESCE(c.path,'') AS BLOB))+length(CAST(c.content_hash AS BLOB))<=65536",
+                [generation.generation, *roots],
+            )
+            for row in rows:
+                card = dict(zip(("card_id", "level", "target_id", "repo", "module_id", "entity_id", "path",
+                                 "content", "content_hash", "metadata"), row[:-1], strict=True))
+                shard, position, entry = roots[card["card_id"]]
+                if card["repo"] != shard["repo"] or row[-1] != shard["snapshot"]:
+                    continue
+                try:
+                    card["metadata"] = json.loads(card["metadata"])
+                    if not isinstance(card["metadata"], dict) or card != _card(
+                        card["level"], card["target_id"], card["repo"], card["content"],
+                        module_id=card["module_id"], entity_id=card["entity_id"], path=card["path"], metadata=card["metadata"],
+                    ):
+                        continue
+                    chunk = _atlas_chunk(card["repo"], card)
+                    if _entries([chunk])[0] != entry:
+                        continue
+                    _, keys = _embedding_inputs(
+                        [chunk], pack_id=pack_id, dimension=dimension,
+                        pack_compatibility_identity=str(state["pack_compatibility_identity"]),
+                        document_instruction=str((manifest or {}).get("document_instruction") or ""),
+                        input_suffix=str((manifest or {}).get("input_suffix") or ""),
+                    )
+                    inputs[keys[0]] = (shard, position)
+                except (TypeError, ValueError):
+                    continue
+            if inputs:
+                slots = ",".join("?" for _ in inputs)
+                for key, payload in connection.execute(
+                    f"SELECT cache_key,vector_json FROM embedding_cache WHERE cache_key IN ({slots}) "
+                    "AND pack_id=? AND dimension=? AND length(CAST(vector_json AS BLOB))<=?",
+                    [*inputs, pack_id, dimension, dimension * 32 + 2],
+                ):
+                    try:
+                        value = valid_embedding_vector(json.loads(payload), dimension=dimension)
+                    except (TypeError, ValueError):
+                        value = None
+                    if value is not None:
+                        vectors[key] = value
+                        touched.append((used_at, key))
+    except (OSError, sqlite3.Error, ValueError):
+        return {}, False
+    finally:
+        if trace is not None:
+            trace.add_backend("semantic-repo-cache", (time.monotonic() - started) * 1000,
+                              raw_hits=len(vectors), cache_hit=bool(vectors))
+
+    # ponytail: at most 100 root lookups, 256 MiB of cold artifact validation,
+    # and two seconds; use refresh-prepared routing data if cold recovery dominates.
+    remaining_bytes = SEMANTIC_ROUTING_RECOVERY_BYTES
+    Index, _ = backend
+    for key, (shard, position) in inputs.items():
+        if key in vectors:
+            continue
+        if time.monotonic() >= deadline or (trace is not None and trace.physical_budget_remaining <= reserve_operations):
+            break
+        size = int(shard["artifact_bytes"])
+        if size > remaining_bytes:
+            continue
+        remaining_bytes -= size
+        index = None
+        recovered_started = time.monotonic()
+        try:
+            if not _valid_shard_artifact(shard, root=_shard_root(settings)):
+                continue
+            index = Index.restore(str(shard["path"]), view=True)
+            if index is None or index.ndim != dimension or len(index) != len(shard["entries"]):
+                continue
+            value = index.get(position, dtype="f32")
+            value = valid_embedding_vector(value.tolist() if value is not None else None, dimension=dimension)
+            if value is not None:
+                vectors[key] = value
+                recovered[key] = json.dumps(value, separators=(",", ":"))
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            continue
+        finally:
+            if index is not None:
+                index.reset()
+            if trace is not None:
+                trace.add_backend("semantic-repo-recovery", (time.monotonic() - recovered_started) * 1000,
+                                  bytes_scanned=size, raw_hits=int(key in recovered))
+
+    if (touched or recovered) and (trace is None or trace.physical_budget_remaining > reserve_operations):
+        cache_started = time.monotonic()
+        try:
+            from .ops import remaining_write_capacity
+
+            if recovered and sum(len(payload.encode("utf-8")) for payload in recovered.values()) > remaining_write_capacity(
+                settings, scan_seconds=QUERY_CACHE_WRITE_SECONDS, scan_entries=QUERY_CACHE_SCAN_ENTRIES,
+            ):
+                raise SemanticEmbeddingError("routing cache exceeds the remaining managed write capacity")
+            with closing(connect(settings)) as connection:
+                connection.execute("PRAGMA busy_timeout=50")
+                # Cold recovery must survive the next CLI process too. Its
+                # bounded bulk cache accounting can use the remaining routing
+                # budget; a warm LRU touch still gets only the short allowance.
+                write_deadline = deadline if recovered else min(deadline, time.monotonic() + QUERY_CACHE_WRITE_SECONDS)
+                connection.set_progress_handler(lambda: int(time.monotonic() >= write_deadline), 1000)
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    if recovered:
+                        _reserve_embedding_cache(connection, list(recovered.items()))
+                        connection.executemany(
+                            "INSERT OR REPLACE INTO embedding_cache(cache_key,pack_id,dimension,vector_json,created_at,last_used_at) "
+                            "VALUES (?,?,?,?,?,?)",
+                            [(key, pack_id, dimension, payload, used_at, used_at) for key, payload in recovered.items()],
+                        )
+                    connection.executemany("UPDATE embedding_cache SET last_used_at=? WHERE cache_key=?", touched)
+        except (OSError, sqlite3.Error, ValueError, RuntimeError):
+            if trace is not None:
+                trace.fallback_reasons.append("semantic_repo_cache_write_unavailable")
+        finally:
+            if trace is not None:
+                trace.add_backend("semantic-repo-cache-write", (time.monotonic() - cache_started) * 1000)
+    scores = {str(inputs[key][0]["repo"]): _cosine(vector, value) for key, value in vectors.items()}
+    return scores, len(scores) == len(shards)
+
+
 def search_semantic(
     settings: Settings,
     query: str,
@@ -1932,6 +2108,8 @@ def search_semantic(
     trace: Any | None = None,
     generation: Any | None = None,
     serving_status: dict[str, str] | None = None,
+    repo_hints: list[str] | None = None,
+    repo_limit: int | None = None,
 ) -> list[dict[str, object]]:
     state = _serving_state(settings, generation, require_active_pack=embed is None)
     if not state:
@@ -2056,9 +2234,31 @@ def search_semantic(
             and (not repos or shard.get("repo") in repos)
             and snapshots.get(str(shard.get("repo"))) == shard.get("snapshot")
         ]
+        routing_complete = True
+        if repo_limit is not None:
+            repo_limit = max(1, repo_limit)
+            scores = {}
+            if len(eligible) > repo_limit:
+                routing_started = time.perf_counter()
+                scores, routing_complete = _repo_card_scores(
+                    settings, eligible, generation, vector, manifest=manifest, state=state, backend=backend,
+                    trace=trace, reserve_operations=repo_limit,
+                )
+                if trace is not None:
+                    trace.add_stage("semantic_repo_routing_ms", (time.perf_counter() - routing_started) * 1000)
+                    if not routing_complete:
+                        trace.fallback_reasons.append("semantic_repo_routing_incomplete")
+            hints = {name: position for position, name in enumerate(repo_hints or [])}
+            eligible.sort(key=lambda shard: (
+                -scores.get(str(shard["repo"]), -2.0), hints.get(str(shard["repo"]), len(hints)), str(shard["repo"]),
+            ))
+            eligible = eligible[:repo_limit]
         if trace is not None and len(eligible) > trace.physical_budget_remaining:
             eligible = eligible[:trace.physical_budget_remaining]
             trace.stop_reason = "physical_budget"
+            routing_complete = False
+        if trace is not None:
+            trace.semantic_repo_scope = [str(shard["repo"]) for shard in eligible]
         if not eligible:
             if serving_status is not None:
                 serving_status["status"] = "unavailable"
@@ -2071,8 +2271,11 @@ def search_semantic(
                 if trace is not None:
                     trace.add_backend("semantic-shard", (time.perf_counter() - backend_started) * 1000)
                 return [], "missing"
+            index = None
             try:
                 index = Index.restore(str(path), view=True)
+                if index is None or index.ndim != dimension or len(index) != len(shard.get("entries") or []):
+                    raise ValueError("semantic shard dimensions or entry count do not match its registration")
                 matches = index.search(numpy.asarray(vector, dtype=numpy.float32), limit)
             except Exception:
                 # A corrupt optional shard cannot invalidate Core or a healthy shard
@@ -2080,6 +2283,9 @@ def search_semantic(
                 if trace is not None:
                     trace.add_backend("semantic-shard", (time.perf_counter() - backend_started) * 1000)
                 return [], "corrupt"
+            finally:
+                if index is not None:
+                    index.reset()
             rows: list[dict[str, object]] = []
             for match in matches:
                 key = int(match.key)
@@ -2107,7 +2313,7 @@ def search_semantic(
         healthy = shard_statuses.count("ready")
         if serving_status is not None:
             serving_status["status"] = (
-                "ready" if healthy == len(shard_statuses)
+                "ready" if healthy == len(shard_statuses) and routing_complete
                 else "degraded" if healthy
                 else "unavailable"
             )

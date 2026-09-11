@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 from bisect import bisect_left
 import hashlib
+import heapq
 import hmac
 import json
 import math
@@ -102,14 +103,61 @@ _GENERIC_DEFINITION = re.compile(
 class AtlasCapacityError(RuntimeError):
     """A bounded Atlas refresh could not safely represent the new snapshot."""
 
+    def __init__(
+        self, message: str, *, limit: int | float | None = None, observed: int | None = None,
+        repo: str = "", path: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.limit, self.observed, self.repo, self.path = limit, observed, repo, path
+
+    def public_message(self) -> str:
+        known = {
+            "Atlas per-file derived-row budget exceeded", "Atlas per-file parse time budget exceeded",
+            "Atlas per-file source-line budget exceeded", "Atlas reused entity budget exceeded",
+            "Atlas reused region budget exceeded", "Atlas reused edge budget exceeded",
+            "Atlas repository budget exceeded", "Atlas previous-generation file budget exceeded",
+            "Atlas current-generation file budget exceeded", "Atlas reused derived-row budget exceeded",
+            "Atlas generation derived-row budget exceeded",
+        }
+        message = str(self) if str(self) in known else "Atlas processing budget exceeded"
+        counts = []
+        for label, value in (("observed", self.observed), ("limit", self.limit)):
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 10 ** 12:
+                counts.append(f"{label}: {value:g}")
+        if counts:
+            message += " (" + ", ".join(counts) + (" seconds" if "parse time" in message else "") + ")"
+        location = f"{self.repo}:{self.path}"
+        if (
+            re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", self.repo) and self.path
+            and not PurePosixPath(self.path).is_absolute() and ".." not in PurePosixPath(self.path).parts
+            and not any(ord(char) < 32 or ord(char) == 127 or char in ":\\" for char in self.path)
+            and len(location.encode("utf-8")) <= 240
+        ):
+            message += f"; file: {location}"
+        return message
+
+    def recovery(self) -> dict[str, str]:
+        timed_out = str(self) == "Atlas per-file parse time budget exceeded"
+        return {
+            "code": "atlas_capacity", "title": "Atlas parsing needs attention" if timed_out else "Atlas processing limit reached",
+            "message": self.public_message() + ". This is an Atlas processing limit, not a disk-space check. "
+            "Any previously published generation and existing ticket pins are preserved. "
+            "Do not reset or delete indexes, caches or model packs. " + (
+                "Retry Refresh Brain after other CPU-heavy work finishes; if it repeats, keep this file/budget detail for diagnosis."
+                if timed_out else "Use the reported limit for diagnosis; repeated refresh or disk cleanup will not remove a row/file/repository limit."
+            ),
+            "action": "retry_refresh" if timed_out else "diagnostics",
+            "action_label": "Retry Refresh Brain" if timed_out else "Run diagnostics",
+        }
+
 
 def _append_derived(
     rows: list[dict[str, Any]], item: dict[str, Any], limit: int, deadline: float,
 ) -> None:
     if len(rows) >= limit:
-        raise AtlasCapacityError("Atlas per-file derived-row budget exceeded")
+        raise AtlasCapacityError("Atlas per-file derived-row budget exceeded", limit=limit, observed=len(rows) + 1)
     if time.monotonic() >= deadline:
-        raise AtlasCapacityError("Atlas per-file parse time budget exceeded")
+        raise AtlasCapacityError("Atlas per-file parse time budget exceeded", limit=MAX_ATLAS_PARSE_SECONDS_PER_FILE)
     rows.append(item)
 
 
@@ -276,7 +324,7 @@ def _java_entities(
     openings: list[int] = []
     for count, match in enumerate(re.finditer(r"[{}]", code_search)):
         if count % 4_096 == 0 and time.monotonic() >= deadline:
-            raise AtlasCapacityError("Atlas per-file parse time budget exceeded")
+            raise AtlasCapacityError("Atlas per-file parse time budget exceeded", limit=MAX_ATLAS_PARSE_SECONDS_PER_FILE)
         position, char = match.start(), match.group()
         if char == "{":
             openings.append(position)
@@ -302,8 +350,11 @@ def _java_entities(
             repo, path, blob, module_id, line_start=start, line_end=end,
             name=match.group(2), kind=kind, signature=match.group(0),
         )
-        if len(classes) >= MAX_ATLAS_ENTITIES_PER_FILE or time.monotonic() >= deadline:
-            raise AtlasCapacityError("Atlas per-file derived-row budget exceeded")
+        if len(classes) >= MAX_ATLAS_ENTITIES_PER_FILE:
+            raise AtlasCapacityError("Atlas per-file derived-row budget exceeded", limit=MAX_ATLAS_ENTITIES_PER_FILE,
+                                     observed=len(classes) + 1)
+        if time.monotonic() >= deadline:
+            raise AtlasCapacityError("Atlas per-file parse time budget exceeded", limit=MAX_ATLAS_PARSE_SECONDS_PER_FILE)
         classes.append((opening, closing, entity))
 
     rows = [item[2] for item in classes]
@@ -413,7 +464,8 @@ def _file_intelligence(repo: str, path: str, blob: str, content: str) -> tuple[d
     if len(encoded) > MAX_REFRESH_FILE_BYTES:
         content = encoded[:MAX_REFRESH_FILE_BYTES].decode("utf-8", errors="replace")
     if content.count("\n") + 1 > MAX_ATLAS_SOURCE_LINES_PER_FILE:
-        raise AtlasCapacityError("Atlas per-file source-line budget exceeded")
+        raise AtlasCapacityError("Atlas per-file source-line budget exceeded", limit=MAX_ATLAS_SOURCE_LINES_PER_FILE,
+                                 observed=content.count("\n") + 1)
     deadline = time.monotonic() + MAX_ATLAS_PARSE_SECONDS_PER_FILE
 
     module = _module(repo, path)
@@ -525,23 +577,39 @@ def _file_intelligence(repo: str, path: str, blob: str, content: str) -> tuple[d
         ("IMPLEMENTS", re.compile(r"\bimplements\s+([A-Za-z_$][\w$]*)"), .9),
         ("CALLS", re.compile(r"\b([A-Za-z_$][\w$]*)\s*\("), .65),
     ]
+    ordered_definitions = sorted(enumerate(definitions), key=lambda item: item[1]["line_start"])
     for edge_type, pattern, confidence in patterns:
         pattern_content = code_only_content if edge_type == "CALLS" else structural_content
         search_content = pattern_content.rstrip()
+        active: list[tuple[int, int, int, int]] = []
+        next_definition = 0
         for match in pattern.finditer(search_content):
             name = next((group for group in match.groups() if group), "")
             if not name or name in {"if", "for", "while", "switch", "return", "class", "def", "function"}:
                 continue
             line = line_at(match.start())
-            enclosed = [item for item in definitions if item["line_start"] <= line <= item["line_end"]]
-            owner = max(
-                enclosed,
-                key=lambda item: (item["line_start"], item["kind"] in {"method", "constructor"}),
-                default=file_entity,
-            )
+            # Matches advance by line. Sweep each definition once per pattern;
+            # preserve max(start, method-kind), with the original first-row tie.
+            while next_definition < len(ordered_definitions):
+                position, definition = ordered_definitions[next_definition]
+                if definition["line_start"] > line:
+                    break
+                heapq.heappush(active, (
+                    -definition["line_start"], -int(definition["kind"] in {"method", "constructor"}),
+                    position, definition["line_end"],
+                ))
+                next_definition += 1
+            while active and active[0][3] < line:
+                heapq.heappop(active)
+            owner = definitions[active[0][2]] if active else file_entity
             receiver: str | None = None
             if edge_type == "CALLS" and match.start() > 0 and search_content[match.start() - 1] == ".":
-                receiver_match = re.search(r"([A-Za-z_$][\w$]*)\.$", search_content[:match.start()])
+                receiver_start = match.start() - 1
+                while receiver_start > 0 and (
+                    search_content[receiver_start - 1].isalnum() or search_content[receiver_start - 1] in "_$"
+                ):
+                    receiver_start -= 1
+                receiver_match = re.search(r"([A-Za-z_$][\w$]*)\.$", search_content[receiver_start:match.start()])
                 receiver = receiver_match.group(1) if receiver_match else ""
             dispatch_scope = str(
                 owner.get("parent_entity_id")
@@ -1412,7 +1480,11 @@ def build_atlas(settings: Settings, state: dict[str, object]) -> dict[str, Any]:
                     bounded.decode("utf-8", errors="replace"), len(raw) > MAX_REFRESH_FILE_BYTES,
                 )
                 v1_source_cache_bytes += len(bounded)
-        module, file_entities, file_regions, file_edges = _file_intelligence(repo_name, path, blob, content)
+        try:
+            module, file_entities, file_regions, file_edges = _file_intelligence(repo_name, path, blob, content)
+        except AtlasCapacityError as error:
+            error.repo, error.path = repo_name, path
+            raise
         modules[module["module_id"]] = module
         entities.update({item["entity_id"]: item for item in file_entities})
         regions.update({item["region_id"]: item for item in file_regions})
@@ -2394,18 +2466,40 @@ def update_investigation(memory: dict[str, Any], coverage: dict[str, str], bundl
 
 
 def next_best_evidence(coverage: dict[str, str], request: dict[str, Any], no_progress_rounds: int = 0) -> dict[str, Any]:
+    from .core import _required_coverage_key
+
     choices = [
         ("production_entry_point", "symbol", 10, 100), ("main_execution_flow", "graph_expand", 18, 90),
         ("cross_repo_integration", "relationship", 20, 80), ("tests", "test_reference", 12, 75),
         ("impact_surface", "relationship", 16, 70), ("contract_surface", "relationship", 16, 65),
         ("configuration", "path", 8, 55), ("data_schema", "path", 8, 50), ("history", "history", 30, 35),
     ]
-    missing = [item for item in choices if coverage.get(item[0], "not_requested") != "verified"]
+    explicit = list(dict.fromkeys(
+        key for value in request.get("required") or []
+        if (key := _required_coverage_key(str(value))) is not None
+    ))
+    mode_keys = {
+        "history": ["history"],
+        "test_surface": ["tests"],
+        "impact_analysis": ["impact_surface", "tests", "contract_surface", "configuration", "data_schema"],
+        "flow_trace": ["production_entry_point", "main_execution_flow", "cross_repo_integration"],
+        "implementation_plan": ["production_entry_point", "main_execution_flow", "tests"],
+        "root_cause": ["production_entry_point", "main_execution_flow"],
+    }.get(str(request.get("mode") or "root_cause"), ["production_entry_point", "main_execution_flow"])
+    # A requested test/config/history fact outranks generic entry-point discovery.
+    # Incidental coverage must not silently turn a focused ticket into every mode.
+    relevant = explicit or mode_keys
+    missing = [item for item in choices if item[0] in relevant and coverage.get(item[0], "not_requested") != "verified"]
     if no_progress_rounds >= 2 or not missing:
-        return {"action": "stop", "reason": "no_progress" if no_progress_rounds >= 2 else "coverage_satisfied", "cost": 0, "value": 0}
+        unknowns = [str(value) for value in request.get("required") or [] if _required_coverage_key(str(value)) is None]
+        if no_progress_rounds < 2 and unknowns:
+            return {"action": "resolve_blocker", "reason": "requested fact has no deterministic coverage proof",
+                    "blocker": unknowns[0], "cost": 10, "value": 100}
+        return {"action": "stop", "reason": "no_progress" if no_progress_rounds >= 2 else "requested_coverage_satisfied",
+                "cost": 0, "value": 0}
     key, operation, cost, value = sorted(missing, key=lambda item: (-(item[3] / item[2]), item[0]))[0]
     return {"action": operation, "coverage": key, "cost": cost, "value": value,
-            "reason": f"highest deterministic value/cost missing coverage: {key}"}
+            "reason": f"highest deterministic value/cost within requested coverage: {key}"}
 
 
 def _bounded_utf8_value(value: str, max_bytes: int) -> str:

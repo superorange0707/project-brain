@@ -1,6 +1,5 @@
 include CHANGELOG.md
 include CONTRIBUTING.md
-include MILESTONE_REPORT.md
 include RELEASE_NOTES.md
 include SECURITY.md
 recursive-include docs *.md

@@ -17,6 +17,8 @@ from .core import (
     create_context,
     create_learning_template,
     deliver,
+    delivery_target,
+    resume_session,
     discover_and_configure_repositories,
     discover_git_repositories,
     doctor,
@@ -191,7 +193,7 @@ def _parser() -> argparse.ArgumentParser:
     source = context.add_mutually_exclusive_group()
     source.add_argument("--file")
     source.add_argument("--clipboard", action="store_true")
-    context.add_argument("--target", choices=("claude", "m365"), default="claude")
+    context.add_argument("--target", choices=("claude", "m365"), help="default: this ticket's last delivery target")
     context.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     context.add_argument("--include-diff", action="store_true")
     context.add_argument("--continue-investigation", action="store_true", help="approve one more bounded wave on this ticket's original generation; do not reset its evidence or wave counter")
@@ -202,11 +204,18 @@ def _parser() -> argparse.ArgumentParser:
     continue_source = continue_command.add_mutually_exclusive_group()
     continue_source.add_argument("--file")
     continue_source.add_argument("--clipboard", action="store_true")
-    continue_command.add_argument("--target", choices=("claude", "m365"), default="claude")
+    continue_command.add_argument("--target", choices=("claude", "m365"), help="default: this ticket's last delivery target")
     continue_command.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     continue_command.add_argument("--include-diff", action="store_true")
     continue_command.add_argument("--continue-investigation", action="store_true", help="approve one more bounded wave on this ticket's original generation; do not reset its evidence or wave counter")
     continue_command.add_argument("--json", action="store_true", help="print a stable machine-readable result")
+
+    resume = commands.add_parser("resume", help="export a bounded handover for a new AI conversation; keep this ticket and its pinned evidence")
+    resume.add_argument("ticket")
+    resume.add_argument("--notes-file", help="optional concise decisions/unknowns carried over from the old chat")
+    resume.add_argument("--target", choices=("claude", "m365"), help="default: this ticket's last delivery target")
+    resume.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
+    resume.add_argument("--json", action="store_true")
 
     preview = commands.add_parser("preview", help="classify and preview a complete AI reply")
     preview_source = preview.add_mutually_exclusive_group()
@@ -223,7 +232,7 @@ def _parser() -> argparse.ArgumentParser:
     evidence.add_argument("ticket")
     evidence.add_argument("file")
     evidence.add_argument("--kind", choices=("document", "log", "note", "runtime"), default="document")
-    evidence.add_argument("--target", choices=("claude", "m365"), default="claude")
+    evidence.add_argument("--target", choices=("claude", "m365"), help="default: this ticket's last delivery target")
     evidence.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     evidence.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
@@ -236,7 +245,7 @@ def _parser() -> argparse.ArgumentParser:
     feedback.add_argument("--test-command", default="")
     feedback.add_argument("--test-output-file")
     feedback.add_argument("--no-diff", action="store_true")
-    feedback.add_argument("--target", choices=("claude", "m365"), default="claude")
+    feedback.add_argument("--target", choices=("claude", "m365"), help="default: this ticket's last delivery target")
     feedback.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     feedback.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
@@ -741,6 +750,21 @@ def execute(args: argparse.Namespace) -> int:
         print(settings.generated_dir / "EXPERIENCE_REPORT.md")
         print(f"Evaluated {report['evaluated_sessions']} sessions against {report['indexed_cases']} indexed ticket cases.")
         return 0
+    if args.command in {"ctx", "continue", "evidence", "feedback", "resume"}:
+        args.target = delivery_target(settings, args.ticket, args.target)
+    if args.command == "resume":
+        notes = _read_input_file(args.notes_file, "Handover notes") if args.notes_file else ""
+        copy = args.copy if args.copy is not None else args.target == "claude"
+        content, path = resume_session(settings, args.ticket, notes, target=args.target, copy=copy)
+        delivery = session_state(settings, args.ticket)["delivery"]
+        if args.json:
+            print(json.dumps({"ticket": args.ticket, "path": str(path), "handoff": delivery["latest"],
+                              "delivery": {**delivery, "copied": copy}}, indent=2))
+        else:
+            print(f"New-chat handover: {delivery['latest']}")
+            print("Open a fresh AI conversation and send this handover only. Same ticket and pinned generation; no refresh or wave reset.")
+            print(f"Prepared {delivery['bytes']:,} UTF-8 bytes; prior chat-only decisions require your handover notes.")
+        return 0
     if args.command == "start":
         ticket_text = _ticket_text(args)
         additions = []
@@ -835,8 +859,7 @@ def execute(args: argparse.Namespace) -> int:
             return 0
         if kind == "final_solution":
             path = archive_final_solution(settings, args.ticket, text)
-            if args.target == "m365":
-                deliver(settings, args.ticket, text, args.target, copy=False)
+            deliver(settings, args.ticket, text, args.target, copy=False)
             result = {"ticket": args.ticket, "kind": kind, "path": str(path)}
             print(json.dumps(result, indent=2) if args.json else f"Ready to implement: {path}")
             return 0
@@ -1017,11 +1040,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return execute(_parser().parse_args(argv))
     except (BrainError, OSError, ValueError, RuntimeError) as exc:
-        print(f"brain: {exc}", file=sys.stderr)
+        from .atlas import AtlasCapacityError
+
+        print(f"brain: {exc.public_message() if isinstance(exc, AtlasCapacityError) else exc}", file=sys.stderr)
         from .ops import StateCapacityError
 
         if isinstance(exc, StateCapacityError):
             print("brain: recovery: open `brain ui` and use Storage & recovery; pinned ticket evidence is preserved", file=sys.stderr)
+        elif isinstance(exc, AtlasCapacityError):
+            print("brain: recovery: " + exc.recovery()["message"], file=sys.stderr)
         return 2
 
 

@@ -124,6 +124,7 @@ _PROGRESS_LABELS = {
     "core_index": "Building Core indexes",
     "knowledge": "Building project maps and relationships",
     "graph": "Building graph state",
+    "atlas": "Building Workspace Atlas",
     "semantic_manifest": "Discovering Semantic cards",
     "semantic_embedding": "Building Semantic index",
     "semantic_shard": "Writing Semantic shards",
@@ -376,6 +377,7 @@ def refresh_brain(
     graphs = index_graph(settings, defer_lazy=True)
     from .atlas import build_atlas
 
+    emit("atlas")
     atlas_payload = build_atlas(settings, index_state)
 
     edition = current_edition(settings)

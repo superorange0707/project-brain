@@ -851,6 +851,9 @@ class B {
 
         with mock.patch("brain.atlas.time.monotonic", return_value=3), self.assertRaisesRegex(AtlasCapacityError, "parse time budget"):
             _java_entities("repo", "A.java", "blob", "module", "class A {}", "class A {}", 2)
+        # Expiring after the brace pass is a timeout, not an entity-count failure.
+        with mock.patch("brain.atlas.time.monotonic", side_effect=[0, 3]), self.assertRaisesRegex(AtlasCapacityError, "parse time budget"):
+            _java_entities("repo", "A.java", "blob", "module", "class A {}", "class A {}", 2)
 
     def test_stack_frame_declaring_class_must_own_the_method_line(self) -> None:
         source = """package demo;

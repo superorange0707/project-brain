@@ -25,7 +25,7 @@ directories can still be searched.
 
 ## 2. Installation
 
-macOS, Windows, Linux and Python distributions are at **v1.0.17**.
+macOS, Windows, Linux and Python distributions are at **v1.0.18**.
 Use the platform-specific commands below.
 
 ### Homebrew (recommended on macOS)
@@ -48,8 +48,8 @@ toolchain. Homebrew maps `superorange0707/tap` to the separate
 ### Linux installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.17/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.17
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.18/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.18
 ```
 
 This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
@@ -58,8 +58,8 @@ adjacent executables in `~/.local/bin` without changing Brain workspace state.
 ### Standalone macOS/Linux archive
 
 Use the verified
-[v1.0.17 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.17)
-or [v1.0.17 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.17)
+[v1.0.18 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.18)
+or [v1.0.18 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.18)
 for the matching arm64/amd64 platform. Keep `brain`,
 `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the same directory on
 `PATH`.
@@ -70,9 +70,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.17 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.18 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.17
+.\scripts\install-project-brain.ps1 -Version 1.0.18
 brain.exe --version
 ```
 
@@ -90,7 +90,7 @@ For a ZIP already downloaded in a browser or transferred from another machine,
 put its published `SHA256SUMS.txt` in the same directory and run the same script:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.17-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.18-windows-amd64.zip"
 ```
 
 The version is read from the official filename. This path performs no network
@@ -106,14 +106,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.17-windows-amd64.zip` and the published
+Download `project-brain-v1.0.18-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.17-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.17-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.18-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.18-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -136,7 +136,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.17"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.18"
 ```
 
 Upgrade later with:
@@ -148,7 +148,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.17"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.18"
 ```
 
 ### From a source checkout
@@ -214,9 +214,10 @@ Local-ref status probes share a five-second budget; a slow/unreachable repositor
 is labelled unverified rather than falsely current. This status check does not
 fetch remote code.
 
-Golden evaluation now includes `candidate_file_recall_at_limit` and
-`hydrated_file_recall_at_limit`. The latter counts verified source regions before
-context-byte trimming; neither metric alone establishes final AI-answer quality.
+Golden evaluation distinguishes `candidate_file_recall_at_limit`,
+`hydrated_file_recall_at_limit`, and `emitted_file_recall_at_limit`. The last counts
+source blocks actually included after context-byte trimming; files found but
+omitted are not credited. None alone establishes final AI-answer quality.
 Use local labelled tickets for enterprise accuracy and timing measurements.
 
 ## 3. Create a Brain workspace
@@ -1019,6 +1020,46 @@ even when the bounded request-history view rolls forward.
 After installing a build containing this change, update an existing M365 Agent's
 instructions with `brain agent-kit m365 --json` so it no longer treats four waves
 as a lifetime limit. No new Agent, ticket, model pack or Semantic rebuild is needed.
+
+### Long tickets and fresh AI conversations
+
+Valid v5 follow-ups send deltas rather than periodically repeating earlier source.
+Explicit checkpoints and missing/mismatched context IDs still trigger recovery.
+Keep the newest `base_context_id`; splitting a clipboard message into parts does
+not reduce the AI conversation's accumulated context.
+
+The UI may preview an early checkpoint while retrieval continues. The final
+copyable result does not assume you sent that preview. Choose **Use continuation**
+only if you already sent the matching early checkpoint to this conversation.
+
+If the chat becomes unwieldy, keep the same Brain ticket and choose **Prepare
+new-chat handover** in Continue with AI, or run:
+
+```bash
+brain resume ABC-1234
+# Optional: carry decisions and unknowns that exist only in the old chat.
+brain resume ABC-1234 --notes-file handover-notes.txt --no-copy
+```
+
+Send `generated/handoffs/ABC-1234/resume.md` to a fresh AI conversation. This is a
+bounded, non-replacing handover: it keeps the pinned generation and stable IDs,
+includes a small hash-verified source working set, and lists retained evidence
+references. The AI must request omitted decision-critical source through `files`;
+a reference or coverage label is not proof that the new conversation has read it.
+No retrieval wave, refresh, model reinstall or index rebuild is performed.
+
+The handover includes the request contract supported by that ticket. Source-only
+legacy tickets keep their supported legacy request form; Atlas-backed legacy
+contexts retain their original IDs when continuing with v5. Corrupt identities
+still fail validation rather than silently switching to the newest source.
+Whole-response JSON code fences are accepted as well as raw JSON and YAML.
+
+Claude/clipboard and M365 both export to `generated/handoffs/<TICKET>/`; `current.md`
+is the latest prepared handoff. `.runs/<TICKET>/` retains internal history and
+clipboard transport parts. Paths are relative to the active `brain.toml`, unless
+overridden there. Follow-up CLI/UI operations inherit the ticket's last delivery
+target unless you explicitly select another. The UI's prepared-byte count is not
+the AI provider's context-window usage: Brain cannot observe chat-only messages.
 
 ### `INVESTIGATION_REQUEST` v5 format
 

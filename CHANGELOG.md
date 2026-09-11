@@ -2,24 +2,45 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.18] - 2026-09-11
+
+- Avoid repeated whole-file and definition scans while building Atlas call
+  relationships. Preserve entity/edge identities and bounded parsing; report
+  the failing file and parsing limit in UI/CLI, with an explicit refresh retry
+  for timeouts. Failed builds retain the previously published generation.
+- Improve implementation ranking for questions with several matching clues.
+  Reduce repeated search processes across large workspaces and skip unnecessary
+  model startup for already-requested evidence. These retrieval changes do not
+  require a refresh, index rebuild, model reinstall, or ticket reset.
+- Keep matching branches in large files available through source-window
+  selection. Preserve bounded, distinct source clues for candidate reranking
+  instead of replacing them with symbol names.
+- Rank existing Repo-card vectors globally before limiting Semantic source
+  searches, so natural-language questions can reach repositories outside the
+  initial shortlist. Reuse existing cache/shard vectors without re-embedding
+  and report incomplete routing explicitly; ticket generation pins are preserved.
+- Give Precision bounded, verified source previews for candidates that only
+  carried navigation labels. Reuse those reads for final evidence and leave
+  explicitly requested paths protected from optional model ranking.
+- Retain already-verified source when optional reranking crosses the query
+  time budget. Defer further optional reads without discarding buffered evidence
+  or bypassing source-selection and context-size limits.
+- Keep handoffs under each ticket's generated folder for both chat targets.
+  Add a new-conversation handover without resetting evidence or generation pins,
+  and preserve the selected delivery target when reopening a ticket.
+- Accept complete Markdown-fenced JSON requests, preserve supported mixed
+  legacy/v5 lineage, and keep valid v5 follow-ups incremental. Showing an early
+  checkpoint no longer assumes it has already been sent to the chat AI.
+- Separate candidate, verified-source and delivered-evidence evaluation metrics;
+  documentation and response formatting alone do not establish source correctness.
+- Preserve existing Atlas/Semantic schemas, model packs, indexes, caches and
+  ticket sessions. No migration or refresh is required solely for this upgrade;
+  retry a previously failed refresh through the normal supported path.
+
 ## [1.0.17] - 2026-09-07
 
-- Ship the complete-source evidence changes from the unpublished v1.0.16 tag.
-  Preserve both earlier unpublished tags rather than changing their source.
-- Make the packaged UI smoke test await every async assertion and signal
-  completion explicitly. Drive toast timers without real animation delays;
-  retain bounded JavaScript execution and an independent completion watchdog.
-- Isolate refresh-job coordination from unrelated live capability probes in
-  its test. Release the synthetic worker even after failed assertions and
-  retain running-state, overlap rejection and progress-sanitization checks.
-- No runtime retrieval, generation, schema, model-input or migration changes
-  beyond the already-reviewed complete-source evidence patch.
-
-## [1.0.16] - 2026-09-07 (unpublished)
-
-- Preserve the unpublished v1.0.15 tag. Native Windows CI caught a rooted-path
-  validation gap before publication; reject leading-slash paths independently
-  of the host's path semantics, with a portable regression on all platforms.
+- Make full-file evidence retrieval available on macOS, Windows and Linux,
+  with consistent repository-relative path validation.
 - Add explicit protocol-v5 `files` requests for complete known source files or
   exact line ranges. Read the ticket's immutable source generation directly;
   file-only requests do not repeat optional discovery or model inference.
