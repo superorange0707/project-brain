@@ -319,6 +319,38 @@ class SemanticRobustnessTest(unittest.TestCase):
             runtime.embed(["card"], dimension=2)
         response.__enter__.return_value.read.assert_called_once_with(33)
 
+    def test_runtime_http_errors_are_bounded_closed_and_do_not_echo_source(self) -> None:
+        import io
+        from urllib.error import HTTPError
+
+        runtime = LlamaCppRuntime("http://127.0.0.1:9999", api_key="private-key")
+        for body, expected in (
+            (b'{"error":{"message":"Compute error."}}', "Compute error."),
+            (b'{"error":{"message":"Invalid input batch."}}', "Invalid input batch."),
+            (b'{"error":{"message":"private-source private-key"}}', "details withheld"),
+            (b"private-source" * 1000, "details withheld"),
+            (b'{"error":null}', "details withheld"),
+            (b"[]", "details withheld"),
+        ):
+            with self.subTest(expected=expected, size=len(body)):
+                stream = io.BytesIO(body)
+                error = HTTPError(runtime.endpoint + "/rerank", 500, "Internal Server Error", {}, stream)
+                with mock.patch.object(stream, "read", wraps=stream.read) as read, mock.patch.object(runtime, "_open", side_effect=error), self.assertRaises(HTTPError) as caught:
+                    runtime.rerank("private-source", ["private-source"])
+                read.assert_called_once_with(4097)
+                self.assertEqual(500, caught.exception.code)
+                self.assertIn(expected, str(caught.exception))
+                self.assertNotIn("private-source", str(caught.exception))
+                self.assertNotIn("private-key", str(caught.exception))
+                self.assertTrue(stream.closed)
+
+        stream = io.BytesIO()
+        error = HTTPError(runtime.endpoint + "/rerank", 500, "Internal Server Error", {}, stream)
+        with mock.patch.object(stream, "read", side_effect=ConnectionResetError), mock.patch.object(runtime, "_open", side_effect=error), self.assertRaises(HTTPError) as caught:
+            runtime.rerank("private-source", ["private-source"])
+        self.assertIn("details withheld", str(caught.exception))
+        self.assertTrue(stream.closed)
+
     def test_semantic_shard_save_ignores_predictable_symlink_traps(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

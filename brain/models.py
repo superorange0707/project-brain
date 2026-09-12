@@ -15,7 +15,7 @@ import sys
 import tarfile
 import tempfile
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from dataclasses import dataclass
@@ -246,8 +246,27 @@ class LlamaCppRuntime:
         if len(payload) > MAX_MODEL_RUNTIME_REQUEST_BYTES:
             raise RuntimeError("local runtime request exceeds its byte limit")
         request = Request(self.endpoint + path, data=payload, method="POST", headers=self._headers())
-        with self._open(request) as response:
-            raw = response.read(MAX_MODEL_RUNTIME_RESPONSE_BYTES + 1)
+        try:
+            with self._open(request) as response:
+                raw = response.read(MAX_MODEL_RUNTIME_RESPONSE_BYTES + 1)
+        except HTTPError as error:
+            # Native errors may echo input. Expose only exact, input-free
+            # diagnostics from the pinned server; never log arbitrary bodies.
+            detail = "details withheld"
+            try:
+                with error:
+                    raw_error = error.read(4097)
+                value = json.loads(raw_error) if len(raw_error) <= 4096 else None
+                failure = value.get("error") if isinstance(value, dict) else None
+                message = failure.get("message") if isinstance(failure, dict) else None
+                if isinstance(message, str) and message in {
+                    "Compute error.", "Invalid input batch.", "Context size has been exceeded.",
+                }:
+                    detail = message
+            except (OSError, ValueError):
+                pass
+            error.msg = f"local model runtime: {detail}"
+            raise
         if len(raw) > MAX_MODEL_RUNTIME_RESPONSE_BYTES:
             raise RuntimeError("local runtime response exceeds its byte limit")
         value = json.loads(raw.decode("utf-8"))

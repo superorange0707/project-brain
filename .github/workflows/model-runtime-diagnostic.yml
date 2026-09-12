@@ -1,0 +1,55 @@
+name: Diagnose native model runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  precision:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install ".[semantic]"
+      - name: Reproduce with the immutable public Precision conformance suite
+        shell: python
+        run: |
+          import os, subprocess, tempfile
+          from pathlib import Path
+          from unittest.mock import patch
+          from brain import models
+          from brain.core import load_settings
+
+          # Isolated public inputs only. This diagnostic cannot publish a
+          # release or replace the full release qualification gates.
+          subprocess.run(["sysctl", "-n", "hw.memsize", "hw.model", "machdep.cpu.brand_string"], check=True)
+          root = Path(tempfile.mkdtemp(prefix="brain-public-runtime-diagnostic-"))
+          config = root / "brain.toml"
+          config.write_text("[project]\nname='public-runtime-diagnostic'\n", encoding="utf-8")
+          settings = load_settings(config)
+          installed = models.install_official_pack(settings, "precision")
+          original_start = models.start_managed_process
+          log_path = Path(os.environ["RUNNER_TEMP"]) / "brain-public-native.log"
+          with log_path.open("wb") as log:
+              def start(command, **kwargs):
+                  kwargs.update(stdout=log, stderr=log)
+                  return original_start(command, **kwargs)
+              try:
+                  with patch.object(models, "start_managed_process", side_effect=start):
+                      report = models.verify_pack(settings, str(installed["pack_id"]))
+                      assert report.get("verified") and report.get("conformance")
+                      print("Official public Precision conformance passed", flush=True)
+              finally:
+                  log.flush()
+                  with log_path.open("rb") as source:
+                      source.seek(max(0, log_path.stat().st_size - 16384))
+                      for line in source.read(16384).decode("utf-8", errors="replace").splitlines():
+                          if "api_key" not in line.lower():
+                              print(line, flush=True)
