@@ -1135,6 +1135,218 @@ def _compound_terms(value: str) -> list[str]:
     return [token.casefold() for token in _TOKEN.findall(expanded) if len(token) >= 3][:12]
 
 
+_ENTITY_NAME_QUERY = re.compile(
+    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:#[A-Za-z_$][A-Za-z0-9_$]*)?"
+)
+
+
+def _qualified_symbol_queries(values: Iterable[object]) -> list[str]:
+    return list(dict.fromkeys(
+        value for kind, value in _bounded_anchor_queries(values)
+        if kind == "symbol" and _ENTITY_NAME_QUERY.fullmatch(value) and re.search(r"[.#]", value)
+    ))[:MAX_EXACT_ANCHOR_QUERIES]
+
+
+def _python_module_entities(
+    connection: Any, generation: AtlasGenerationRef, query: str,
+) -> tuple[dict[str, list[str]], int]:
+    """Seek flat/src-layout source modules and at most eight nested source scopes.
+
+    This locates declarations, not dynamic imports or re-exported attributes.
+    """
+    parts = query.replace("#", ".").split(".")
+    splits = range(max(1, len(parts) - MAX_FLOW_BRANCH), len(parts))
+    filenames = list(dict.fromkeys([*(parts[split - 1] + ".py" for split in splits), "__init__.py"]))
+    # Most Java-qualified queries have no corresponding Python source at all.
+    # Avoid setting up nested scope joins until the existing file index matches.
+    if connection.execute(
+        "SELECT 1 FROM atlas_entities f INDEXED BY atlas_entities_name "
+        "CROSS JOIN generation_entities g ON g.entity_id=f.entity_id AND g.generation=? "
+        f"WHERE f.simple_name IN ({','.join('?' for _ in filenames)}) "
+        "AND f.kind='file' AND f.language='python' LIMIT 1",
+        (generation.generation, *filenames),
+    ).fetchone() is None:
+        return {}, 1
+    statements, parameters = [], []
+    for split in splits:
+        module, scope = "/".join(parts[:split]), parts[split:]
+        parents = [f"e{number}.entity_id" for number in range(len(scope) - 1)]
+        columns = [f"e{len(scope) - 1}.entity_id", "f.entity_id", *parents,
+                   *(["NULL"] * (MAX_FLOW_BRANCH - 1 - len(parents)))]
+        sql = (
+            "SELECT " + ",".join(columns) + " FROM atlas_entities f INDEXED BY atlas_entities_name "
+            "CROSS JOIN generation_entities fg ON fg.entity_id=f.entity_id AND fg.generation=? "
+        )
+        parameters.append(generation.generation)
+        for number, name in enumerate(scope):
+            sql += (
+                f"CROSS JOIN atlas_entities e{number} INDEXED BY atlas_entities_repo_path "
+                f"ON e{number}.repo=f.repo AND e{number}.path=f.path AND e{number}.blob_sha=f.blob_sha "
+                f"AND e{number}.simple_name=? "
+                + (f"AND e{number}.parent_entity_id=e{number - 1}.entity_id " if number else "AND e0.parent_entity_id IS NULL ")
+                + f"CROSS JOIN generation_entities g{number} ON g{number}.entity_id=e{number}.entity_id "
+                f"AND g{number}.generation=fg.generation "
+            )
+            parameters.append(name)
+            if number < len(scope) - 1:
+                sql += f"AND e{number}.kind IN ('class','test') AND e{number}.signature LIKE 'class %' "
+        sql += (
+            "WHERE f.kind='file' AND f.language='python' AND f.simple_name IN (?,?) "
+            "AND f.path IN (?,?,?,?) "
+            f"ORDER BY e{len(scope) - 1}.qualified_name,e{len(scope) - 1}.entity_id LIMIT ?"
+        )
+        parameters.extend((parts[split - 1] + ".py", "__init__.py", module + ".py", "src/" + module + ".py",
+                           module + "/__init__.py", "src/" + module + "/__init__.py", MAX_FLOW_BRANCH))
+        statements.append("SELECT * FROM (" + sql + ")")
+    if not statements:
+        return {}, 1
+    return {str(row[0]): [str(value) for value in row[1:] if value is not None]
+            for row in connection.execute(" UNION ALL ".join(statements) + " LIMIT ?",
+                                          (*parameters, MAX_ANCHOR_CANDIDATES))}, 2
+
+
+def _entity_name_anchor_rows(
+    connection: Any, generation: AtlasGenerationRef, names: list[str],
+) -> tuple[list[tuple[Any, ...]], int, bool]:
+    """Recover registered anchors omitted by the legacy bounded term projection."""
+    hierarchy = generation.component("hierarchy")
+    if not names:
+        return [], 0, False
+    if hierarchy.get("status") != "ready" or hierarchy.get("schema_version") != ATLAS_SCHEMA_VERSION:
+        return [], 0, True
+    identifiers: dict[str, None] = {}
+    owners: dict[str, str] = {}
+    package_rows: dict[str, tuple[Any, ...]] = {}
+    python_owners: dict[str, list[str]] = {}
+    operations = 0
+    for query in names[:MAX_EXACT_ANCHOR_QUERIES]:
+        if re.search(r"[.#]", query):
+            found, work = _python_module_entities(connection, generation, query)
+            python_owners.update(found)
+            operations += work
+            if len(python_owners) >= MAX_ANCHOR_CANDIDATES:
+                break
+    identifiers.update((key, None) for key in python_owners)
+    for query, as_type in (
+        (query, as_type) for query in names[:MAX_EXACT_ANCHOR_QUERIES]
+        for as_type in ((False, True) if "." in query and "#" not in query else (False,))
+    ):
+        parts = query.replace("#", ".").split(".")
+        name = parts[-1]
+        owner = parts[-2] if len(parts) > 1 and not as_type else None
+        package = ".".join(parts[:-1] if as_type else parts[:-2])
+        parameters: tuple[object, ...] = ()
+        if package:
+            # Start with the declared package, never a guessed directory or a workspace scan.
+            declaring_entity = "p" if owner else "e"
+            sql = (
+                "SELECT e.entity_id,e.parent_entity_id,"
+                "a.anchor_id,a.kind,a.value,a.normalized,a.repo,a.module_id,a.entity_id,a.path,a.line,"
+                "a.blob_sha,a.confidence,a.method,a.provenance_json,a.fingerprint "
+                "FROM atlas_runtime_anchors a INDEXED BY atlas_runtime_anchor_lookup "
+                "CROSS JOIN generation_runtime_anchors ga ON ga.anchor_id=a.anchor_id "
+                "CROSS JOIN generation_intelligence_files f ON f.generation=ga.generation AND f.repo=a.repo "
+                "AND f.path=a.path AND f.blob_sha=a.blob_sha AND f.schema_version=? "
+                f"CROSS JOIN atlas_entities {declaring_entity} INDEXED BY atlas_entities_repo_path "
+                f"ON {declaring_entity}.repo=a.repo AND {declaring_entity}.path=a.path "
+                f"AND {declaring_entity}.blob_sha=a.blob_sha "
+            )
+            parameters += (GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION,)
+        elif owner:
+            sql = "SELECT e.entity_id,e.parent_entity_id FROM atlas_entities p INDEXED BY atlas_entities_name "
+        else:
+            sql = "SELECT e.entity_id,e.parent_entity_id FROM atlas_entities e INDEXED BY atlas_entities_name "
+        if owner:
+            sql += (
+                "CROSS JOIN generation_entities pg ON pg.entity_id=p.entity_id AND pg.generation=? "
+                "CROSS JOIN atlas_entities e INDEXED BY atlas_entities_repo_path ON e.repo=p.repo "
+                "AND e.path=p.path AND e.parent_entity_id=p.entity_id "
+            )
+            parameters += (generation.generation,)
+        sql += (
+            "CROSS JOIN generation_entities g ON g.entity_id=e.entity_id "
+            "WHERE e.simple_name=? AND g.generation=? "
+        )
+        parameters += (name, generation.generation)
+        if owner:
+            sql += "AND p.simple_name=? AND p.kind IN ('class','interface','type','test') "
+            parameters += (owner,)
+        if package:
+            sql += "AND e.language='java' AND a.normalized=? AND a.kind='package' AND a.value=? AND ga.generation=? "
+            parameters += (_normalize(package), package, generation.generation)
+            # Java's legacy hierarchy omits outer-class links. Do not claim a nested
+            # class is a package-level type (including ambiguous same-line ranges).
+            sql += (
+                "AND NOT EXISTS (SELECT 1 FROM atlas_entities enclosing INDEXED BY atlas_entities_repo_path "
+                "CROSS JOIN generation_entities eg ON eg.entity_id=enclosing.entity_id AND eg.generation=g.generation "
+                f"WHERE enclosing.repo={declaring_entity}.repo AND enclosing.path={declaring_entity}.path "
+                f"AND enclosing.blob_sha={declaring_entity}.blob_sha AND enclosing.entity_id!={declaring_entity}.entity_id "
+                "AND enclosing.kind IN ('class','interface','type','test') AND enclosing.parent_entity_id IS NULL "
+                f"AND enclosing.line_start<={declaring_entity}.line_start AND enclosing.line_end>={declaring_entity}.line_end) "
+            )
+        if as_type:
+            sql += "AND e.kind IN ('class','interface','type','test') AND e.parent_entity_id IS NULL "
+        operations += 1
+        rows = connection.execute(sql + "ORDER BY e.qualified_name,e.entity_id LIMIT ?",
+                                  (*parameters, MAX_FLOW_BRANCH)).fetchall()
+        identifiers.update((str(row[0]), None) for row in rows)
+        if owner:
+            owners.update((str(row[0]), str(row[1])) for row in rows)
+        if package:
+            package_rows.update((str(row[0]), tuple(row[2:])) for row in rows)
+        if len(identifiers) >= MAX_ANCHOR_CANDIDATES:
+            break
+    selected = list(identifiers)[:MAX_ANCHOR_CANDIDATES]
+    if not selected:
+        return [], operations, False
+    operations += 1
+    required = list(dict.fromkeys([
+        *selected, *(owners[key] for key in selected if key in owners),
+        *(parent for key in selected for parent in python_owners.get(key, [])),
+    ]))
+    entities = _valid_generation_entities(connection, generation.generation, required)
+    if set(entities) != set(required):
+        return [], operations, True
+    for entity_id in selected:
+        entity = entities[entity_id]
+        for parent_id in ([owners[entity_id]] if entity_id in owners else []) + python_owners.get(entity_id, []):
+            parent = entities[parent_id]
+            if any(entity[key] != parent[key] for key in ("repo", "module_id", "path", "blob_sha")) or not (
+                parent["line_start"] <= entity["line_start"] <= entity["line_end"] <= parent["line_end"]
+            ):
+                return [], operations, True
+        if entity_id in package_rows:
+            row = package_rows[entity_id]
+            if _validated_runtime_anchor_row(row, method="exact", score=1.0) is None or (
+                row[4], row[5], row[7], row[9],
+            ) != (entity["repo"], entity["module_id"], entity["path"], entity["blob_sha"]):
+                return [], operations, True
+    entities = {key: entities[key] for key in selected}
+    normalized = list(dict.fromkeys(_normalize(item["qualified_name"]) for item in entities.values()))
+    operations += 1
+    rows = connection.execute(
+        "SELECT a.anchor_id,a.kind,a.value,a.normalized,a.repo,a.module_id,a.entity_id,a.path,a.line,"
+        "a.blob_sha,a.confidence,a.method,a.provenance_json,a.fingerprint "
+        "FROM atlas_runtime_anchors a INDEXED BY atlas_runtime_anchor_lookup "
+        "CROSS JOIN generation_runtime_anchors g ON g.anchor_id=a.anchor_id "
+        "JOIN generation_intelligence_files f ON f.generation=g.generation AND f.repo=a.repo "
+        "AND f.path=a.path AND f.blob_sha=a.blob_sha AND f.schema_version=? "
+        f"WHERE a.normalized IN ({','.join('?' for _ in normalized)}) AND a.kind='symbol' "
+        "AND a.method='atlas_entity_exact' AND g.generation=? "
+        f"AND a.entity_id IN ({','.join('?' for _ in selected)}) "
+        "ORDER BY a.repo,a.path,a.line,a.anchor_id LIMIT ?",
+        (GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION, *normalized, generation.generation,
+         *selected, MAX_ANCHOR_CANDIDATES),
+    ).fetchall()
+    if any((row[2], row[4], row[5], row[7], row[8], row[9]) != (
+        entities[str(row[6])]["qualified_name"], entities[str(row[6])]["repo"],
+        entities[str(row[6])]["module_id"], entities[str(row[6])]["path"],
+        entities[str(row[6])]["line_start"], entities[str(row[6])]["blob_sha"],
+    ) for row in rows):
+        return [], operations, True
+    return rows, operations, False
+
+
 def resolve_runtime_anchors(
     settings: Settings,
     generation: AtlasGenerationRef,
@@ -1165,13 +1377,21 @@ def resolve_runtime_anchors(
                 "schema_version": RUNTIME_ANCHOR_SCHEMA_VERSION,
                 "compatibility_identity": _component_identity(generation, "runtime_anchors", RUNTIME_ANCHOR_SCHEMA_VERSION),
                 "candidates": [], "inputs": [], "cache_hit": False}
+    entity_specs = list(dict.fromkeys(
+        value for kind, value in query_inputs if kind in (None, "symbol")
+        and _ENTITY_NAME_QUERY.fullmatch(value)
+        and (kind == "symbol" or not re.search(r"[.#]", value))
+    ))[:MAX_EXACT_ANCHOR_QUERIES]
+    qualified_specs = [value for value in entity_specs if re.search(r"[.#]", value)]
+    # Explicit qualified symbols must not broaden to unrelated same-name methods.
+    broad_inputs = [(kind, value) for kind, value in query_inputs if not (kind == "symbol" and value in qualified_specs)]
     exact_specs = list(dict.fromkeys(
-        (_normalize(value), kind) for kind, value in query_inputs if _normalize(value)
+        (_normalize(value), kind) for kind, value in broad_inputs if _normalize(value)
     ))[:MAX_EXACT_ANCHOR_QUERIES]
     term_specs = list(dict.fromkeys(
         # The published v1 projection tokenizes normalized (casefolded) values.
         # Seek those exact stored terms first, then retain compound fallbacks.
-        (term, kind) for normalize in (True, False) for kind, value in query_inputs
+        (term, kind) for normalize in (True, False) for kind, value in broad_inputs
         for term in _compound_terms(_normalize(value) if normalize else value)
     ))[:MAX_COMPOUND_ANCHOR_QUERIES]
     path_inputs = list(dict.fromkeys(
@@ -1185,7 +1405,7 @@ def resolve_runtime_anchors(
     compatibility = _component_identity(generation, "runtime_anchors", RUNTIME_ANCHOR_SCHEMA_VERSION)
     cache_key = _hash(
         "runtime-anchors", compatibility, limit,
-        json.dumps(exact_specs), json.dumps(term_specs), json.dumps(path_inputs),
+        json.dumps(exact_specs), json.dumps(term_specs), json.dumps(path_inputs), json.dumps(entity_specs),
     )
     seal_key = (str(settings.state_dir.resolve()), generation.generation, cache_key)
     candidates: dict[str, dict[str, Any]] = {}
@@ -1291,8 +1511,19 @@ def resolve_runtime_anchors(
                 ).fetchall()
                 rows_by_id = {str(row[0]): row for row in rows}
                 score_by_method = {
-                    "exact": 1.0, "compound": .72, "lineage_alias": .86, "path_fallback": .8,
+                    "exact": 1.0, "entity_name": 1.0, "compound": .72, "lineage_alias": .86, "path_fallback": .8,
                 }
+                entity_ids = [str(item.get("entity_id")) for item in cached_candidates if item.get("method") == "entity_name"]
+                hierarchy = generation.component("hierarchy")
+                entity_ready = hierarchy.get("status") == "ready" and hierarchy.get("schema_version") == ATLAS_SCHEMA_VERSION
+                database_operations += bool(entity_ids) and entity_ready
+                entities = _valid_generation_entities(connection, generation.generation, entity_ids) if entity_ready else {}
+                qualified_ids: set[str] = set()
+                if qualified_specs and entity_ids:
+                    qualified_rows, operations, poisoned = _entity_name_anchor_rows(connection, generation, qualified_specs)
+                    database_operations += operations
+                    qualified_ids = {str(row[6]) for row in qualified_rows}
+                    poisoned_row |= poisoned
                 canonical_candidates: list[dict[str, Any]] = []
                 for cached_item in cached_candidates:
                     method = str(cached_item.get("method") or "")
@@ -1306,9 +1537,20 @@ def resolve_runtime_anchors(
                     if canonical_item is None:
                         valid = False
                         break
+                    if method == "entity_name":
+                        entity = entities.get(str(canonical_item.get("entity_id")))
+                        if entity is None or not (
+                            entity["simple_name"] in entity_specs or entity["entity_id"] in qualified_ids
+                        ) or (
+                            canonical_item["value"], canonical_item["repo"], canonical_item["module_id"],
+                            canonical_item["path"], canonical_item["line"],
+                        ) != (entity["qualified_name"], entity["repo"], entity["module_id"], entity["path"], entity["line_start"]):
+                            valid = False
+                            poisoned_row = True
+                            break
                     canonical_candidates.append(canonical_item)
                 valid = valid and canonical_candidates == cached_candidates
-            if valid:
+            if valid and not poisoned_row:
                 if len(_ANCHOR_CACHE_SEALS) >= 10_000:
                     _ANCHOR_CACHE_SEALS.clear()
                 _ANCHOR_CACHE_SEALS[seal_key] = payload_hash
@@ -1421,9 +1663,19 @@ def resolve_runtime_anchors(
                 previous = candidates.get(identifier)
                 if previous is None or item["confidence"] > previous["confidence"]:
                     candidates[identifier] = item
-        if poisoned_row:
+        unresolved_names = [name for name in entity_specs if not any(
+            item.get("kind") == "symbol" and item.get("entity_id")
+            and item["value"].rsplit(":", 1)[-1] == name for item in candidates.values()
+        )]
+        entity_rows, entity_operations, poisoned_entity = _entity_name_anchor_rows(connection, generation, unresolved_names)
+        database_operations += entity_operations
+        for row in entity_rows:
+            item = candidate_from_row(row, "entity_name", 1.0)
+            if item is not None:
+                candidates[str(item["identity"])] = item
+        if poisoned_row or poisoned_entity:
             return {
-                "status": "degraded", "reason": "runtime-anchor content identity is incompatible",
+                "status": "degraded", "reason": "runtime-anchor content identity or entity membership is incompatible",
                 "generation": generation.generation, "schema_version": RUNTIME_ANCHOR_SCHEMA_VERSION,
                 "compatibility_identity": compatibility, "candidates": [], "inputs": inputs,
                 "cache_hit": False, "database_operations": database_operations,
@@ -2799,10 +3051,18 @@ def build_ticket_runtime(
         and (str(item.get("kind") or ""), _normalize(item.get("value"))) in typed_requests
         and not is_test_path(str(item.get("path") or ""))
     ]
-    seeds = list(dict.fromkeys(typed_seeds or [
+    qualified_symbol_request = bool(_qualified_symbol_queries(request.get("anchors") or []))
+    symbol_seeds = [
+        str(item["entity_id"]) for item in anchors
+        if item.get("entity_id") and item.get("method") == "entity_name"
+        and not is_test_path(str(item.get("path") or ""))
+    ]
+    # Objective terms remain useful navigation, but cannot override an explicitly
+    # qualified symbol, even when source verification also confirms the decoys exist.
+    seeds = list(dict.fromkeys(typed_seeds or (symbol_seeds if qualified_symbol_request else [
         str(item.get("entity_id")) for item in anchors
         if item.get("entity_id") and not is_test_path(str(item.get("path") or ""))
-    ]))
+    ])))
     execution_input = _hash("execution-input", *seeds)
     execution_compatibility = _component_identity(generation, "typed_graph", EXECUTION_FLOW_SCHEMA_VERSION)
     # Flow subsets change with the current exact-evidence verification state. Rebuild the

@@ -2,6 +2,21 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.24] - 2026-09-12
+
+- Resolve deep-path method anchors from registered Atlas entities, including
+  Java class/package-qualified declarations and Python flat/src-layout module
+  declarations. Validate scope and ownership instead of broadening to unrelated
+  same-named methods; dynamic Python imports and re-exports are not inferred.
+- Deliver qualified-symbol source through the existing verifier and skip
+  unrelated broad discovery/model work for exact-symbol-only requests. Mixed
+  investigations retain their broader retrieval paths.
+- Preserve generation pins, validate warm-cache ownership, and isolate older
+  negative lookup caches. Regression coverage includes actual protocol-v5
+  handoffs and bounded lookup work at 10/50/100 repositories.
+- No Atlas/Semantic schema, embedding-input, model-pack or Agent Kit changes.
+  No refresh, re-embedding or workspace reset is required solely for this patch.
+
 ## [1.0.23] - 2026-09-12
 
 - Resolve camelCase method anchors against the existing normalized Atlas term

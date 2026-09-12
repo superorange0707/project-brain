@@ -1995,20 +1995,23 @@ def _request_body(text: str) -> dict[str, Any]:
                 anchors.append({"kind": kind, "value": value})
             request["anchors"] = anchors
         from .retrieval.planner import objective_terms
+        from .investigation import _qualified_symbol_queries
 
         exact_anchor_terms = [
             str(item.get("value") or "")
             for item in request.get("anchors") or [] if isinstance(item, dict) and item.get("value")
         ] if version == 5 else []
+        qualified_symbols = set(_qualified_symbol_queries(request.get("anchors") or []))
+        qualified_parts = {term.casefold() for value in qualified_symbols for term in objective_terms(value, limit=8)}
         derived_anchor_terms = [
             term
-            for value in exact_anchor_terms
+            for value in exact_anchor_terms if value not in qualified_symbols
             for term in objective_terms(value, limit=4)
             if term != value
         ]
         resolve_terms = [
             *exact_anchor_terms, *request["resolve"], *derived_anchor_terms,
-            *objective_terms(objective, limit=8),
+            *(term for term in objective_terms(objective, limit=8) if term.casefold() not in qualified_parts),
         ]
         requested_files = request.get("files", []) if version == 5 else []
         if not isinstance(requested_files, list) or len(requested_files) > MAX_REQUEST_ITEMS:
@@ -2550,6 +2553,9 @@ def retrieve_context(
             entity_limit=settings.pre_rerank_candidate_limit,
         )
         atlas_route_ms = (time.perf_counter() - atlas_started) * 1000
+        exact_symbol_scope = bool(atlas_route.get("qualified_symbols_only")) and not any(
+            (request.get("coverage") or {}).get(key) == "required" for key in ("tests", "configuration", "history")
+        ) and request.get("mode") != "test_surface"
         trace.add_stage("atlas_route_ms", atlas_route_ms)
         first_repo_ms = (time.perf_counter() - started) * 1000 if atlas_route.get("repos") else None
         first_entity_ms = (time.perf_counter() - started) * 1000 if atlas_route.get("candidates") else None
@@ -2578,12 +2584,35 @@ def retrieve_context(
             value: index for index, value in enumerate(dict.fromkeys(item.value.casefold() for item in search_operations), 1)
         }
         lexical_started = time.perf_counter()
+        from .investigation import _qualified_symbol_queries, resolve_runtime_anchors
+
+        qualified_queries = set(_qualified_symbol_queries(request.get("anchors") or []))
         for operation in search_operations:
             if time_budget_exhausted():
                 break
             repos = list(operation.repos) or atlas_repo_scope[: settings.initial_repo_limit]
-            hits = search(settings, operation.value, repos, fixed=True)
-            if not hits:
+            qualified_query = operation.value in qualified_queries and bundle.atlas_generation is not None
+            if qualified_query:
+                hits = []
+                if trace.try_reserve_backend():
+                    query_started = time.perf_counter()
+                    try:
+                        resolved = resolve_runtime_anchors(settings, bundle.atlas_generation, [
+                            {"kind": "symbol", "value": operation.value},
+                        ], use_cache="generation_cache" not in settings.evaluation_ablations)
+                        hits = [
+                            SearchHit(item["repo"], item["path"], item["line"], item["value"],
+                                      "definition", 100, ["generation-validated qualified symbol"])
+                            for item in resolved.get("candidates") or []
+                            if not operation.repos or item["repo"] in operation.repos
+                        ]
+                        if resolved.get("status") != "ready":
+                            bundle.warnings.append("Qualified symbol resolution is unavailable for the pinned Atlas generation.")
+                    finally:
+                        trace.complete_reserved_backend("qualified_symbol", (time.perf_counter() - query_started) * 1000)
+            else:
+                hits = search(settings, operation.value, repos, fixed=True)
+            if not hits and not qualified_query:
                 try:
                     hits = search(settings, operation.value, repos)
                 except BrainError:
@@ -2596,7 +2625,7 @@ def retrieve_context(
             def source_match() -> bool:
                 return any(
                     not _is_documentation_path(hit.path)
-                    and (symbol_name is None or _symbol_declaration(symbol_name, path=hit.path).search(hit.text))
+                    and (qualified_query or symbol_name is None or _symbol_declaration(symbol_name, path=hit.path).search(hit.text))
                     for hit in hits
                 )
 
@@ -2609,7 +2638,7 @@ def retrieve_context(
                 ) else "lexical_documentation_only"
                 if reason not in trace.fallback_reasons:
                     trace.fallback_reasons.append(reason)
-            if not operation.repos:
+            if not operation.repos and not qualified_query:
                 for scope in (atlas_repo_scope[:settings.widen_repo_limit], [repo.name for repo in settings.repositories]):
                     pending = [name for name in scope if name not in searched_repos]
                     if source_match() or time_budget_exhausted() or trace.physical_budget_remaining <= 0:
@@ -2640,7 +2669,7 @@ def retrieve_context(
             from .editions import current_edition
 
             edition = current_edition(settings)
-            if edition in {"semantic", "precision"}:
+            if edition in {"semantic", "precision"} and not exact_symbol_scope:
                 if time_budget_exhausted():
                     from .semantic import semantic_component_available
 
@@ -2893,7 +2922,7 @@ def retrieve_context(
         try:
             from .editions import current_edition
 
-            if current_edition(settings) == "precision" and not time_budget_exhausted():
+            if current_edition(settings) == "precision" and not exact_symbol_scope and not time_budget_exhausted():
                 from .models import rerank_candidates
 
                 requested = [name for name in ("searches", "paths", "symbols", "files", "history") if request.get(name)]
@@ -3018,6 +3047,8 @@ def retrieve_context(
             "semantic_repo_count": len(trace.semantic_repo_scope),
         }
         bundle.trace = trace.as_dict()
+        if exact_symbol_scope:
+            bundle.trace["qualified_symbols_only"] = True
         if file_reads:
             bundle.trace["file_reads"] = file_reads
         bundle.trace["cross_repo_relationships"] = cross_repo_relationships
@@ -5448,6 +5479,8 @@ def create_context(
             reranker_used=reranker_used,
             semantic_status=str(bundle.trace.get("semantic_status") or "unavailable"),
         )
+        if bundle.trace.get("qualified_symbols_only") and bundle.trace.get("semantic_status") == "not_requested":
+            effective_edition = "Core"  # Deliberate exact-source retrieval, not a failed Precision attempt.
         retrieval = {
             "requested_edition": requested_edition,
             "effective_edition": effective_edition,

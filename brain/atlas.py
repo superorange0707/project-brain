@@ -2086,11 +2086,25 @@ def route(
         edition = current_edition(settings)
     except OSError:
         edition = "core"
+    from .investigation import _qualified_symbol_queries, resolve_runtime_anchors
+
+    qualified_queries = _qualified_symbol_queries(request.get("anchors") or [])
+    focused_symbols = bool(qualified_queries) and all(
+        str(item.get("query") or "") in qualified_queries for item in request.get("searches") or []
+    ) and not any(request.get(key) for key in ("paths", "symbols", "history", "resolve", "runtime_facts", "hypotheses")) and all(
+        isinstance(item, dict) and item.get("kind") == "symbol" and item.get("value") in qualified_queries
+        for item in request.get("anchors") or []
+    )
+    resolved = resolve_runtime_anchors(
+        settings, generation, [{"kind": "symbol", "value": value} for value in qualified_queries],
+        use_cache="generation_cache" not in ablation,
+    ) if qualified_queries and "anchors" not in ablation else {}
+    qualified_ids = [str(item["entity_id"]) for item in resolved.get("candidates") or [] if item.get("entity_id")]
     connection = connect(settings)
     now = datetime.now(UTC).isoformat()
     try:
         prefetch_ids: set[str] = set()
-        if "prefetch" not in ablation:
+        if "prefetch" not in ablation and not focused_symbols:
             from .investigation import _valid_prefetch_envelope
 
             prefetch = request.get("_prefetch") or {}
@@ -2114,6 +2128,8 @@ def route(
             repo_limit=repo_limit,
             entity_limit=entity_limit,
         )
+        if qualified_queries:
+            key = _hash("qualified-route-v1", key, json.dumps(qualified_queries), focused_symbols, resolved.get("status"), *qualified_ids)
         seal_key = (str(settings.state_dir.resolve()), generation.generation, key)
         cached = None if "generation_cache" in ablation or not _verify_registered_cache else connection.execute(
             "SELECT c.payload_json,c.payload_hash,r.payload_hash,r.schema_version,r.compatibility_identity,r.seal "
@@ -2179,7 +2195,7 @@ def route(
                     (generation.generation, key),
                 )
 
-        terms = _prioritized_routing_terms(objective, request)
+        terms = set() if focused_symbols else _prioritized_routing_terms(objective, request)
         explicit_repos = {
             str(repo) for section in ("searches", "paths", "symbols", "history")
             for item in request.get(section) or [] if isinstance(item, dict) for repo in item.get("repos") or []
@@ -2240,6 +2256,14 @@ def route(
         scored: list[dict[str, Any]] = []
         repo_scores: dict[str, float] = {}
         module_scores: dict[str, float] = {}
+        for entity_id, entity in _valid_generation_entities(connection, generation.generation, qualified_ids).items():
+            scored.append({
+                "entity_id": entity_id, "repo": entity["repo"], "module_id": entity["module_id"],
+                "path": entity["path"], "line": entity["line_start"], "kind": entity["kind"],
+                "score": 600.0, "found_by": ["Atlas qualified symbol"],
+            })
+            repo_scores[entity["repo"]] = repo_scores.get(entity["repo"], 0) + 600
+            module_scores[entity["module_id"]] = module_scores.get(entity["module_id"], 0) + 600
         for level, target_id, repo, module_id, entity_id, path, content, simple, qualified, kind, line, overlap in rows:
             exact = sum(1 for term in terms if term in {str(simple or "").lower(), str(qualified or "").lower()})
             score = overlap * 8 + exact * 80 + (500 if repo in explicit_repos else 0)
@@ -2313,7 +2337,7 @@ def route(
                 })
         prior_ids = list(dict.fromkeys(
             str(value) for value in (
-                () if ablation & {"investigation_memory", "historical_prior"}
+                () if focused_symbols or ablation & {"investigation_memory", "historical_prior"}
                 else request.get("_prior_entity_ids") or []
             )
         ))[:200]
@@ -2407,12 +2431,15 @@ def route(
         entities = sorted(merged.values(), key=lambda item: (-item["score"], item["repo"], item["path"], item["line"]))[:entity_limit]
         returned_entity_ids = {str(item["entity_id"]) for item in entities}
         ordered_repos = sorted(repo_scores, key=lambda repo: (-repo_scores[repo], repo))
-        ordered_repos.extend(repo for repo in sorted(generation.snapshots) if repo not in ordered_repos)
+        ordered_repos.extend(repo for repo in sorted(
+            {item["repo"] for item in scored} if focused_symbols else generation.snapshots
+        ) if repo not in ordered_repos)
         value = {
             "schema": ROUTER_SCHEMA_VERSION, "generation": generation.generation, "repos": ordered_repos[:repo_limit],
             "modules": [module for module, _ in sorted(module_scores.items(), key=lambda item: (-item[1], item[0]))[:40]],
             "entities": entities, "candidates": entities, "graph_edges": graph_routes, "cache_hit": False,
             "prefetch_reused": 0,
+            "qualified_symbols_only": focused_symbols,
             "investigation_reused": len(returned_entity_ids & reused_prior_ids),
             "evaluation_ablation": sorted(ablation),
             "routing_index": routing_index, "routing_terms": len(terms), "cards_considered": len(rows),
