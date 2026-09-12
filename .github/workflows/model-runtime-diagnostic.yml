@@ -2,6 +2,12 @@ name: Diagnose native model runtime
 
 on:
   workflow_dispatch:
+    inputs:
+      backend:
+        description: Compare automatic offload with CPU-only layer placement
+        type: choice
+        options: [auto, cpu]
+        default: auto
 
 permissions:
   contents: read
@@ -20,6 +26,8 @@ jobs:
       - run: python -m pip install ".[semantic]"
       - name: Reproduce with the immutable public Precision conformance suite
         shell: python
+        env:
+          CPU_ONLY: ${{ inputs.backend == 'cpu' }}
         run: |
           import os, subprocess, tempfile
           from pathlib import Path
@@ -43,6 +51,8 @@ jobs:
           with log_path.open("wb") as log:
               def start(command, **kwargs):
                   kwargs.update(stdout=log, stderr=log)
+                  if os.environ.get("CPU_ONLY") == "true":
+                      command = [*command, "--n-gpu-layers", "0"]
                   return original_start(command, **kwargs)
               try:
                   with patch.object(models, "start_managed_process", side_effect=start):
