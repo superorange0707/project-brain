@@ -2,7 +2,7 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.20] - 2026-09-12
+## [1.0.21] - 2026-09-12
 
 - Find method implementations beyond reference-only repositories, including
   camelCase, acronym and snake_case identifiers. Do not rank Python control

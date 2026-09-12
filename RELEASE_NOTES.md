@@ -1,4 +1,4 @@
-# Project Brain v1.0.20 — Clearer Call Paths, Less Repeated Parsing
+# Project Brain v1.0.21 — Clearer Call Paths, Less Repeated Parsing
 
 This stable patch improves implementation discovery and investigation evidence
 while preserving existing workspaces and generation-pinned tickets.
@@ -28,7 +28,7 @@ brain --version
 brain ui
 ```
 
-The version must be `brain 1.0.20`. Windows and Linux users can use the matching
+The version must be `brain 1.0.21`. Windows and Linux users can use the matching
 native release archive and the existing installer. The wheel, source
 distribution, installers and `SHA256SUMS.txt` accompany the release.
 

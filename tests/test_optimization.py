@@ -20,32 +20,34 @@ class OptimizationTests(unittest.TestCase):
         from brain import investigation
         from brain.core import create_context, start_session
 
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            repo = root / "service"
-            repo.mkdir()
-            source = '@RestController\nclass Routes {\n' + "".join(
-                f'  @GetMapping("/routes/{number}") String route{number}() {{ return "ok"; }}\n'
-                for number in range(16)
-            ) + "}\n/*" + " documentation" * 3000 + "*/\n"
-            (repo / "Routes.java").write_text(source, encoding="utf-8")
-            config = root / "brain.toml"
-            config.write_text("[project]\nname='verification-reuse'\n[graph]\nenabled=false\n"
-                              "[[repositories]]\nname='service'\npath='service'\n", encoding="utf-8")
-            settings = load_settings(config)
-            snapshot_indexes(settings)
-            start_session(settings, "VERIFY-101", "Inspect the local routes")
-            request = {"version": 5, "mode": "flow_trace", "objective": "Inspect Routes",
-                       "anchors": [{"kind": "endpoint", "value": f"/routes/{number}"} for number in range(16)],
-                       "files": [{"repo": "service", "path": "Routes.java"}]}
-            with mock.patch.object(investigation, "_java_file_intelligence", wraps=investigation._java_file_intelligence) as parsed, \
-                    mock.patch.object(investigation, "_mask_java_comments_uncached", wraps=investigation._mask_java_comments_uncached) as masked:
-                content, _, _ = create_context(settings, "VERIFY-101", json.dumps({"INVESTIGATION_REQUEST": request}))
-            for number in range(16):
-                self.assertIn(f'@GetMapping("/routes/{number}")', content)
-            self.assertEqual(1, sum(call.args[2] == "verification" for call in parsed.call_args_list))
-            self.assertEqual(2, sum(call.args[0] == source for call in masked.call_args_list))
-            self.assertIsNone(investigation._SOURCE_VERIFICATION_CACHE.get())
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=repr(newline)), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                repo = root / "service"
+                repo.mkdir()
+                source = '@RestController\nclass Routes {\n' + "".join(
+                    f'  @GetMapping("/routes/{number}") String route{number}() {{ return "ok"; }}\n'
+                    for number in range(16)
+                ) + "}\n/*" + " documentation" * 3000 + "*/\n"
+                source = source.replace("\n", newline)
+                (repo / "Routes.java").write_text(source, encoding="utf-8", newline="")
+                config = root / "brain.toml"
+                config.write_text("[project]\nname='verification-reuse'\n[graph]\nenabled=false\n"
+                                  "[[repositories]]\nname='service'\npath='service'\n", encoding="utf-8")
+                settings = load_settings(config)
+                snapshot_indexes(settings)
+                start_session(settings, "VERIFY-101", "Inspect the local routes")
+                request = {"version": 5, "mode": "flow_trace", "objective": "Inspect Routes",
+                           "anchors": [{"kind": "endpoint", "value": f"/routes/{number}"} for number in range(16)],
+                           "files": [{"repo": "service", "path": "Routes.java"}]}
+                with mock.patch.object(investigation, "_java_file_intelligence", wraps=investigation._java_file_intelligence) as parsed, \
+                        mock.patch.object(investigation, "_mask_java_comments_uncached", wraps=investigation._mask_java_comments_uncached) as masked:
+                    content, _, _ = create_context(settings, "VERIFY-101", json.dumps({"INVESTIGATION_REQUEST": request}))
+                for number in range(16):
+                    self.assertIn(f'@GetMapping("/routes/{number}")', content)
+                self.assertEqual(1, sum(call.args[2] == "verification" for call in parsed.call_args_list))
+                self.assertEqual(2, sum(call.args[0] == source for call in masked.call_args_list))
+                self.assertIsNone(investigation._SOURCE_VERIFICATION_CACHE.get())
 
     def test_verification_reuse_preserves_authority_and_source_identity(self) -> None:
         from dataclasses import replace
