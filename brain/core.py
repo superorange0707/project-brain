@@ -1490,17 +1490,22 @@ def read_source(
 
 
 def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = None) -> tuple[list[SearchHit], list[str]]:
+    from .atlas import AtlasCapacityError, _file_intelligence, symbol_call_edges
+    from .investigation import MAX_REFRESH_FILE_BYTES
     from .graph import graph_trace
 
+    if settings.atlas_generation is None and settings.atlas_generation_mode == "current":
+        from .catalog import current_generation_ref
+
+        settings = replace(settings, atlas_generation=current_generation_ref(settings))
     scope = list(repos or [])
     name = query.rsplit(".", 1)[-1]
     invocation = re.compile(rf"\b{re.escape(name)}\s*\(")
     uses = [hit for hit in search(settings, name, scope, fixed=True) if invocation.search(hit.text)]
     inbound: list[SearchHit] = []
     definitions: list[SearchHit] = []
-    declaration = re.compile(rf"\b(?:def|fn|func|function|fun|[A-Za-z_$][\w$<>, ?\[\]]+)\s+{re.escape(name)}\s*\(")
     for hit in uses:
-        if declaration.search(hit.text):
+        if _symbol_declaration(name, path=hit.path).search(hit.text):
             hit.kind = "definition"
             hit.score = 100
             definitions.append(hit)
@@ -1512,15 +1517,85 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
     graph_hits, graph_relationships = graph_trace(settings, query, graph_scope)
     relationships = graph_relationships + [f"{hit.repo}:{hit.path}:{hit.line}  CALLS  {query}" for hit in inbound]
     call_names: set[str] = set()
-    ignored = {"if", "for", "while", "switch", "catch", "return", "new", "throw", "super", "this", name}
-    for definition in definitions[:5]:
-        source = read_source(settings, definition).content
-        for match in re.finditer(r"\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(", source):
-            called = match.group(1)
-            if called.rsplit(".", 1)[-1] not in ignored:
-                call_names.add(called)
+    callee_hits: list[SearchHit] = []
+    selected = definitions[:5]
+    trace = _ACTIVE_RETRIEVAL_TRACE.get()
+    if selected and (trace is None or trace.try_reserve_backend()):
+        started = time.perf_counter()
+        try:
+            result = symbol_call_edges(
+                settings, settings.atlas_generation,
+                ((hit.repo, hit.path, hit.line) for hit in selected), name,
+            )
+            if result is None:
+                if trace is not None:
+                    trace.fallback_reasons.append("symbol_trace_exact_source_fallback")
+                # Legacy/unavailable Atlas: reuse the same bounded extractor
+                # against exact source, never infer callees from a whole file.
+                edges, targets = [], {}
+                source_settings = settings
+                if settings.atlas_generation is not None:
+                    source_settings = replace(
+                        settings, atlas_generation_mode="pinned",
+                        repositories=[replace(repo, source_sha=settings.atlas_generation.snapshots.get(repo.name))
+                                      for repo in settings.repositories],
+                    )
+                by_file: dict[tuple[str, str], list[SearchHit]] = {}
+                for hit in selected:
+                    by_file.setdefault((hit.repo, hit.path), []).append(hit)
+                for (repo, path), hits in by_file.items():
+                    if time.perf_counter() - started >= 2.0:
+                        if trace is not None:
+                            trace.fallback_reasons.append("symbol_trace_time_budget")
+                        break
+                    if trace is not None and not trace.try_reserve_backend():
+                        trace.fallback_reasons.append("symbol_trace_physical_budget")
+                        break
+                    read_started = time.perf_counter()
+                    try:
+                        evidence = read_source(source_settings, hits[0], full=True)
+                        source = evidence.verification_content or evidence.content
+                        raw = source.encode("utf-8")
+                        if trace is not None:
+                            trace.bytes_read += len(raw)
+                        if len(raw) > MAX_REFRESH_FILE_BYTES:
+                            if trace is not None:
+                                trace.fallback_reasons.append("symbol_trace_source_byte_budget")
+                            continue
+                        _, entities, _, extracted = _file_intelligence(repo, path, hashlib.sha256(raw).hexdigest(), source)
+                    except (BrainError, AtlasCapacityError, OSError):
+                        if trace is not None:
+                            trace.fallback_reasons.append("symbol_trace_source_unavailable")
+                        continue
+                    finally:
+                        if trace is not None:
+                            trace.complete_reserved_backend("symbol_trace_source", (time.perf_counter() - read_started) * 1000)
+                    owners = {item["entity_id"] for item in entities if item["simple_name"] == name
+                              and item["line_start"] in {hit.line for hit in hits}}
+                    edges.extend(item for item in extracted if item["edge_type"] == "CALLS" and item["source_id"] in owners)
+                    targets.update({item["entity_id"]: item for item in entities})
+                result = {"edges": edges[:80], "targets": targets, "truncated": len(edges) > 80}
+            if result.get("truncated") and trace is not None:
+                trace.fallback_reasons.append("symbol_trace_edge_budget")
+            for edge in result["edges"]:
+                metadata = edge["metadata"]
+                target_name = str(metadata.get("target_name") or "")
+                receiver = str(metadata.get("receiver") or "")
+                if target_name:
+                    call_names.add((receiver + "." if receiver else "") + target_name)
+                target = result["targets"].get(edge["target_id"])
+                if metadata.get("resolved") and target is not None:
+                    callee_hits.append(SearchHit(
+                        str(target["repo"]), str(target["path"]), int(target["line_start"]),
+                        str(target["signature"]), "callee candidate", 96, ["scoped static call candidate"],
+                    ))
+        finally:
+            if trace is not None:
+                trace.complete_reserved_backend("symbol_trace", (time.perf_counter() - started) * 1000)
+    elif selected and trace is not None:
+        trace.fallback_reasons.append("symbol_trace_physical_budget")
     relationships.extend(f"{query}  CALLS  {called}" for called in sorted(call_names)[:80])
-    combined = graph_hits + definitions + inbound
+    combined = graph_hits + definitions + inbound + callee_hits
     return list({(hit.repo, hit.path, hit.line, hit.kind): hit for hit in combined}.values()), relationships
 
 

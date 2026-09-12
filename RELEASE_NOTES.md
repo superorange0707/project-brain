@@ -1,9 +1,22 @@
-# Project Brain v1.0.21 — Clearer Call Paths, Less Repeated Parsing
+# Project Brain v1.0.22 — Method-Scoped Symbol Tracing
 
-This stable patch improves implementation discovery and investigation evidence
+This stable patch improves symbol tracing and investigation evidence
 while preserving existing workspaces and generation-pinned tickets.
 
 ## What changed
+
+- Attribute direct callees to the requested method, not neighboring methods,
+  comments or quoted text. Include resolved callee locations in symbol-request
+  candidates so they can be delivered through the existing source verifier.
+- Read validated call edges from the ticket's pinned Atlas generation instead
+  of rescanning source during symbol tracing. Legacy or unavailable graph data
+  falls back to bounded exact-source extraction; old tickets never substitute
+  a newer generation. Physical work and returned callees remain bounded.
+- Regression checks cover method ownership, pinned-generation isolation,
+  corrupt-data fallback, resource cleanup and constant graph-query work at
+  10/50/100 repositories.
+
+## Included from recent patches
 
 - Find method implementations beyond repositories that only call or mention
   them. Recognize camelCase, acronym and snake_case identifiers; do not confuse
@@ -28,7 +41,7 @@ brain --version
 brain ui
 ```
 
-The version must be `brain 1.0.21`. Windows and Linux users can use the matching
+The version must be `brain 1.0.22`. Windows and Linux users can use the matching
 native release archive and the existing installer. The wheel, source
 distribution, installers and `SHA256SUMS.txt` accompany the release.
 

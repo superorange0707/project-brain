@@ -1286,6 +1286,73 @@ def _valid_generation_edges(
     return result
 
 
+def symbol_call_edges(
+    settings: Settings, generation: AtlasGenerationRef | None,
+    locations: Iterable[tuple[str, str, int]], name: str,
+) -> dict[str, Any] | None:
+    """Read bounded direct callees from the existing pinned, validated graph."""
+    if generation is None or any(
+        generation.component(component).get("status") != "ready"
+        or generation.component(component).get("schema_version") != ATLAS_SCHEMA_VERSION
+        for component in ("hierarchy", "typed_graph")
+    ):
+        return None
+    selected = list(dict.fromkeys(locations))[:5]
+    if not selected:
+        return {"edges": [], "targets": {}}
+    connection = None
+    deadline = time.monotonic() + .25
+    try:
+        connection = connect(settings)
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1_000)
+        queries, parameters = [], []
+        for repo, path, line in selected:
+            queries.append(
+                "SELECT * FROM (SELECT e.entity_id FROM generation_entities g JOIN atlas_entities e ON e.entity_id=g.entity_id "
+                "WHERE g.generation=? AND e.repo=? AND e.path=? AND e.line_start=? AND e.simple_name=? "
+                "AND e.kind IN ('function','method','constructor','test') LIMIT 2)"
+            )
+            parameters.extend((generation.generation, repo, path, line, name))
+        identifiers = [str(row[0]) for row in connection.execute(" UNION ALL ".join(queries), parameters)]
+        entities = _valid_generation_entities(connection, generation.generation, identifiers)
+        if (set(identifiers) != set(entities) or len(entities) != len(selected)
+                or {(item['repo'], item['path'], item['line_start']) for item in entities.values()} != set(selected)):
+            return None
+        # One indexed, bounded seek per definition keeps a busy first method
+        # from consuming the entire direct-callee budget.
+        queries, parameters = [], []
+        for identifier in list(entities)[:5]:
+            queries.append(
+                "SELECT * FROM (SELECT e.edge_id,e.line_start FROM atlas_edges e "
+                "JOIN generation_edges g ON g.edge_id=e.edge_id "
+                "WHERE g.generation=? AND e.source_id=? AND e.edge_type='CALLS' "
+                "ORDER BY e.line_start,e.edge_id LIMIT 17)"
+            )
+            parameters.extend((generation.generation, identifier))
+        identifiers = [str(row[0]) for row in connection.execute(" UNION ALL ".join(queries), parameters)]
+        edges = _valid_generation_edges(connection, generation.generation, identifiers)
+        if set(identifiers) != set(edges):
+            return None
+        targets = _valid_generation_entities(
+            connection, generation.generation,
+            (item["target_id"] for item in edges.values() if item["metadata"].get("resolved")),
+        )
+        bounded_edges = []
+        per_source: dict[str, int] = {}
+        for identifier in identifiers:
+            edge = edges[identifier]
+            source = str(edge["source_id"])
+            per_source[source] = per_source.get(source, 0) + 1
+            if per_source[source] <= 16:
+                bounded_edges.append(edge)
+        return {"edges": bounded_edges, "targets": targets, "truncated": len(bounded_edges) < len(edges)}
+    except (sqlite3.Error, OSError):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _generation_changes(connection: sqlite3.Connection, generation: int | None) -> list[dict[str, Any]]:
     if generation is None:
         return []

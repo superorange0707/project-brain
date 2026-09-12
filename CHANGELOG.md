@@ -2,6 +2,19 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.22] - 2026-09-12
+
+- Scope symbol-trace callees to the requested method instead of attributing
+  adjacent methods, comments and strings to it. Return resolved callee locations
+  through the existing exact-source evidence path.
+- Reuse validated, generation-pinned Atlas call edges without reading or parsing
+  source again. Legacy or unavailable graph data uses bounded exact-source
+  extraction, respecting operation and byte budgets without newer-generation
+  substitution.
+- Keep deterministic bounded call ordering and Python declaration recognition.
+  No Atlas/Semantic schema, embedding input, model pack or workspace migration.
+  Includes prior refresh reliability and retrieval improvements.
+
 ## [1.0.21] - 2026-09-12
 
 - Find method implementations beyond reference-only repositories, including
