@@ -1,4 +1,4 @@
-# Project Brain v1.0.18 — More Useful Evidence, Less Repeated Work
+# Project Brain v1.0.19 — More Useful Evidence, Less Repeated Work
 
 This stable patch improves source retrieval, investigation handoffs and Atlas
 refresh reliability while preserving existing workspaces and pinned tickets.
@@ -15,6 +15,8 @@ refresh reliability while preserving existing workspaces and pinned tickets.
   reaches the query deadline.
 - Reduce repeated scans while Atlas builds call relationships. Parsing failures
   identify the repository, file and limit, with a normal refresh retry in the UI.
+- Skip unnecessary serial Git remote probes during no-fetch refreshes. Local
+  model failures close their HTTP responses and report safe, bounded details.
 - Keep both chat targets' handoffs under `generated/handoffs/<TICKET>/`.
   `current.md` is the latest prepared handoff; `brain resume TICKET` prepares a
   new-conversation handover without resetting the ticket or its generation.
@@ -36,7 +38,7 @@ brain agent-kit m365 --json
 brain ui
 ```
 
-The version must be `brain 1.0.18`. Update the existing M365 Agent with the
+The version must be `brain 1.0.19`. Update the existing M365 Agent with the
 generated `INSTRUCTIONS.md` and `PROJECT_KNOWLEDGE.md`; optionally update
 `SUGGESTED_PROMPTS.md`. Agent Kit remains v4 and the current request protocol
 remains v5. No new Agent is required. Use `brain resume TICKET` when a long chat

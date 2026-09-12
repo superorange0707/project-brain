@@ -2,7 +2,12 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.18] - 2026-09-11
+## [1.0.19] - 2026-09-12
+
+- Skip unused serial remote-URL probes when refresh is explicitly run without
+  fetching, preserving fetch-enabled SSH coordination and snapshot behavior.
+- Close failed local model HTTP responses and retain only bounded, fixed native
+  error categories; arbitrary response text is withheld to protect source input.
 
 - Avoid repeated whole-file and definition scans while building Atlas call
   relationships. Preserve entity/edge identities and bounded parsing; report
