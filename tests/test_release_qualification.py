@@ -12,6 +12,24 @@ from scripts.verify_model_pack_reuse import CONTRACTS, FILES, fingerprint
 
 
 class ReleaseQualificationTest(unittest.TestCase):
+    def test_release_cpu_selection_is_limited_to_virtual_macos(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/release.yml").read_text()
+        step = workflow.split("      - name: Select native CPU layers on virtual macOS runners\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: matrix.platform == 'darwin-arm64'", step)
+        script = "\n".join(line[10:] for line in step.split("        run: |\n", 1)[1].splitlines())
+        for hardware in ("VirtualMac2,1", "Mac16,10"):
+            with self.subTest(hardware=hardware), tempfile.TemporaryDirectory() as directory:
+                environment = Path(directory) / "environment"
+                with mock.patch.dict("os.environ", {"GITHUB_ENV": str(environment)}), mock.patch(
+                    "subprocess.check_output", return_value=hardware + "\n",
+                ) as probe, redirect_stdout(io.StringIO()):
+                    exec(compile(script, "release-native-backend", "exec"), {})
+                probe.assert_called_once_with(["sysctl", "-n", "hw.model"], text=True)
+                if hardware.startswith("VirtualMac"):
+                    self.assertEqual("LLAMA_ARG_N_GPU_LAYERS=0\n", environment.read_text())
+                else:
+                    self.assertFalse(environment.exists())
+
     def test_native_diagnostic_initializes_an_isolated_valid_workspace(self):
         root = Path(__file__).parents[1]
         workflow = (root / ".github/workflows/model-runtime-diagnostic.yml").read_text()

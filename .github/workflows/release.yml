@@ -94,6 +94,20 @@ jobs:
           python-version: "3.13"
       - name: Install release dependencies
         run: python -m pip install ".[semantic]"
+      - name: Select native CPU layers on virtual macOS runners
+        if: matrix.platform == 'darwin-arm64'
+        shell: python
+        run: |
+          import os, subprocess
+          from pathlib import Path
+          hardware = subprocess.check_output(["sysctl", "-n", "hw.model"], text=True).strip()
+          if hardware.startswith("VirtualMac"):
+              # Virtual Metal is slower and unreliable for this immutable pack.
+              # Keep the exact native binary, weights and complete conformance
+              # suite; physical Macs retain their normal GPU placement.
+              with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as target:
+                  target.write("LLAMA_ARG_N_GPU_LAYERS=0\n")
+              print("Virtual macOS: full native model qualification uses CPU layers")
       - name: Verify explicitly requested reuse of unchanged model-pack qualification
         if: github.event_name == 'workflow_dispatch' && inputs.model_pack_baseline != ''
         shell: python

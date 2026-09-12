@@ -45,6 +45,13 @@ or release creation cannot change the tap. If the token is absent, Core release
 publication still succeeds and the tap remains an explicit release-engineering
 follow-up; do not put a personal token in source or a release artifact.
 
+The hosted virtual macOS runner uses explicit CPU layer placement for installed
+model qualification. Automatic virtual Metal offload has shown excessive
+latency and native HTTP 500 failures. The exact published native runtime,
+weights, complete conformance suite and serving-lifecycle gates remain required;
+this is not a reduced or reused qualification. Physical macOS installations
+retain their normal GPU placement and must also pass native pack verification.
+
 ## Semantic model-pack release
 
 The first Core-catalogued official Semantic pack,
