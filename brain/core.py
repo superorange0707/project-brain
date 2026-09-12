@@ -1413,7 +1413,46 @@ def implementation_hits(settings: Settings, name: str, repos: Iterable[str] | No
 
 
 def test_hits(settings: Settings, name: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
-    candidates = search(settings, name.rsplit('.', 1)[-1], repos, fixed=True)
+    from .index import query_generation_indexes
+
+    if settings.atlas_generation is None and settings.atlas_generation_mode == "current":
+        from .catalog import current_generation_ref
+
+        settings = replace(settings, atlas_generation=current_generation_ref(settings))
+    selected = settings.repos(repos)
+    short = name.replace('#', '.').rsplit('.', 1)[-1]
+    key = ("test-search", short, tuple(repo.name for repo in selected),
+           settings.atlas_generation.identity if settings.atlas_generation is not None else None)
+    if (cached := _cached_hits(key)) is not None:
+        return cached
+    trace = _ACTIVE_RETRIEVAL_TRACE.get()
+    if settings.atlas_generation is not None and (trace is None or trace.try_reserve_backend()):
+        started = time.perf_counter()
+        stats: dict[str, object] = {}
+        indexed = query_generation_indexes(
+            settings, settings.atlas_generation, selected, short,
+            max_results=settings.max_results,
+            max_candidate_files=min(MAX_PINNED_QUERY_CANDIDATE_FILES, max(len(selected), settings.candidate_limit)),
+            max_hits=min(settings.candidate_limit, settings.max_results * max(1, len(selected))),
+            max_bytes=MAX_PINNED_QUERY_BYTES, max_seconds=MAX_PINNED_QUERY_SECONDS,
+            stats=stats, test_only=True,
+        )
+        if trace is not None:
+            trace.complete_reserved_backend("test-index", (time.perf_counter() - started) * 1000,
+                                            raw_hits=int(stats.get("hits") or 0))
+        if indexed is not None:
+            tests = [SearchHit(repo.name, path, line, text, "test", 97, ["test discovery", "pinned test-only index"])
+                     for repo in selected for path, line, text in indexed[repo.name]]
+            if stats.get("budget_exhausted"):
+                if trace is not None:
+                    trace.fallback_reasons.append(f"test_search_budget:{stats.get('reason') or 'unknown'}")
+                    trace.stop_reason = "lexical_batch_budget"
+            else:
+                _store_hits(key, tests)
+            return tests
+        if trace is not None:
+            trace.fallback_reasons.append("test_index_filter_unavailable")
+    candidates = search(settings, short, [repo.name for repo in selected], fixed=True)
     tests = [hit for hit in candidates if is_test_path(hit.path)]
     for hit in tests:
         hit.kind = "test"
@@ -2034,7 +2073,7 @@ def _request_body(text: str) -> dict[str, Any]:
         required_text = " ".join(request["required"]).lower()
         request["coverage"] = {
             "production": "required",
-            "tests": "required" if "test" in required_text else "auto",
+            "tests": "required" if request.get("mode") == "test_surface" or "test" in required_text else "auto",
             "relationships": "required" if any(value in required_text for value in ("flow", "integration", "relationship", "graph")) else "auto",
             "configuration": "required" if "config" in required_text else "auto",
             "history": "required" if request.get("mode") == "history" or any(value in required_text for value in ("history", "change", "commit")) else "auto",
@@ -2554,8 +2593,8 @@ def retrieve_context(
         )
         atlas_route_ms = (time.perf_counter() - atlas_started) * 1000
         exact_symbol_scope = bool(atlas_route.get("qualified_symbols_only")) and not any(
-            (request.get("coverage") or {}).get(key) == "required" for key in ("tests", "configuration", "history")
-        ) and request.get("mode") != "test_surface"
+            (request.get("coverage") or {}).get(key) == "required" for key in ("configuration", "history")
+        )
         trace.add_stage("atlas_route_ms", atlas_route_ms)
         first_repo_ms = (time.perf_counter() - started) * 1000 if atlas_route.get("repos") else None
         first_entity_ms = (time.perf_counter() - started) * 1000 if atlas_route.get("candidates") else None
@@ -2809,8 +2848,8 @@ def retrieve_context(
                 elif operation.kind == "symbol":
                     operation_started = time.perf_counter()
                     include = set(operation.includes)
-                    definitions = symbol_hits(settings, operation.value, repos)
                     if "definition" in include:
+                        definitions = symbol_hits(settings, operation.value, repos)
                         candidates.extend(definitions)
                         if not definitions:
                             bundle.unresolved.append(f"Definition for `{operation.value}` was not found")
@@ -2826,7 +2865,11 @@ def retrieve_context(
                         if not implementations:
                             bundle.unresolved.append(f"No implementations found for `{operation.value}`")
                     if "tests" in include:
-                        tests = test_hits(settings, operation.value, repos)
+                        # A requested test may live outside the implementation's
+                        # routed repositories. One pinned query searches all test
+                        # files before applying the source candidate budget.
+                        test_scope = repos if operation.repos else None
+                        tests = test_hits(settings, operation.value, test_scope)
                         candidates.extend(tests)
                         if not tests:
                             bundle.unresolved.append(f"No tests referencing `{operation.value}` were found")

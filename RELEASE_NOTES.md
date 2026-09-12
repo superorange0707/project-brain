@@ -1,21 +1,23 @@
-# Project Brain v1.0.24 — Qualified Source Retrieval
+# Project Brain v1.0.25 — Requested Test Evidence
 
-This stable patch improves precise source lookup while preserving existing
+This stable patch improves requested test-source retrieval while preserving existing
 workspaces and ticket-pinned generations.
 
 ## What changed
 
-- Find methods in deep source paths using registered Atlas entities, including
-  Java class/package-qualified symbols and Python module-qualified declarations
-  in flat and src layouts. Incorrect packages and owners do not silently expand
-  to unrelated same-named methods. Python dynamic imports and re-exports are
-  not inferred.
-- Deliver the requested definition through the existing exact-source verifier.
-  Exact-symbol-only requests avoid unrelated discovery and model startup;
-  mixed investigations keep their broader retrieval paths.
-- Validate scope on warm-cache reads and preserve old-ticket generation pins.
-  Regression checks cover actual protocol-v5 handoffs, corruption degradation,
-  and bounded query work at 10/50/100 repositories.
+- Deliver actual test source for protocol-v5 `test_surface` and explicit test
+  evidence requests with symbol anchors, rather than stopping at a definition.
+- Search test paths through the existing pinned lexical index before applying
+  source candidate limits. Separate test repositories remain discoverable when
+  the request has no explicit repository restriction.
+- Avoid unused definition queries and optional model startup for qualified-only
+  requests. Mixed investigations retain their broader retrieval paths.
+- Preserve old-ticket generation pins, scope-specific caches, source integrity
+  checks and bounded work. Regression fixtures cover 10/50/100 repositories,
+  incomplete-result cache safety and old/new-ticket source isolation.
+
+Test references provide source evidence for investigation; they do not establish
+runtime test coverage or infer exact receiver types for ambiguous method names.
 
 Includes earlier Atlas parse-timeout diagnostics/recovery, reduced repeated
 call-graph parsing, Semantic shard/vector reuse and per-ticket handoffs.
@@ -32,7 +34,7 @@ brain --version
 brain ui
 ```
 
-The version must be `brain 1.0.24`. Windows and Linux users can use the matching
+The version must be `brain 1.0.25`. Windows and Linux users can use the matching
 native release archive and existing installer. All supported native archives,
 Python distributions, installers and `SHA256SUMS.txt` accompany the release.
 

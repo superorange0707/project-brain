@@ -74,8 +74,12 @@ def compile_request(
             continue
         name, repos = str(item["name"]), _repos(item)
         symbols[(name, repos)].update(str(value) for value in (item.get("include") or ["definition"]))
+    if (request.get("coverage") or {}).get("tests") == "required":
+        for anchor in request.get("anchors") or []:
+            if isinstance(anchor, dict) and anchor.get("kind") == "symbol" and anchor.get("value"):
+                symbols[(str(anchor["value"]), ())].add("tests")
     for (name, repos), includes in symbols.items():
-        tier = 0 if "." in name else 1
+        tier = 0 if "." in name and includes != {"tests"} else 1
         operations.append(QueryOperation("symbol", name, repos, tier, "definition" in includes, 2, "shared symbol discovery", tuple(sorted(includes))))
     for item in request.get("paths") or []:
         if isinstance(item, dict):

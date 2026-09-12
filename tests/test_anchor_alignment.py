@@ -268,6 +268,190 @@ class AnchorAlignmentTests(unittest.TestCase):
                 self.assertNotIn("WRONG_MODULE", content)
                 self.assertNotIn("returned no code matches", content)
 
+    def test_v5_test_surface_delivers_test_source_for_a_qualified_method(self):
+        test_path = self.root / "repo/src/test/java/PaymentsTest.java"
+        test_path.parent.mkdir(parents=True)
+        test_path.write_text(
+            "class PaymentsTest {\n"
+            "  @Test void validatesPayment() {\n"
+            "    Payments payments = new Payments();\n"
+            "    payments.handlePayment();\n"
+            "    assertTrue(paymentAccepted());\n"
+            "  }\n}\n", encoding="utf-8",
+        )
+        core.snapshot_indexes(self.settings)
+        for number, (mode, required) in enumerate((("test_surface", []), ("implementation_plan", ["tests"])), 1):
+            with self.subTest(mode=mode):
+                ticket = f"TEST-SURFACE-{number}"
+                core.start_session(self.settings, ticket, "Inspect Payments.handlePayment")
+                request = {"INVESTIGATION_REQUEST": {
+                    "version": 5, "mode": mode, "objective": "Inspect Payments.handlePayment",
+                    "anchors": [{"kind": "symbol", "value": "Payments.handlePayment"}], "required": required,
+                }}
+                content, _, _ = core.create_context(self.settings, ticket, json.dumps(request))
+                self.assertIn("assertTrue(paymentAccepted());", content)
+                runtime = core.session_state(self.settings, ticket)["investigation_runtime"]
+                self.assertEqual("verified", runtime["coverage"]["tests"])
+                self.assertFalse(any(item.get("coverage_key") == "tests" for item in runtime["evidence_frontier"]["items"]))
+
+    def test_requested_test_planning_keeps_explicit_anchor_priority_and_bounds(self):
+        from brain.retrieval.planner import compile_request
+
+        request = core.parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "test_surface", "objective": "Inspect Payments.handlePayment",
+            "anchors": [{"kind": "symbol", "value": "Payments.handlePayment"}],
+        }}))
+        limited = compile_request(request, max_effective_operations=1)
+        self.assertEqual(["search"], [item.kind for item in limited.operations])
+        self.assertEqual(1, limited.deferred_operations)
+        complete = compile_request(request, max_effective_operations=2)
+        self.assertEqual([("search", ()), ("symbol", ("tests",))],
+                         [(item.kind, item.includes) for item in complete.operations])
+        request["symbols"] = [{"name": "Payments.handlePayment", "include": ["tests"]}]
+        self.assertEqual(2, len(compile_request(request).operations), "merge duplicate test requests")
+
+    def test_required_test_discovery_reaches_remote_test_repo_at_scale(self):
+        from brain import index
+
+        test = self.root / "zz-tests/src/test/java/PaymentsTest.java"
+        test.parent.mkdir(parents=True)
+        test.write_text("class PaymentsTest {\n @Test void acceptsPayment() {\n"
+                        "  new Payments().handlePayment();\n  assertTrue(accepted());\n }\n}\n", encoding="utf-8")
+        base = self.settings.config_path.read_text(encoding="utf-8")
+        added = 0
+        request = core.parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "test_surface", "objective": "Inspect Payments.handlePayment",
+            "anchors": [{"kind": "symbol", "value": "Payments.handlePayment"}],
+        }}))
+        for count in (10, 50, 100):
+            with self.subTest(repositories=count):
+                for number in range(added, count - 2):
+                    repo = self.root / f"other{number:03}"
+                    repo.mkdir()
+                    (repo / "Usage.java").write_text("class Usage {\n void work() {\n" +
+                        "  dependency.handlePayment();\n" * 40 + " }\n}\n", encoding="utf-8")
+                added = count - 2
+                config = base + "".join(f"[[repositories]]\nname='other{n:03}'\npath='other{n:03}'\n" for n in range(added))
+                config += "[[repositories]]\nname='zz-tests'\npath='zz-tests'\n"
+                self.settings.config_path.write_text(config, encoding="utf-8")
+                self.settings = core.load_settings(self.settings.config_path)
+                core.snapshot_indexes(self.settings)
+                generation = current_generation_ref(self.settings)
+                pinned = replace(self.settings, atlas_generation=generation, atlas_generation_mode="pinned",
+                    initial_repo_limit=1, widen_repo_limit=2,
+                    repositories=[replace(repo, source_sha=generation.snapshots[repo.name]) for repo in self.settings.repositories])
+                with mock.patch.object(index, "query_generation_indexes", wraps=index.query_generation_indexes) as queries, \
+                        mock.patch("brain.editions.current_edition", return_value="precision"), \
+                        mock.patch("brain.semantic.search_semantic", side_effect=AssertionError("optional model search")), \
+                        mock.patch("brain.models.rerank_candidates", side_effect=AssertionError("optional model rerank")):
+                    bundle = core.retrieve_context(pinned, request)
+                    packed = core.pack_context(pinned, f"TEST-SCALE-{count}", 1, bundle)
+                self.assertEqual({("repo", "Payments.java"), ("zz-tests", "src/test/java/PaymentsTest.java")},
+                                 {(item.repo, item.path) for item in bundle.evidence})
+                self.assertIn("assertTrue(accepted());", packed)
+                self.assertNotIn("dependency.handlePayment", packed)
+                self.assertEqual(1, queries.call_count)
+                self.assertTrue(queries.call_args.kwargs["test_only"])
+                self.assertEqual(count, len(queries.call_args.args[2]))
+                self.assertLessEqual(bundle.metrics["physical_backend_operations"], 3)
+                self.assertLessEqual(bundle.metrics["bytes_read"], 2_000)
+                if count == 10:
+                    self.assertEqual([], core.test_hits(pinned, "Payments.handlePayment", ["repo"]))
+                    self.assertEqual({"zz-tests"}, {hit.repo for hit in core.test_hits(pinned, "Payments.handlePayment", ["zz-tests"])})
+
+    def test_test_lookup_cache_and_failure_keep_pinned_generation_authority(self):
+        from brain import index
+        from brain.retrieval.models import RetrievalTrace
+
+        path = self.root / "repo/tests/test_payment.py"
+        path.parent.mkdir()
+        path.write_text("def test_payment():\n    assert handlePayment('OLD')\n", encoding="utf-8")
+        core.snapshot_indexes(self.settings)
+        old = current_generation_ref(self.settings)
+        path.write_text("def test_payment():\n    assert handlePayment('NEW')\n", encoding="utf-8")
+        core.snapshot_indexes(self.settings)
+        new = current_generation_ref(self.settings)
+        cache = core._ACTIVE_RETRIEVAL_CACHE.set({})
+        try:
+            for generation, marker in ((old, "OLD"), (new, "NEW"), (old, "OLD")):
+                pinned = replace(self.settings, atlas_generation=generation, atlas_generation_mode="pinned",
+                                 repositories=[replace(repo, source_sha=generation.snapshots[repo.name]) for repo in self.settings.repositories])
+                hits = core.test_hits(pinned, "Payments.handlePayment")
+                self.assertEqual(1, len(hits))
+                self.assertIn(marker, hits[0].text)
+                self.assertEqual([], core.test_hits(pinned, "Payments.missing"))
+            core._ACTIVE_RETRIEVAL_CACHE.get().clear()
+            trace = RetrievalTrace(max_physical_backend_operations=0)
+            token = core._ACTIVE_RETRIEVAL_TRACE.set(trace)
+            try:
+                with mock.patch.object(index, "query_generation_indexes", side_effect=AssertionError("budget bypass")):
+                    self.assertEqual([], core.test_hits(pinned, "Payments.handlePayment"))
+                self.assertEqual(0, trace.physical_backend_operations)
+            finally:
+                core._ACTIVE_RETRIEVAL_TRACE.reset(token)
+        finally:
+            core._ACTIVE_RETRIEVAL_CACHE.reset(cache)
+
+    def test_test_index_scope_filter_budgets_and_corruption(self):
+        from brain import index
+        from brain.retrieval.models import RetrievalTrace
+
+        path = self.root / "repo/tests/test_payment.py"
+        path.parent.mkdir()
+        path.write_text("def test_payment():\n    assert handlePayment('go')\n", encoding="utf-8")
+        core.snapshot_indexes(self.settings)
+        generation = current_generation_ref(self.settings)
+        pinned = replace(self.settings, atlas_generation=generation, atlas_generation_mode="pinned",
+                         repositories=[replace(repo, source_sha=generation.snapshots[repo.name]) for repo in self.settings.repositories])
+        budget = dict(max_results=5, max_candidate_files=1, max_hits=5, max_bytes=2_000, max_seconds=5)
+        for query in ("handlePayment", "go"):
+            stats = {}
+            hits = index.query_generation_indexes(pinned, generation, pinned.repositories, query,
+                                                  **budget, test_only=True, stats=stats)
+            self.assertEqual(["tests/test_payment.py"], [row[0] for row in hits["repo"]])
+            self.assertFalse(stats["budget_exhausted"])
+        cache = core._ACTIVE_RETRIEVAL_CACHE.set({})
+        trace = RetrievalTrace()
+        token = core._ACTIVE_RETRIEVAL_TRACE.set(trace)
+        try:
+            self.assertIn("Payments.java", {hit.path for hit in core.search(pinned, "handlePayment", fixed=True)})
+            with mock.patch.object(core, "MAX_PINNED_QUERY_BYTES", 1):
+                self.assertEqual([], core.test_hits(pinned, "Payments.handlePayment", ["repo"]))
+            self.assertEqual("lexical_batch_budget", trace.stop_reason)
+            self.assertIn("test_search_budget:bytes", trace.fallback_reasons)
+            self.assertEqual(["tests/test_payment.py"], [hit.path for hit in core.test_hits(pinned, "Payments.handlePayment", ["repo"])],
+                             "a partial empty result must not poison the test cache")
+        finally:
+            core._ACTIVE_RETRIEVAL_TRACE.reset(token)
+            core._ACTIVE_RETRIEVAL_CACHE.reset(cache)
+        connection = index._connect(pinned)
+        try:
+            connection.execute("UPDATE blobs SET content='corrupt' WHERE blob IN "
+                               "(SELECT blob FROM file_membership WHERE path='tests/test_payment.py')")
+            connection.commit()
+        finally:
+            connection.close()
+        self.assertIsNone(index.query_generation_indexes(pinned, generation, pinned.repositories, "handlePayment",
+                                                        **budget, test_only=True), "corrupt indexed content is not evidence")
+
+    def test_test_surface_tickets_retain_old_test_source_after_refresh(self):
+        path = self.root / "repo/tests/test_payment.py"
+        path.parent.mkdir()
+        path.write_text("def test_payment():\n    assert handlePayment('OLD')\n", encoding="utf-8")
+        core.snapshot_indexes(self.settings)
+        core.start_session(self.settings, "TEST-OLD", "Inspect Payments.handlePayment")
+        request = json.dumps({"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "test_surface", "objective": "Inspect Payments.handlePayment",
+            "anchors": [{"kind": "symbol", "value": "Payments.handlePayment"}],
+        }})
+        path.write_text("def test_payment():\n    assert handlePayment('NEW')\n", encoding="utf-8")
+        core.snapshot_indexes(self.settings)
+        core.start_session(self.settings, "TEST-NEW", "Inspect Payments.handlePayment")
+        for ticket, expected, forbidden in (("TEST-OLD", "OLD", "NEW"), ("TEST-NEW", "NEW", "OLD")):
+            content, _, _ = core.create_context(self.settings, ticket, request)
+            self.assertIn(f"handlePayment('{expected}')", content)
+            self.assertNotIn(f"handlePayment('{forbidden}')", content)
+
     def test_python_module_layouts_scope_and_pinned_cache_validation(self):
         source = (
             "def route():\n    return 'OLD'\n\n"

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
 from .platforms import (
     atomic_managed_text_write,
     connect_managed_sqlite,
+    is_test_path,
     logical_path,
     native_command,
     read_direct_file_bytes,
@@ -1086,6 +1087,7 @@ def query_generation_indexes(
     max_bytes: int,
     max_seconds: float,
     stats: dict[str, object] | None = None,
+    test_only: bool = False,
 ) -> dict[str, list[tuple[str, int, str]]] | None:
     """Query one registered pinned lexical generation within explicit hard budgets."""
     if stats is not None:
@@ -1141,6 +1143,10 @@ def query_generation_indexes(
         connection = _connect(settings)
         connection.execute("BEGIN")
         connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1_000)
+        path_clause = ""
+        if test_only:
+            connection.create_function("brain_is_test_path", 1, is_test_path, deterministic=True)
+            path_clause = "AND brain_is_test_path(f.path) "
         requested_values = ",".join("(?,?,?)" for _ in pairs)
         requested_parameters = [
             value for ordinal, (name, snapshot) in enumerate(pairs)
@@ -1183,6 +1189,7 @@ def query_generation_indexes(
                         "JOIN blobs b ON b.blob=blob_fts.blob "
                         "JOIN file_membership f ON f.blob=b.blob "
                         "WHERE blob_fts MATCH ? AND f.repo=? AND f.snapshot_sha=? "
+                        + path_clause +
                         "ORDER BY f.path,b.blob LIMIT ?",
                         (_quoted(query), name, snapshot, repo_limit + 1),
                     ).fetchall()
@@ -1191,6 +1198,7 @@ def query_generation_indexes(
                         "SELECT f.path,b.blob,b.size FROM blobs b "
                         "JOIN file_membership f ON f.blob=b.blob "
                         "WHERE f.repo=? AND f.snapshot_sha=? AND instr(b.content,?)>0 "
+                        + path_clause +
                         "ORDER BY f.path,b.blob LIMIT ?",
                         (name, snapshot, query, repo_limit + 1),
                     ).fetchall()

@@ -2,6 +2,20 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.25] - 2026-09-13
+
+- Retrieve actual test source for protocol-v5 `test_surface` and explicit test
+  evidence requests with symbol anchors, instead of returning only a definition.
+- Filter test paths in the existing pinned lexical index before source candidate
+  limits. Unscoped test requests can reach separate test repositories without
+  repeated definition discovery or optional model startup for qualified-only
+  requests. Explicit repository scopes and all query bounds remain enforced.
+- Keep test results isolated by generation and scope; incomplete lookups do not
+  become cached empty results. Test-source references are discovery evidence,
+  not proof of runtime coverage or exact receiver-type resolution.
+- No Atlas/Semantic schema, embedding-input, model-pack or Agent Kit changes.
+  No refresh, re-embedding or workspace reset is required solely for this patch.
+
 ## [1.0.24] - 2026-09-12
 
 - Resolve deep-path method anchors from registered Atlas entities, including
