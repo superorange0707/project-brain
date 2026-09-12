@@ -31,8 +31,11 @@ jobs:
           # release or replace the full release qualification gates.
           subprocess.run(["sysctl", "-n", "hw.memsize", "hw.model", "machdep.cpu.brand_string"], check=True)
           root = Path(tempfile.mkdtemp(prefix="brain-public-runtime-diagnostic-"))
+          (root / "fixture").mkdir()
           config = root / "brain.toml"
-          config.write_text("[project]\nname='public-runtime-diagnostic'\n", encoding="utf-8")
+          config.write_text(
+              "[project]\nname='public-runtime-diagnostic'\n"
+              "[[repositories]]\nname='fixture'\npath='fixture'\n", encoding="utf-8")
           settings = load_settings(config)
           installed = models.install_official_pack(settings, "precision")
           original_start = models.start_managed_process
