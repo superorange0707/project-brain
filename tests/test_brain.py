@@ -1501,6 +1501,15 @@ path = "batch-service"
             self.settings, repo, "RiskClient", max_results=5, snapshot_sha=previous_snapshot,
         ))
 
+    def test_no_fetch_non_git_sync_does_not_probe_remote_urls(self) -> None:
+        with mock.patch("brain.sync._git_text", return_value="") as remote, mock.patch(
+            "brain.sync._git", return_value=subprocess.CompletedProcess([], 128, "", "not a git repository"),
+        ) as git:
+            results = sync_repositories(self.settings, fetch=False)
+        remote.assert_not_called()
+        self.assertEqual(len(self.settings.repositories), git.call_count)
+        self.assertTrue(all(result.status == "non-git" for result in results))
+
     def test_concurrent_sync_serializes_capacity_accounted_snapshot_exports(self) -> None:
         selected = self.settings.repositories[:2]
         git = core_module.native_command("git") if hasattr(core_module, "native_command") else "git"

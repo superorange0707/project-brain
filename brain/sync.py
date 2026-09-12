@@ -633,10 +633,13 @@ def sync_repositories(
     endpoint_attempted: set[str] = set()
     endpoint_auth_failed: set[str] = set()
 
-    for repo in settings.repositories:
-        endpoint = _ssh_endpoint(_git_text(repo, "remote", "get-url", "origin"))
-        if endpoint:
-            endpoint_locks.setdefault(endpoint, Lock())
+    # Endpoint coordination is used only by fetch_origin. In --no-fetch
+    # refreshes these serial subprocesses add no information or safety.
+    if fetch:
+        for repo in settings.repositories:
+            endpoint = _ssh_endpoint(_git_text(repo, "remote", "get-url", "origin"))
+            if endpoint:
+                endpoint_locks.setdefault(endpoint, Lock())
 
     def openssh_command(repo: Repository) -> str | None:
         if os.name == "nt":
