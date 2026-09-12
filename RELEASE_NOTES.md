@@ -1,9 +1,21 @@
-# Project Brain v1.0.22 — Method-Scoped Symbol Tracing
+# Project Brain v1.0.23 — Runtime Anchor and Call-Path Reliability
 
-This stable patch improves symbol tracing and investigation evidence
+This stable patch improves method-anchor lookup and investigation call paths
 while preserving existing workspaces and generation-pinned tickets.
 
 ## What changed
+
+- Resolve camelCase method anchors using the existing normalized Atlas index.
+  This fixes requests that found source text but could not start an execution
+  flow. Existing indexes remain reusable without refresh or re-embedding.
+- Preserve structural graph relationships for navigation without letting them
+  consume call-path depth. Source-verified call chains satisfy the existing
+  coverage contract and clear the corresponding missing-evidence frontier item.
+- Test old negative-cache isolation, corrupt-index degradation, old-ticket pins
+  across refresh, protocol-v5 evidence delivery and bounded query counts at
+  10/50/100 repositories. No new query-time source parsing is introduced.
+
+## Included from recent patches
 
 - Attribute direct callees to the requested method, not neighboring methods,
   comments or quoted text. Include resolved callee locations in symbol-request
@@ -15,8 +27,6 @@ while preserving existing workspaces and generation-pinned tickets.
 - Regression checks cover method ownership, pinned-generation isolation,
   corrupt-data fallback, resource cleanup and constant graph-query work at
   10/50/100 repositories.
-
-## Included from recent patches
 
 - Find method implementations beyond repositories that only call or mention
   them. Recognize camelCase, acronym and snake_case identifiers; do not confuse
@@ -41,7 +51,7 @@ brain --version
 brain ui
 ```
 
-The version must be `brain 1.0.22`. Windows and Linux users can use the matching
+The version must be `brain 1.0.23`. Windows and Linux users can use the matching
 native release archive and the existing installer. The wheel, source
 distribution, installers and `SHA256SUMS.txt` accompany the release.
 

@@ -2,6 +2,18 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.23] - 2026-09-12
+
+- Resolve camelCase method anchors against the existing normalized Atlas term
+  projection. Reuse published indexes without source reparsing; old negative
+  query-cache entries cannot hide the corrected lookup.
+- Keep structural relationships available for navigation without consuming
+  execution-path depth. Verified call chains now satisfy the existing coverage
+  contract instead of leaving a misleading request for the same evidence.
+- Preserve pinned-generation isolation, exact-source verification, query bounds
+  and corrupt-index degradation. No schema, model-input or Agent Kit changes;
+  no refresh, re-embedding or workspace reset is required for this patch.
+
 ## [1.0.22] - 2026-09-12
 
 - Scope symbol-trace callees to the requested method instead of attributing

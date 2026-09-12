@@ -79,6 +79,10 @@ EXECUTION_EDGE_TYPES = (
     "CALLS_ENDPOINT", "PUBLISHES", "CONSUMES", "READS_CONFIG", "WRITES_TABLE",
     "READS_TABLE", "DEPENDS_ON_REPO",
 )
+EXECUTION_PATH_EDGE_TYPES = frozenset({
+    "CALLS", "CALLS_ENDPOINT", "EXPOSES_ENDPOINT", "PUBLISHES", "CONSUMES", "READS_CONFIG",
+    "WRITES_TABLE", "READS_TABLE", "DEPENDS_ON_REPO",
+})
 
 _TOKEN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$.-]*")
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -1165,7 +1169,10 @@ def resolve_runtime_anchors(
         (_normalize(value), kind) for kind, value in query_inputs if _normalize(value)
     ))[:MAX_EXACT_ANCHOR_QUERIES]
     term_specs = list(dict.fromkeys(
-        (term, kind) for kind, value in query_inputs for term in _compound_terms(value)
+        # The published v1 projection tokenizes normalized (casefolded) values.
+        # Seek those exact stored terms first, then retain compound fallbacks.
+        (term, kind) for normalize in (True, False) for kind, value in query_inputs
+        for term in _compound_terms(_normalize(value) if normalize else value)
     ))[:MAX_COMPOUND_ANCHOR_QUERIES]
     path_inputs = list(dict.fromkeys(
         normalized for kind, value in query_inputs
@@ -1822,7 +1829,10 @@ def _execution_flow(
 
 
 def _execution_paths(steps: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    values = [item for item in steps if isinstance(item, dict) and item.get("identity")]
+    # Keep structure in the graph, but do not spend call-path depth/branching
+    # on DEFINES/IMPLEMENTS/etc. Use the same relation contract as coverage.
+    values = [item for item in steps if isinstance(item, dict) and item.get("identity")
+              and item.get("edge_type") in EXECUTION_PATH_EDGE_TYPES]
     by_source: dict[str, list[dict[str, Any]]] = {}
     targets = {str(item.get("target_id")) for item in values}
     for item in values:
@@ -2909,17 +2919,13 @@ def build_ticket_runtime(
         coverage_proofs["production_entry_point"] = entry_ids
     elif anchors:
         coverage["production_entry_point"] = "candidate"
-    flow_edge_types = {
-        "CALLS", "CALLS_ENDPOINT", "EXPOSES_ENDPOINT", "PUBLISHES", "CONSUMES", "READS_CONFIG",
-        "WRITES_TABLE", "READS_TABLE", "DEPENDS_ON_REPO",
-    }
     flow_steps_by_id = {
         str(item.get("identity")): item for item in execution.get("steps") or [] if item.get("identity")
     }
     verified_static_paths = [
         path for path in execution.get("paths") or []
         if path.get("state") == "verified" and int(path.get("length") or 0) >= 2
-        and all(flow_steps_by_id.get(str(identifier), {}).get("edge_type") in flow_edge_types
+        and all(flow_steps_by_id.get(str(identifier), {}).get("edge_type") in EXECUTION_PATH_EDGE_TYPES
                 for identifier in path.get("step_ids") or [])
         and all(not is_test_path(str(flow_steps_by_id.get(str(identifier), {}).get("path") or ""))
                 for identifier in path.get("step_ids") or [])
