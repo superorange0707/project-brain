@@ -8,6 +8,10 @@ from .models import QueryOperation, QueryPlan
 
 
 DEFAULT_MAX_EFFECTIVE_OPERATIONS = 15
+# Share identifier recognition with definition-aware lexical widening.
+SOURCE_SYMBOL_RE = re.compile(
+    r"(?<![\w$])[A-Za-z_$][\w$]*(?:[a-z0-9][A-Z]|[A-Z]{2}[a-z]|_[a-z])[\w$]*(?![\w$])"
+)
 _OBJECTIVE_STOP_WORDS = {
     "about", "after", "before", "could", "determine", "establish", "find", "from", "into", "locate",
     "production", "repository", "responsible", "should", "tests", "that", "their", "this", "through",
@@ -23,7 +27,7 @@ def objective_terms(objective: str, *, limit: int = 4) -> list[str]:
     """Extract only deterministic, source-like objective terms for cheap discovery."""
     patterns = (
         r"['\"]([^'\"]{2,80})['\"]",
-        r"\b[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+\b",
+        SOURCE_SYMBOL_RE.pattern,
         r"\b[A-Z][A-Z0-9_]{2,}\b",
         r"\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\b",
         r"(?:/[-A-Za-z0-9_{}:.]+|[-A-Za-z0-9_]+\.(?:enabled|timeout|url|topic|queue|cache))",

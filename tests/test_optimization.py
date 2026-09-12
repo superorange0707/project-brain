@@ -16,6 +16,119 @@ from brain.retrieval.ranker import fuse_and_rank
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_verification_parses_each_source_once_per_context(self) -> None:
+        from brain import investigation
+        from brain.core import create_context, start_session
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "service"
+            repo.mkdir()
+            source = '@RestController\nclass Routes {\n' + "".join(
+                f'  @GetMapping("/routes/{number}") String route{number}() {{ return "ok"; }}\n'
+                for number in range(16)
+            ) + "}\n/*" + " documentation" * 3000 + "*/\n"
+            (repo / "Routes.java").write_text(source, encoding="utf-8")
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='verification-reuse'\n[graph]\nenabled=false\n"
+                              "[[repositories]]\nname='service'\npath='service'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            start_session(settings, "VERIFY-101", "Inspect the local routes")
+            request = {"version": 5, "mode": "flow_trace", "objective": "Inspect Routes",
+                       "anchors": [{"kind": "endpoint", "value": f"/routes/{number}"} for number in range(16)],
+                       "files": [{"repo": "service", "path": "Routes.java"}]}
+            with mock.patch.object(investigation, "_java_file_intelligence", wraps=investigation._java_file_intelligence) as parsed, \
+                    mock.patch.object(investigation, "_mask_java_comments_uncached", wraps=investigation._mask_java_comments_uncached) as masked:
+                content, _, _ = create_context(settings, "VERIFY-101", json.dumps({"INVESTIGATION_REQUEST": request}))
+            for number in range(16):
+                self.assertIn(f'@GetMapping("/routes/{number}")', content)
+            self.assertEqual(1, sum(call.args[2] == "verification" for call in parsed.call_args_list))
+            self.assertEqual(2, sum(call.args[0] == source for call in masked.call_args_list))
+            self.assertIsNone(investigation._SOURCE_VERIFICATION_CACHE.get())
+
+    def test_verification_reuse_preserves_authority_and_source_identity(self) -> None:
+        from dataclasses import replace
+        from brain import investigation
+        from brain.catalog import AtlasGenerationRef
+        from brain.core import Evidence
+
+        source = '@RestController\n@RequestMapping("/api")\nclass Routes {\n@GetMapping("/old") String route() { return "ok"; }\n}\n'
+        evidence = Evidence("repo", "Routes.java", 1, 5, source, "code", 100, verification_content=source)
+        generation = AtlasGenerationRef(1, "g1", None, "s1", {"repo": "snapshot"}, {}, {})
+        bundle = ContextBundle("verify", evidence=[evidence], atlas_generation=generation)
+
+        def verified(value="/api/old", **changes):
+            selected = replace(bundle, **changes)
+            return investigation._verified_value_location(selected, "repo", "Routes.java", 4, value, kind="endpoint")
+
+        with investigation.source_verification_scope():
+            self.assertTrue(verified())
+            self.assertFalse(verified(atlas_generation=None))
+            self.assertFalse(verified(atlas_generation=replace(generation, snapshots={})))
+            for kind in ("knowledge", "local diff", "user-supplied external evidence"):
+                self.assertFalse(verified(evidence=[replace(evidence, kind=kind)]))
+            self.assertFalse(verified(evidence=[replace(evidence, line_end=3)]))
+            self.assertFalse(verified(evidence=[replace(evidence, line_start=4, content=source.splitlines()[3], verification_content=None)]))
+            changed = source.replace("/old", "/new")
+            updated = replace(evidence, content=changed, verification_content=changed)
+            self.assertFalse(verified(evidence=[updated]))
+            self.assertTrue(verified("/api/new", evidence=[updated]))
+            self.assertTrue(verified(), "another source at the same path cannot replace the pinned input")
+
+    def test_verification_cache_is_byte_bounded_and_cleared_on_failure(self) -> None:
+        from brain import investigation
+
+        sources = ['// comment\nString s = "https://example/\\\""; /* hidden */\n',
+                   'String text = """\n/* literal */\n"""; // comment\n', '/* 界 */ int n;\n']
+        with self.assertRaisesRegex(RuntimeError, "expected"), investigation.source_verification_scope():
+            cached = investigation._SOURCE_VERIFICATION_CACHE.get()
+            with investigation.source_verification_scope():
+                self.assertIs(cached, investigation._SOURCE_VERIFICATION_CACHE.get())
+                for source in sources:
+                    for strings in (False, True):
+                        self.assertEqual(investigation._mask_java_comments_uncached(source, strings=strings),
+                                         investigation._mask_java_comments(source, strings=strings))
+            for number in range(30):
+                investigation._mask_java_comments(f"/*{number}*/ class Test {{}}")
+                cached[1]("repo", f"Test{number}.java", "class Test {}")
+            self.assertEqual(16, cached[0].cache_info().currsize)
+            self.assertEqual(8, cached[1].cache_info().currsize)
+            with mock.patch.object(investigation, "MAX_REFRESH_FILE_BYTES", 16):
+                for source in ("/*" + "a" * 17 + "*/", "/*" + "界" * 5 + "*/"):
+                    before = cached[0].cache_info()
+                    self.assertFalse(investigation._cacheable_verification_source(source))
+                    self.assertEqual(investigation._mask_java_comments_uncached(source), investigation._mask_java_comments(source))
+                    self.assertEqual(before, cached[0].cache_info())
+            raise RuntimeError("expected")
+        self.assertIsNone(investigation._SOURCE_VERIFICATION_CACHE.get())
+        self.assertEqual([0, 0], [item.cache_info().currsize for item in cached])
+        with investigation.source_verification_scope():
+            fresh = investigation._SOURCE_VERIFICATION_CACHE.get()
+            self.assertIsNot(cached, fresh)
+            self.assertEqual([0, 0], [item.cache_info().currsize for item in fresh])
+
+    def test_verification_scopes_are_thread_local(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from brain import investigation
+
+        barrier = Barrier(2)
+
+        def verify():
+            with investigation.source_verification_scope():
+                cached = investigation._SOURCE_VERIFICATION_CACHE.get()
+                investigation._mask_java_comments("/*shared text*/ class Test {}")
+                barrier.wait(timeout=5)
+                self.assertEqual(1, cached[0].cache_info().misses)
+            self.assertIsNone(investigation._SOURCE_VERIFICATION_CACHE.get())
+            self.assertEqual(0, cached[0].cache_info().currsize)
+            return cached
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first, second = list(executor.map(lambda _: verify(), range(2)))
+        self.assertIsNot(first, second)
+
     def test_dense_atlas_call_ownership_avoids_repeated_definition_and_prefix_scans(self) -> None:
         import hashlib
         from brain import atlas
@@ -629,6 +742,105 @@ class OptimizationTests(unittest.TestCase):
                 self.assertIn("lexical_references_only", bundle.trace["fallback_reasons"])
                 self.assertLessEqual(bundle.trace["physical_backend_operations"], count + 2)
                 self.assertLessEqual(bundle.trace["physical_backend_operations"], settings.max_backend_operations)
+
+    def test_objective_prioritizes_method_identifiers_without_querying_prose(self) -> None:
+        from brain.retrieval.planner import objective_terms
+
+        for objective, expected in (
+            ("Trace getRestrictions from caller to implementation.", ["getRestrictions"]),
+            ("Trace evaluate_policy from caller to implementation.", ["evaluate_policy"]),
+            ("Trace getRestrictions through the REST handler.", ["getRestrictions", "REST"]),
+            ("Find HTTPClient and parseHTTPResponse.", ["HTTPClient", "parseHTTPResponse"]),
+            ("Find EligibilityAdaptor behavior", ["EligibilityAdaptor"]),
+            ("Inspect API_TIMEOUT", ["API_TIMEOUT"]),
+            ("invoice cancellation", ["invoice", "cancellation"]),
+        ):
+            with self.subTest(objective=objective):
+                self.assertEqual(expected, objective_terms(objective))
+
+    def test_method_references_cannot_hide_the_implementation_at_repository_scale(self) -> None:
+        from dataclasses import replace
+        from brain.core import parse_context_request, retrieve_context
+
+        for count in (10, 50, 100):
+            with self.subTest(repositories=count), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                repos = [f"service-{number:03}" for number in range(count)]
+                config_text = "[project]\nname='method-quality-scale'\n[graph]\nenabled=false\n[retrieval]\ninitial_repo_limit=1\nwiden_repo_limit=2\n"
+                for name in repos:
+                    repo = root / name
+                    repo.mkdir()
+                    (repo / "Usage.java").write_text(
+                        "class Usage {\n  Object handle() {\n    return service.getRestrictions(customerId);\n  }\n}\n",
+                        encoding="utf-8",
+                    )
+                    (repo / "usage.py").write_text(
+                        "def handle(record):\n    for rule in evaluate_policy(record):\n        yield rule\n", encoding="utf-8",
+                    )
+                    config_text += f"[[repositories]]\nname='{name}'\npath='{name}'\n"
+                (root / repos[-1] / "Policy.java").write_text(
+                    "class Policy {\n  Object getRestrictions(String id) {\n    return rules.lookup(id);\n  }\n}\n",
+                    encoding="utf-8",
+                )
+                (root / repos[-1] / "policy.py").write_text(
+                    "def evaluate_policy(record):\n    return record.active and not record.blocked\n", encoding="utf-8",
+                )
+                config = root / "brain.toml"
+                config.write_text(config_text, encoding="utf-8")
+                settings = load_settings(config)
+                snapshot_indexes(settings)
+                settings = replace(settings, atlas_generation=current_generation_ref(settings), atlas_generation_mode="pinned", hydrate_limit=1)
+                for path in ("Policy.java", "policy.py"):
+                    (root / repos[-1] / path).write_text("NEW_WORKTREE_MUST_NOT_LEAK\n", encoding="utf-8")
+                for symbol, path, source in (
+                    ("getRestrictions", "Policy.java", "return rules.lookup(id)"),
+                    ("evaluate_policy", "policy.py", "not record.blocked"),
+                ):
+                    request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                        "version": 5, "mode": "root_cause", "objective": f"Trace {symbol} from caller to implementation.",
+                    }}))
+                    for warm, route in ((False, None), (True, None), (False, {"repos": repos})):
+                        # Exercise both the full router and the lexical fallback
+                        # when only usage repositories were ranked first.
+                        with self.subTest(symbol=symbol, warm=warm, lexical_only=route is not None):
+                            if route is None:
+                                bundle = retrieve_context(settings, request)
+                            else:
+                                with mock.patch("brain.atlas.route", return_value=route):
+                                    bundle = retrieve_context(settings, request)
+                            self.assertEqual([(repos[-1], path)], [(item.repo, item.path) for item in bundle.evidence])
+                            self.assertIn(source, bundle.evidence[0].content)
+                            self.assertNotIn("NEW_WORKTREE_MUST_NOT_LEAK", bundle.evidence[0].content)
+                            self.assertIn(source, pack_context(settings, "METHOD-QUALITY", 1, bundle))
+                            if warm:
+                                self.assertTrue(bundle.trace["atlas_route"]["cache_hit"])
+                            self.assertLessEqual(bundle.trace["physical_backend_operations"], 4)
+
+    def test_python_declarations_do_not_credit_control_flow_or_string_references(self) -> None:
+        from brain.core import _symbol_declaration, symbol_hits
+
+        for path in ("policy.py", "policy.pyi"):
+            declaration = _symbol_declaration("evaluate_policy", path=path)
+            for line in (
+                "for rule in evaluate_policy(record):", "if evaluate_policy(record):",
+                "while evaluate_policy(record):", "with evaluate_policy(record):",
+                "assert evaluate_policy(record)", "result = record and evaluate_policy(record)",
+                "return evaluate_policy(record)", "# def evaluate_policy(record):",
+                "example = 'def evaluate_policy(record):'",
+            ):
+                with self.subTest(path=path, line=line):
+                    self.assertIsNone(declaration.search(line))
+            for line in ("def evaluate_policy(record):", "    async def evaluate_policy(record):"):
+                self.assertIsNotNone(declaration.search(line))
+        self.assertIsNotNone(_symbol_declaration("Policy", path="policy.py").search("class Policy:"))
+        self.assertIsNotNone(_symbol_declaration("evaluate_policy", path="Policy.java").search(
+            "    public List<Rule> evaluate_policy(Record record) {",
+        ))
+        reference = SearchHit("repo", "usage.py", 2, "for rule in evaluate_policy(record):")
+        definition = SearchHit("repo", "policy.py", 1, "def evaluate_policy(record):")
+        with mock.patch("brain.core.search", return_value=[reference, definition]), \
+                mock.patch("brain.graph.graph_symbol_hits", return_value=[]):
+            self.assertEqual([definition], symbol_hits(mock.Mock(), "evaluate_policy"))
 
     def test_response_format_score_never_claims_causal_correctness(self) -> None:
         from brain.evaluation import evaluate_m365_response

@@ -13,7 +13,10 @@ import hashlib
 import hmac
 import json
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
@@ -81,6 +84,32 @@ _TOKEN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$.-]*")
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _JAVA_SUFFIXES = {".java", ".kt", ".kts", ".groovy"}
 _CONFIG_SUFFIXES = {".properties", ".yaml", ".yml", ".toml", ".xml"}
+
+# Pure source transforms only: never memoize evidence authority or delivery.
+# At most 16 masked views and eight endpoint sets; each source is <= 1 MB.
+_SOURCE_VERIFICATION_CACHE: ContextVar[Any] = ContextVar("source_verification_cache", default=None)
+
+
+@contextmanager
+def source_verification_scope():
+    if _SOURCE_VERIFICATION_CACHE.get() is not None:
+        yield
+        return
+    cached = (lru_cache(maxsize=16)(_mask_java_comments_uncached),
+              lru_cache(maxsize=8)(_verification_endpoints))
+    token = _SOURCE_VERIFICATION_CACHE.set(cached)
+    try:
+        yield
+    finally:
+        for transform in cached:
+            transform.cache_clear()
+        _SOURCE_VERIFICATION_CACHE.reset(token)
+
+
+def _cacheable_verification_source(content: str) -> bool:
+    return len(content) <= MAX_REFRESH_FILE_BYTES and (
+        content.isascii() or len(content.encode("utf-8")) <= MAX_REFRESH_FILE_BYTES
+    )
 
 
 def _hash(*values: object) -> str:
@@ -261,6 +290,12 @@ def _mask_java_comments(content: str, *, strings: bool = False) -> str:
     """Mask comments, and optionally literals, without changing source offsets."""
     if "//" not in content and "/*" not in content and (not strings or ('"' not in content and "'" not in content)):
         return content
+    cached = _SOURCE_VERIFICATION_CACHE.get()
+    transform = cached[0] if cached is not None and _cacheable_verification_source(content) else _mask_java_comments_uncached
+    return transform(content, strings=strings)
+
+
+def _mask_java_comments_uncached(content: str, *, strings: bool = False) -> str:
     output = list(content)
     index = 0
     state = "code"
@@ -1453,6 +1488,15 @@ def _verified_location(bundle: ContextBundle, repo: str, path: str, line: int) -
     )
 
 
+def _verification_endpoints(repo: str, path: str, content: str) -> frozenset[tuple[str, int]]:
+    _, extracted = _java_file_intelligence(repo, path, "verification", None, content)
+    return frozenset(
+        (_normalize(item.get("key")), int(item.get("line") or 1))
+        for item in extracted
+        if item.get("kind") == "endpoint" and bool((item.get("provenance") or {}).get("exact_source"))
+    )
+
+
 def _verified_value_location(
     bundle: ContextBundle, repo: str, path: str, line: int, value: object, *, kind: str = "",
 ) -> bool:
@@ -1484,14 +1528,9 @@ def _verified_value_location(
         comment_aware_content = _mask_java_comments(structural_content) if suffix in _JAVA_SUFFIXES else structural_content
         code_only_content = _mask_java_comments(structural_content, strings=True) if suffix in _JAVA_SUFFIXES else structural_content
         if kind == "endpoint" and suffix == ".java":
-            _, extracted = _java_file_intelligence(repo, path, "verification", None, structural_content)
-            if any(
-                item.get("kind") == "endpoint"
-                and _normalize(item.get("key")) == normalized
-                and int(item.get("line") or 1) == line
-                and bool((item.get("provenance") or {}).get("exact_source"))
-                for item in extracted
-            ):
+            cached = _SOURCE_VERIFICATION_CACHE.get()
+            extract = cached[1] if cached is not None and _cacheable_verification_source(structural_content) else _verification_endpoints
+            if (normalized, line) in extract(repo, path, structural_content):
                 return True
         lines = comment_aware_content.splitlines()
         code_lines = code_only_content.splitlines()
@@ -1738,8 +1777,6 @@ def _execution_flow(
                 edge = valid_edges[str(row[0])]
                 target_entity = valid_targets.get(str(row[1]))
                 target = str(edge["target_id"])
-                if target in seen:
-                    continue
                 target_name = str(
                     (target_entity["simple_name"] if target_entity else edge["metadata"].get("target_name")) or target
                 )
@@ -1758,9 +1795,12 @@ def _execution_flow(
                     "confidence": float(edge["confidence"]),
                     "state": state, "evidence_authority": "exact_source" if state == "verified" else "atlas_candidate",
                 })
-                seen.add(target)
-                if target_entity is not None:
-                    next_frontier.append(target)
+                # Visit a node once, but retain every bounded source edge.
+                # Shared callees and other seeds are not duplicate evidence.
+                if target not in seen:
+                    seen.add(target)
+                    if target_entity is not None:
+                        next_frontier.append(target)
                 if len(steps) >= MAX_FLOW_STEPS:
                     break
             frontier = next_frontier
@@ -1803,9 +1843,11 @@ def _execution_paths(steps: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 "state": "verified", "evidence_authority": "exact_source",
             }
         used = {str(item["identity"]) for item in path}
+        nodes = {str(item.get("source_id")) for item in path} | {str(tail.get("target_id"))}
         children = [
             item for item in by_source.get(str(tail.get("target_id")), [])
-            if str(item["identity"]) not in used and len(path) < MAX_FLOW_DEPTH
+            if str(item["identity"]) not in used and str(item.get("target_id")) not in nodes
+            and len(path) < MAX_FLOW_DEPTH
         ]
         if children:
             for item in children[:MAX_FLOW_BRANCH]:
@@ -1819,7 +1861,8 @@ def _execution_paths(steps: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         }
 
     for start in starts[:MAX_FLOW_BRANCH]:
-        walk([start])
+        if str(start.get("source_id")) != str(start.get("target_id")):
+            walk([start])
     return sorted(result.values(), key=lambda item: (-int(item["length"]), str(item["identity"])))[:20]
 
 
@@ -2546,6 +2589,7 @@ def _delta_items(
     return changed, sorted(set(before) - set(after))
 
 
+@source_verification_scope()
 def build_ticket_runtime(
     settings: Settings,
     generation: AtlasGenerationRef,

@@ -959,6 +959,126 @@ class B {
             item.get("target") == "wrong" for item in runtime["execution_flow"].get("steps") or []
         ))
 
+    def test_execution_flow_retains_converging_branches_and_links_between_seeds(self) -> None:
+        path = "src/main/java/demo/JoinedFlow.java"
+        source = """class JoinedFlow {
+  void entry() { left(); right(); }
+  void left() { join(); }
+  void right() { join(); }
+  void join() { sink(); }
+  void sink() {}
+}
+"""
+        (self.root / "customer-api" / path).write_text(source, encoding="utf-8")
+        generation = self.publish("sha-joined-flow", "JOINED_FLOW")
+        connection = sqlite3.connect(self.settings.state_dir / "catalog.sqlite3")
+        try:
+            entities = dict(connection.execute(
+                "SELECT e.simple_name,e.entity_id FROM generation_entities g "
+                "JOIN atlas_entities e ON e.entity_id=g.entity_id "
+                "WHERE g.generation=? AND e.repo=? AND e.path=? AND e.kind='method'",
+                (generation.generation, "customer-api", path),
+            ))
+        finally:
+            connection.close()
+        names = {identifier: name for name, identifier in entities.items()}
+        expected = {("entry", "left"), ("entry", "right"), ("left", "join"), ("right", "join"), ("join", "sink")}
+        bundle = ContextBundle("trace joined branches", atlas_generation=generation, evidence=[
+            Evidence("customer-api", path, 1, 7, source, "code", 100, verification_content=source),
+        ])
+        for seeds in (["entry"], ["entry", "left", "right", "join", "sink"]):
+            with self.subTest(seeds=seeds):
+                flow = _execution_flow(self.settings, generation, [entities[name] for name in seeds], bundle)
+                steps = {item["identity"]: item for item in flow["steps"] if item["edge_type"] == "CALLS"}
+                self.assertEqual(expected, {(names[item["source_id"]], names[item["target_id"]]) for item in steps.values()})
+                paths = {
+                    tuple(names[steps[identifier]["target_id"]] for identifier in item["step_ids"])
+                    for item in flow["paths"] if item["length"] == 3
+                }
+                self.assertEqual({("left", "join", "sink"), ("right", "join", "sink")}, paths)
+                self.assertTrue(all(item["state"] == "verified" for item in steps.values()))
+                self.assertLessEqual(flow["database_operations"], flow["bounds"]["database_query_limit"])
+
+        start_session(self.settings, "JOINED-101", "Trace both JoinedFlow branches")
+        request = {"version": 5, "mode": "flow_trace", "objective": "Trace both JoinedFlow branches to sink",
+                   "anchors": [{"kind": "symbol", "value": name} for name in entities],
+                   "required": ["main execution flow"], "files": [{"repo": "customer-api", "path": path}]}
+        content, _, _ = create_context(self.settings, "JOINED-101", json.dumps({"INVESTIGATION_REQUEST": request}))
+        runtime = session_state(self.settings, "JOINED-101")["investigation_runtime"]
+        self.assertEqual("verified", runtime["coverage"]["main_execution_flow"])
+        self.assertTrue(runtime["coverage_proofs"]["main_execution_flow"])
+        self.assertIn("void left() { join(); }", content)
+        self.assertIn("void right() { join(); }", content)
+        self.assertEqual(expected, {
+            (names[item["source_id"]], names[item["target_id"]])
+            for item in runtime["execution_flow"]["steps"] if item["edge_type"] == "CALLS"
+        })
+        first_state = session_state(self.settings, "JOINED-101")
+        (self.root / "customer-api" / path).write_text(
+            source.replace("void right() { join(); }", "void right() { sink(); }"), encoding="utf-8",
+        )
+        generation_two = self.publish("sha-joined-flow-g2", "JOINED_FLOW_G2")
+        followup = {**request, "objective": "Reconfirm the pinned JoinedFlow branches",
+                    "wave": 2, "base_context_id": first_state["last_context_id"], "checkpoint": True}
+        old_content, _, _ = create_context(self.settings, "JOINED-101", json.dumps({"INVESTIGATION_REQUEST": followup}))
+        old_runtime = session_state(self.settings, "JOINED-101")["investigation_runtime"]
+        self.assertEqual(generation.generation, old_runtime["generation"])
+        self.assertEqual(runtime["execution_flow"]["flow_id"], old_runtime["execution_flow"]["flow_id"])
+        self.assertEqual("verified", old_runtime["coverage"]["main_execution_flow"])
+        self.assertIn("void right() { join(); }", old_content)
+        self.assertNotIn("void right() { sink(); }", old_content)
+        self.assertEqual({"join"}, {item["target"] for item in old_runtime["execution_flow"]["steps"]
+                                    if item["path"] == path and item["line"] == 4 and item["edge_type"] == "CALLS"})
+
+        start_session(self.settings, "JOINED-102", "Trace the new JoinedFlow branches")
+        new_content, _, _ = create_context(self.settings, "JOINED-102", json.dumps({"INVESTIGATION_REQUEST": request}))
+        new_runtime = session_state(self.settings, "JOINED-102")["investigation_runtime"]
+        self.assertEqual(generation_two.generation, new_runtime["generation"])
+        self.assertIn("void right() { sink(); }", new_content)
+        self.assertEqual({"sink"}, {item["target"] for item in new_runtime["execution_flow"]["steps"]
+                                    if item["path"] == path and item["line"] == 4 and item["edge_type"] == "CALLS"})
+
+    def test_execution_flow_retains_recursive_edges_without_cyclic_paths(self) -> None:
+        path = "src/main/java/demo/RecursiveFlow.java"
+        source = """class RecursiveFlow {
+  void start() { middle(); }
+  void middle() { start(); end(); }
+  void end() { middle(); }
+}
+"""
+        (self.root / "customer-api" / path).write_text(source, encoding="utf-8")
+        generation = self.publish("sha-recursive-flow", "RECURSIVE_FLOW")
+        connection = sqlite3.connect(self.settings.state_dir / "catalog.sqlite3")
+        try:
+            entities = dict(connection.execute(
+                "SELECT e.simple_name,e.entity_id FROM generation_entities g "
+                "JOIN atlas_entities e ON e.entity_id=g.entity_id "
+                "WHERE g.generation=? AND e.repo=? AND e.path=? AND e.kind='method'",
+                (generation.generation, "customer-api", path),
+            ))
+        finally:
+            connection.close()
+        names = {identifier: name for name, identifier in entities.items()}
+        bundle = ContextBundle("trace recursion", atlas_generation=generation, evidence=[
+            Evidence("customer-api", path, 1, 5, source, "code", 100, verification_content=source),
+        ])
+        flow = _execution_flow(self.settings, generation, [entities["start"]], bundle)
+        steps = {item["identity"]: item for item in flow["steps"]}
+        self.assertEqual({("start", "middle"), ("middle", "start"), ("middle", "end"), ("end", "middle")}, {
+            (names[item["source_id"]], names[item["target_id"]]) for item in steps.values()
+        })
+        self.assertTrue(any(item["length"] == 2 for item in flow["paths"]))
+        for path in flow["paths"]:
+            values = [steps[identifier] for identifier in path["step_ids"]]
+            nodes = [values[0]["source_id"], *(item["target_id"] for item in values)]
+            self.assertEqual(len(nodes), len(set(nodes)), "recursion must not be presented as an acyclic path")
+            self.assertLessEqual(path["length"], flow["bounds"]["depth"])
+        self.assertLessEqual(flow["database_operations"], flow["bounds"]["database_query_limit"])
+        from brain.investigation import _execution_paths
+
+        self_loop = {**next(iter(steps.values())), "source_id": "self", "target_id": "self"}
+        self.assertEqual([], _execution_paths([self_loop]))
+
     def test_receiver_dispatch_stays_candidate_without_exact_type_resolution(self) -> None:
         repository = self.root / "receiver-flow"
         source_root = repository / "src/main/java/demo"

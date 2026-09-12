@@ -24,6 +24,7 @@ from importlib.resources import files as package_files
 from pathlib import Path
 from typing import Any, Iterable
 
+from .investigation import source_verification_scope
 from .locks import ticket_exclusive, ticket_retrieval_exclusive, ticket_snapshot_exclusive, workspace_exclusive
 from .platforms import (
     atomic_managed_bytes_write,
@@ -1350,8 +1351,12 @@ def _is_documentation_path(path: str) -> bool:
     return value.suffix.lower() in {".md", ".rst", ".txt", ".adoc"} or value.stem.casefold() in {"readme", "license", "changelog"}
 
 
-def _symbol_declaration(name: str) -> re.Pattern[str]:
+def _symbol_declaration(name: str, *, path: str = "") -> re.Pattern[str]:
     escaped = re.escape(name)
+    if path.casefold().endswith((".py", ".pyi")):
+        # Python control-flow words are not Java-style return types. In
+        # particular, `for x in name(...)` is a call, never a definition.
+        return re.compile(rf"^\s*(?:async\s+)?(?:class|def)\s+{escaped}\b")
     declaration = (
         rf"\b(?:class|interface|enum|record|trait|struct|type|object|def|fn|func|function|fun)\s+{escaped}\b"
         rf"|\b{escaped}\s*[:=]\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)"
@@ -1366,8 +1371,10 @@ def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = No
     scope = list(repos or [])
     name = query.rsplit(".", 1)[-1]
     escaped = re.escape(name)
-    declaration_re = _symbol_declaration(name)
-    hits = [hit for hit in search(settings, name, scope, fixed=True) if declaration_re.search(hit.text)]
+    hits = [
+        hit for hit in search(settings, name, scope, fixed=True)
+        if _symbol_declaration(name, path=hit.path).search(hit.text)
+    ]
     for hit in hits:
         hit.kind = "definition"
         hit.score = 100
@@ -2365,7 +2372,7 @@ def retrieve_context(
     bundle = ContextBundle(str(request["objective"]).strip(), atlas_generation=settings.atlas_generation)
     from .retrieval import compile_request
     from .retrieval.models import RetrievalTrace
-    from .retrieval.planner import route_repositories
+    from .retrieval.planner import SOURCE_SYMBOL_RE, route_repositories
 
     trace = RetrievalTrace(max_physical_backend_operations=settings.max_backend_operations)
     trace_token = _ACTIVE_RETRIEVAL_TRACE.set(trace)
@@ -2508,13 +2515,13 @@ def retrieve_context(
                     hits = []
             symbol_query = operation.value in {
                 item["value"] for item in request.get("anchors") or [] if item.get("kind") == "symbol"
-            } or bool(re.fullmatch(r"[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+", operation.value))
-            declaration = _symbol_declaration(operation.value.rsplit(".", 1)[-1]) if symbol_query else None
+            } or bool(SOURCE_SYMBOL_RE.fullmatch(operation.value))
+            symbol_name = operation.value.rsplit(".", 1)[-1] if symbol_query else None
 
             def source_match() -> bool:
                 return any(
                     not _is_documentation_path(hit.path)
-                    and (declaration is None or declaration.search(hit.text))
+                    and (symbol_name is None or _symbol_declaration(symbol_name, path=hit.path).search(hit.text))
                     for hit in hits
                 )
 
@@ -2522,7 +2529,7 @@ def retrieve_context(
             # implementation repo. Keep those hits, but widen disjoint scopes.
             searched_repos = set(repos or [repo.name for repo in settings.repositories])
             if hits and not source_match():
-                reason = "lexical_references_only" if declaration is not None and any(
+                reason = "lexical_references_only" if symbol_name is not None and any(
                     not _is_documentation_path(hit.path) for hit in hits
                 ) else "lexical_documentation_only"
                 if reason not in trace.fallback_reasons:
@@ -2536,9 +2543,9 @@ def retrieve_context(
                         hits.extend(search(settings, operation.value, pending, fixed=True))
                         searched_repos.update(pending)
                         trace.widening_rounds += 1
-            if declaration is not None:
+            if symbol_name is not None:
                 for hit in hits:
-                    if not _is_documentation_path(hit.path) and declaration.search(hit.text):
+                    if not _is_documentation_path(hit.path) and _symbol_declaration(symbol_name, path=hit.path).search(hit.text):
                         hit.kind = "definition"
                         hit.score = max(hit.score, 100)
                         hit.found_by = sorted(set([*hit.found_by, "symbol declaration"]))
@@ -4752,6 +4759,7 @@ def investigation_continuation(settings: Settings, state: dict[str, Any]) -> dic
 
 
 @ticket_retrieval_exclusive
+@source_verification_scope()
 def create_context(
     settings: Settings,
     ticket: str,

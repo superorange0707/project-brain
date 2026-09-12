@@ -2,6 +2,20 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.20] - 2026-09-12
+
+- Find method implementations beyond reference-only repositories, including
+  camelCase, acronym and snake_case identifiers. Do not rank Python control
+  flow or quoted references as function declarations.
+- Preserve converging call branches and links between investigation seeds.
+  Keep recursive edges as navigation without presenting cyclic execution paths.
+- Reuse bounded Java source transformations and endpoint extraction within one
+  investigation request. Recheck pinned-source authority and delivered ranges
+  on every use; discard the temporary results when the request ends.
+- Preserve Atlas/Semantic schemas, embedding inputs and existing workspace state.
+  No refresh, index rebuild, model reinstall or ticket reset is required solely
+  for this patch. Includes the Atlas refresh reliability fixes from v1.0.19.
+
 ## [1.0.19] - 2026-09-12
 
 - Skip unused serial remote-URL probes when refresh is explicitly run without
