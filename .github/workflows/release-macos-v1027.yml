@@ -1,0 +1,189 @@
+name: Publish verified v1.0.27 macOS artifacts
+
+# Explicitly authorized Mac-first release. Reuse the verified immutable tag;
+# Windows qualification does not gate this platform-specific publication.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-macos-v1027
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: v1.0.27
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require exact tagged source and completed Mac qualification
+        shell: python
+        run: |
+          import json, os, subprocess
+          def api(path):
+              return json.loads(subprocess.check_output(["gh", "api", path], text=True))
+          repo = os.environ["GH_REPO"]
+          sha = "46214834753e92b16976c35f85e441aa80b6aa04"
+          assert subprocess.check_output(["git", "rev-parse", "v1.0.27^{commit}"], text=True).strip() == sha
+          for run, required in (
+              (34861628770, ["Standalone macos-arm64", "Standalone macos-amd64", "Build distributions",
+                            "Compare deterministic behavior across five native artifacts",
+                            "Stable v1 model-pack catalog readiness (macos-15, darwin-arm64)",
+                            *[f"Python {version}" for version in ("3.11", "3.12", "3.13", "3.14")]]),
+              (34861629152, ["Standalone macOS arm64", "Build distributions",
+                            *[f"Python {version}" for version in ("3.11", "3.12", "3.13", "3.14")]]),
+          ):
+              metadata = api(f"repos/{repo}/actions/runs/{run}")
+              assert metadata["head_sha"] == sha
+              assert metadata["path"] == (".github/workflows/release.yml" if run == 34861628770 else ".github/workflows/ci.yml")
+              results = {job["name"]: job["conclusion"] for job in api(f"repos/{repo}/actions/runs/{run}/jobs?per_page=100")["jobs"]}
+              for name in required:
+                  assert results.get(name) == "success", (run, name, results.get(name))
+                  print(f"PASS: {run} {name}")
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34861628770
+          name: standalone-macos-arm64
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34861628770
+          name: standalone-macos-amd64
+          path: dist/
+      - name: Validate exact Mac assets and prepare checksums and scoped release notes
+        shell: python
+        run: |
+          import hashlib, subprocess, tarfile
+          from pathlib import Path
+          root = Path("dist")
+          expected = {"project-brain-v1.0.27-macos-arm64.tar.gz", "project-brain-v1.0.27-macos-amd64.tar.gz"}
+          assert {p.name for p in root.iterdir()} == expected
+          assert hashlib.sha256((root / "project-brain-v1.0.27-macos-arm64.tar.gz").read_bytes()).hexdigest() == "9ec87e8ba4fba329217f9eead3c3b49544a765fd581384bda9ea8b7477213cce"
+          required = {"brain", "codebase-memory-mcp", "zoekt", "zoekt-index", "PROJECT_BRAIN_LICENSE",
+                      "CODEBASE_MEMORY_LICENSE", "CODEBASE_MEMORY_THIRD_PARTY_NOTICES.md", "ZOEKt_LICENSE", "ZOEKt_VERSION"}
+          for path in sorted(root.iterdir()):
+              with tarfile.open(path) as archive:
+                  files = {member.name.removeprefix("./") for member in archive if member.isfile()}
+                  assert files == required, (path, files)
+              print(f"PASS: {path.name}")
+          (root / "install-project-brain.sh").write_bytes(subprocess.check_output(["git", "show", "v1.0.27:scripts/install-project-brain.sh"]))
+          (root / "SHA256SUMS.txt").write_text("".join(
+              f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(root.iterdir())), encoding="utf-8")
+          notes = subprocess.check_output(["git", "show", "v1.0.27:RELEASE_NOTES.md"], text=True).split("\n---\n", 1)[0]
+          notes = notes.replace("Native macOS, Linux and Windows archives and\nthe existing installers are also available as release assets.",
+                                "This Mac-first release includes Apple Silicon and Intel macOS archives and the\nchecksum-verifying shell installer. Use `--version 1.0.27` with that installer.")
+          notes = notes.replace("Publication requires fresh model qualification,\nthe full native test/build matrix, installer checks, checksums and provenance.",
+                                "Mac qualification, both native macOS installers, checksums and provenance are\nrequired and verified for this platform-specific publication.")
+          notes = notes.replace("## What changed", "This is the explicitly requested **macOS-first release**. Homebrew on macOS\nupdates to 1.0.27. Windows and Linux remain on their previous stable releases;\nthis release is not promoted to the all-platform Latest channel. Windows test\nfixture corrections and qualification continue separately.\n\n## What changed", 1)
+          Path("release-notes.md").write_text(notes, encoding="utf-8")
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-v1027-published-checksums
+          path: dist/SHA256SUMS.txt
+          if-no-files-found: error
+      - name: Attest verified Mac release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: "dist/*"
+      - name: Create draft Mac release
+        run: |
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --latest=false \
+            --title "Project Brain v1.0.27 — macOS" --notes-file release-notes.md
+      - name: Verify downloaded assets and attestations
+        run: |
+          mkdir verified
+          gh release download "$RELEASE_TAG" --dir verified
+          cd verified
+          sha256sum -c SHA256SUMS.txt
+          for asset in *; do gh attestation verify "$asset" --repo "$GH_REPO"; done
+      - name: Publish and verify anonymous downloads
+        run: |
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest=false
+          trap 'gh release edit "$RELEASE_TAG" --draft=true' ERR
+          mkdir anonymous
+          for source in dist/*; do
+            asset="$(basename "$source")"
+            curl --fail --location --silent --show-error --retry 5 --retry-all-errors --retry-delay 5 \
+              "https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}/$asset" --output "anonymous/$asset"
+          done
+          (cd anonymous && sha256sum -c SHA256SUMS.txt)
+          cmp dist/SHA256SUMS.txt anonymous/SHA256SUMS.txt
+          trap - ERR
+
+  homebrew:
+    needs: publish
+    runs-on: macos-14
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-v1027-published-checksums
+          path: expected/
+      - name: Download final public checksums and current tap
+        run: |
+          gh release download v1.0.27 --pattern SHA256SUMS.txt --dir published
+          cmp expected/SHA256SUMS.txt published/SHA256SUMS.txt
+          git clone https://github.com/superorange0707/homebrew-tap.git homebrew-tap
+      - name: Update only macOS asset URLs and checksums
+        shell: python
+        run: |
+          import re
+          from pathlib import Path
+          path = Path("homebrew-tap/Formula/project-brain.rb")
+          original = path.read_text()
+          prefix, linux = original.split("  on_linux do", 1)
+          sums = {name: digest for digest, name in (line.split() for line in Path("published/SHA256SUMS.txt").read_text().splitlines())}
+          for arch in ("arm64", "amd64"):
+              asset = f"project-brain-v1.0.27-macos-{arch}.tar.gz"
+              pattern = rf'url "https://github.com/superorange0707/project-brain/releases/download/v1\.0\.25/project-brain-v1\.0\.25-macos-{arch}\.tar\.gz"\n      sha256 "[0-9a-f]{{64}}"'
+              replacement = f'url "https://github.com/superorange0707/project-brain/releases/download/v1.0.27/{asset}"\n      sha256 "{sums[asset]}"'
+              prefix, count = re.subn(pattern, replacement, prefix)
+              assert count == 1, (arch, count)
+          # Each OS uses the version derived from its own URL. Linux assets and
+          # hashes stay byte-for-byte unchanged while macOS advances.
+          old_test = 'assert_match "brain 1.0.25", shell_output("#{bin}/brain --version")'
+          assert linux.count(old_test) == 1
+          updated = prefix + "  on_linux do" + linux.replace(old_test, 'assert_match "brain #{version}", shell_output("#{bin}/brain --version")')
+          assert original.split("  on_linux do", 1)[1].split("  def install", 1)[0] == updated.split("  on_linux do", 1)[1].split("  def install", 1)[0]
+          path.write_text(updated)
+      - name: Install and test the formula against public assets
+        run: |
+          ruby -c homebrew-tap/Formula/project-brain.rb
+          git -C homebrew-tap diff --check
+          brew update
+          brew tap superorange0707/tap
+          cp homebrew-tap/Formula/project-brain.rb "$(brew --repository superorange0707/tap)/Formula/project-brain.rb"
+          brew install --formula superorange0707/tap/project-brain
+          test "$(brain --version)" = "brain 1.0.27"
+          brain --help >/dev/null
+          brew test superorange0707/tap/project-brain
+      - name: Publish the verified Mac formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          test -n "$HOMEBREW_TAP_TOKEN"
+          git -C homebrew-tap config user.name "project-brain-release[bot]"
+          git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C homebrew-tap add Formula/project-brain.rb
+          git -C homebrew-tap commit -m "project-brain v1.0.27 for macOS"
+          git -C homebrew-tap remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/superorange0707/homebrew-tap.git"
+          git -C homebrew-tap push origin main

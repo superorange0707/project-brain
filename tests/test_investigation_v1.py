@@ -1786,11 +1786,12 @@ String docs = """
         rows.append("}")
         original = "\n".join(rows) + "\n"
         path = self.root / "customer-api" / relative
-        path.write_text(original, encoding="utf-8")
+        path.write_text(original, encoding="utf-8", newline="\r\n")
+        original = path.read_bytes().decode("utf-8")
         first = self.publish("sha-checkpoint-source-g1", "CHECKPOINT_G1")
         start_session(self.settings, "CHECKPOINT-OLD", "Inspect the original entry points")
         updated = original.replace("G1_VALUE", "G2_VALUE")
-        path.write_text(updated, encoding="utf-8")
+        path.write_bytes(updated.encode("utf-8"))
         second = self.publish("sha-checkpoint-source-g2", "CHECKPOINT_G2")
         start_session(self.settings, "CHECKPOINT-NEW", "Inspect the updated entry points")
         request = {"INVESTIGATION_REQUEST": {
@@ -2268,6 +2269,8 @@ String docs = """
         self.assertEqual(5, session_state(self.settings, "CONTINUE")["investigation_runtime"]["wave"])
 
     def test_checkpoint_retry_keeps_reserved_context_when_retrieval_coverage_changes(self) -> None:
+        from brain.core import SearchHit, read_source
+
         generation = self.publish("sha-g1", "G1_ONLY")
         start_session(self.settings, "RETRY-COVERAGE", "Retry the same operation without changing its public context ID.")
         request = self.request("Trace CustomerController G1_ONLY", wave=1)
@@ -2278,9 +2281,9 @@ String docs = """
             paths = ["src/main/java/demo/CustomerController.java", "src/test/java/demo/CustomerControllerTest.java"]
             evidence = []
             for path in paths[:1] if partial else paths:
-                content = (self.settings.repo("customer-api").source_path / path).read_text(encoding="utf-8")
-                evidence.append(Evidence("customer-api", path, 1, len(content.splitlines()), content, "code", 100,
-                                         [], content))
+                evidence.append(read_source(
+                    self.settings, SearchHit("customer-api", path, 1, "", "code", 100), full=True,
+                ))
             return ContextBundle("Checkpoint retry", evidence=evidence, atlas_generation=generation)
 
         with mock.patch("brain.core.retrieve_context", side_effect=lambda *a, **k: retry_bundle(partial=True)), \

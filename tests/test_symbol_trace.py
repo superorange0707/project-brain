@@ -66,17 +66,19 @@ class SymbolTraceTests(unittest.TestCase):
         self.assertNotIn("handlePayment  CALLS  dangerousWrite", content)
 
     def test_multi_symbol_fallback_parses_once_per_request_on_each_ticket_pin(self):
+        self.path.write_text(self.source, encoding="utf-8", newline="\r\n")
+        original = self.path.read_bytes().decode("utf-8")
         old = self.publish()
         core.start_session(self.settings, "MULTI-OLD", "Trace both original methods")
-        updated = self.source.replace("validatePayment", "newValidation")
-        self.path.write_text(updated, encoding="utf-8")
+        updated = original.replace("validatePayment", "newValidation")
+        self.path.write_bytes(updated.encode("utf-8"))
         new = self.publish()
         core.start_session(self.settings, "MULTI-NEW", "Trace both updated methods")
         outer_cache = {}
         token = core._ACTIVE_RETRIEVAL_CACHE.set(outer_cache)
         self.addCleanup(core._ACTIVE_RETRIEVAL_CACHE.reset, token)
         for ticket, serving, name, source in (
-            ("MULTI-OLD", old, "validatePayment", self.source),
+            ("MULTI-OLD", old, "validatePayment", original),
             ("MULTI-NEW", new, "newValidation", updated),
         ):
             request = {"CONTEXT_REQUEST": {"version": 3, "objective": "Trace both methods",
