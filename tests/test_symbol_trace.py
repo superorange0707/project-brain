@@ -296,7 +296,8 @@ class SymbolTraceTests(unittest.TestCase):
                 body["hints"] = {"symbols": ["handlePayment"]}
                 body["coverage"] = {"production": "required", "tests": "omit", "relationships": "omit"}
             request = core.parse_context_request(json.dumps({"CONTEXT_REQUEST": body}))
-            with self.subTest(version=version), mock.patch.object(atlas, "route", return_value={"repos": ["noise", "repo"]}):
+            with self.subTest(version=version), mock.patch.object(atlas, "route", return_value={"repos": ["noise", "repo"]}), \
+                    mock.patch("brain.backends.zoekt.search", return_value=None):
                 bundle = core.retrieve_context(serving, request)
                 self.assertEqual([("repo", "Payments.java")], [(item.repo, item.path) for item in bundle.evidence])
                 self.assertIn("void handlePayment()", bundle.evidence[0].content)
@@ -320,6 +321,17 @@ class SymbolTraceTests(unittest.TestCase):
                 hits, relationships = core.trace_symbol(selected, "handlePayment", ["noise"])
                 self.assertFalse(any("definition" in hit.kind for hit in hits))
                 self.assertEqual([], relationships)
+
+    def test_symbol_reference_fallback_needs_no_optional_backend_and_keeps_word_boundaries(self):
+        self.path.write_text(
+            'class Payments {\n void route() { handlePayment(); }\n'
+            ' void unrelated() { handlePaymentExtra(); }\n}\n', encoding='utf-8')
+        serving = self.publish()
+        with mock.patch('brain.backends.zoekt.search', return_value=None) as optional:
+            hits = core.symbol_hits(serving, 'handlePayment', ['repo'])
+        self.assertEqual([('repo', 'Payments.java', 2)], [(hit.repo, hit.path, hit.line) for hit in hits])
+        self.assertEqual({'symbol reference'}, {hit.kind for hit in hits})
+        optional.assert_not_called()
 
     def test_corrupt_graph_falls_back_to_exact_old_source_never_new_generation(self):
         old = self.publish()

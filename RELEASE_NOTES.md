@@ -1,4 +1,4 @@
-# Project Brain v1.0.26 — Reliable Investigations and Source Retrieval
+# Project Brain v1.0.27 — Reliable Investigations and Source Retrieval
 
 This release improves investigation continuation, source retrieval and the local
 web workspace while preserving ticket-pinned source and existing model packs.
@@ -18,6 +18,9 @@ web workspace while preserving ticket-pinned source and existing model packs.
   Python import-aware navigation and HTTP/configuration/event source navigation.
   Reuse bounded parsing, anchor lookup and source reads without hiding incomplete
   results or treating ambiguous navigation as verified source.
+- Keep symbol-reference fallback available from the pinned lexical index when
+  the optional Zoekt backend is absent, preserving repository scopes and exact
+  symbol word boundaries.
 - Fix narrow-screen layouts, long result/path wrapping, form labels and the
   readiness display for indexed non-Git snapshots.
 
@@ -33,7 +36,7 @@ brain --version
 brain ui
 ```
 
-The version must be `brain 1.0.26`. Native macOS, Linux and Windows archives and
+The version must be `brain 1.0.27`. Native macOS, Linux and Windows archives and
 the existing installers are also available as release assets.
 
 Regenerate the M365 Agent Kit with `brain agent-kit m365 --json` and replace the
@@ -48,8 +51,10 @@ history as an upgrade step.
 
 ## Validation scope
 
-Local acceptance passed 843 tests, with five native Windows cases deferred to
-Windows CI. The installed UI passed 48 layout checks across three widths and
+Local acceptance of the investigation/UI changes passed 843 tests, with five
+native Windows cases deferred to Windows CI. The optional-backend correction
+also passed the 17-test symbol-trace suite, including a new regression test.
+The installed UI passed 48 layout checks across three widths and
 both themes; the macOS arm64 Core executable matched source behavior in the
 deterministic release fixture. Publication requires fresh model qualification,
 the full native test/build matrix, installer checks, checksums and provenance.
@@ -57,6 +62,9 @@ the full native test/build matrix, installer checks, checksums and provenance.
 These bounded public/synthetic and local Core checks do not promise universal
 enterprise search quality or fixed model latency. Target repositories remain
 read-only, and unavailable pinned evidence never substitutes newer source.
+
+The v1.0.26 candidate was not published after cross-platform validation found
+the optional-backend dependency corrected here.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 

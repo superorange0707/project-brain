@@ -1558,7 +1558,10 @@ def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = No
             else:
                 merged[key] = hit
         return list(merged.values())
-    fallback = search(settings, rf"\b{escaped}\b", scope)
+    # Pinned lexical indexes serve literals without an optional regex backend.
+    # Apply the symbol boundary to verified source lines before returning refs.
+    reference = re.compile(rf"\b{escaped}\b")
+    fallback = [hit for hit in search(settings, name, scope, fixed=True) if reference.search(hit.text)]
     for hit in fallback:
         hit.kind = "symbol reference"
         hit.score = 60

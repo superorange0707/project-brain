@@ -2,7 +2,16 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.26] - 2026-09-14
+## [1.0.27] - 2026-09-14
+
+- Fix symbol-reference fallback without the optional Zoekt backend by querying
+  the pinned literal index and preserving exact symbol word boundaries. Keep
+  repository scopes and unverified-definition reporting intact.
+- Includes the investigation, source-retrieval and UI changes listed below.
+  The v1.0.26 candidate was not published after cross-platform validation found
+  the optional-backend dependency; v1.0.27 replaces that candidate.
+
+## [1.0.26] - Unpublished candidate, 2026-09-14
 
 - Accept complete AI replies containing bounded JSON/YAML request documents,
   including surrounding explanation, code fences and BOMs. Prepare a validated
