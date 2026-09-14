@@ -1,12 +1,16 @@
-name: Publish verified v1.0.27 macOS artifacts
+name: Publish verified v1.0.27 artifacts
 
-# Explicitly authorized Mac-first release. Reuse the verified immutable tag;
-# Windows qualification does not gate this platform-specific publication.
+# Explicitly authorized Mac-first release, followed by qualified completion.
+# Reuse the exact existing tag and preserve the already published Mac assets.
 on:
   workflow_dispatch:
     inputs:
       homebrew_only:
         description: "Finish Homebrew publication from the already verified public Mac release"
+        type: boolean
+        default: false
+      complete_platforms:
+        description: "Add qualified Windows/Linux assets and promote the complete release to Latest"
         type: boolean
         default: false
 
@@ -19,7 +23,7 @@ concurrency:
 
 jobs:
   publish:
-    if: ${{ !inputs.homebrew_only }}
+    if: ${{ !inputs.homebrew_only && !inputs.complete_platforms }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -198,3 +202,157 @@ jobs:
           git -C homebrew-tap commit -m "project-brain v1.0.27 for macOS"
           git -C homebrew-tap remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/superorange0707/homebrew-tap.git"
           git -C homebrew-tap push origin main
+
+  complete:
+    if: ${{ inputs.complete_platforms && !inputs.homebrew_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: v1.0.27
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require full native qualification and identical product source
+        shell: python
+        run: |
+          import json, os, subprocess
+          def command(*args):
+              return subprocess.check_output(args, text=True).strip()
+          def api(path):
+              return json.loads(command("gh", "api", path))
+          repo = os.environ["GH_REPO"]
+          source = "46214834753e92b16976c35f85e441aa80b6aa04"
+          tested = "fa8bd2ea6e784dd1eb2a1277df30b345654764cb"
+          assert command("git", "rev-parse", "v1.0.27^{commit}") == source
+          subprocess.run(["git", "merge-base", "--is-ancestor", source, tested], check=True)
+          # CRLF fixture corrections are tested by the new CI commit. Every
+          # product, installer and packaging file is identical to the build tag.
+          changed = set(command("git", "diff", "--name-only", source, tested).splitlines())
+          assert changed == {"tests/test_investigation_v1.py", "tests/test_optimization.py",
+                             "tests/test_symbol_scope.py", "tests/test_symbol_trace.py",
+                             ".github/workflows/release-macos-v1027.yml"}, changed
+          subprocess.run(["git", "diff", "--exit-code", source, tested, "brain", "scripts", "pyproject.toml"], check=True)
+          builds = api(f"repos/{repo}/actions/runs/34861628770")
+          assert builds["head_sha"] == source and builds["path"] == ".github/workflows/release.yml"
+          results = {job["name"]: job["conclusion"] for job in api(f"repos/{repo}/actions/runs/34861628770/jobs?per_page=100")["jobs"]}
+          required = ["Build distributions", "Compare deterministic behavior across five native artifacts",
+                      "Standalone Windows amd64", *[f"Standalone {platform}" for platform in
+                      ("macos-arm64", "macos-amd64", "linux-arm64", "linux-amd64")],
+                      "Stable v1 model-pack catalog readiness (macos-15, darwin-arm64)",
+                      "Stable v1 model-pack catalog readiness (windows-latest, windows-amd64)",
+                      *[f"Python {version}" for version in ("3.11", "3.12", "3.13", "3.14")]]
+          for name in required:
+              assert results.get(name) == "success", (name, results.get(name))
+              print(f"PASS: {name}")
+          ci = api(f"repos/{repo}/actions/runs/34866331400")
+          assert ci["head_sha"] == tested and ci["path"] == ".github/workflows/ci.yml" and ci["conclusion"] == "success"
+          jobs = api(f"repos/{repo}/actions/runs/34866331400/jobs?per_page=100&filter=all")["jobs"]
+          ci_jobs = {job["name"]: job["conclusion"] for job in sorted(jobs, key=lambda job: job["id"])}
+          for prefix in ("Python ", "Native Windows Python "):
+              for version in ("3.11", "3.12", "3.13", "3.14"):
+                  assert ci_jobs.get(prefix + version) == "success", (prefix, version)
+          release = api(f"repos/{repo}/releases/tags/v1.0.27")
+          assert not release["draft"] and not release["prerelease"] and not release.get("immutable")
+          assert {asset["name"] for asset in release["assets"]} == {
+              "project-brain-v1.0.27-macos-arm64.tar.gz", "project-brain-v1.0.27-macos-amd64.tar.gz",
+              "install-project-brain.sh", "SHA256SUMS.txt"}
+          print("PASS: all native CI versions; product and packaging bytes match the immutable build tag")
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34861628770
+          pattern: standalone-*
+          merge-multiple: true
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34861628770
+          name: python-package-distributions
+          path: dist/
+      - name: Preserve published Mac bytes and validate all remaining archives
+        shell: python
+        run: |
+          import hashlib, subprocess, tarfile, zipfile
+          from pathlib import Path
+          root = Path("dist")
+          expected = {f"project-brain-v1.0.27-{platform}.tar.gz" for platform in
+                      ("macos-arm64", "macos-amd64", "linux-arm64", "linux-amd64")}
+          expected.update({"project-brain-v1.0.27-windows-amd64.zip", "project_brain_context-1.0.27-py3-none-any.whl",
+                           "project_brain_context-1.0.27.tar.gz"})
+          assert {path.name for path in root.iterdir()} == expected
+          required = {"brain", "codebase-memory-mcp", "zoekt", "zoekt-index", "PROJECT_BRAIN_LICENSE",
+                      "CODEBASE_MEMORY_LICENSE", "CODEBASE_MEMORY_THIRD_PARTY_NOTICES.md", "ZOEKt_LICENSE", "ZOEKt_VERSION"}
+          for path in root.glob("project-brain-*.tar.gz"):
+              with tarfile.open(path) as archive:
+                  assert {member.name.removeprefix("./") for member in archive if member.isfile()} == required
+          with zipfile.ZipFile(root / "project-brain-v1.0.27-windows-amd64.zip") as archive:
+              assert archive.testzip() is None
+              windows_files = (required - {"brain", "codebase-memory-mcp", "zoekt", "zoekt-index"}) | {
+                  "brain.exe", "codebase-memory-mcp.exe", "zoekt.exe", "zoekt-index.exe", "ZOEKt_WINDOWS_PATCH"}
+              assert set(archive.namelist()) == windows_files, archive.namelist()
+          with zipfile.ZipFile(root / "project_brain_context-1.0.27-py3-none-any.whl") as wheel:
+              assert wheel.testzip() is None
+              assert "\nVersion: 1.0.27\n" in wheel.read("project_brain_context-1.0.27.dist-info/METADATA").decode()
+              sources = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", "v1.0.27", "brain"], text=True).splitlines()
+              assert {name for name in wheel.namelist() if name.startswith("brain/")} == set(sources)
+              for name in sources:
+                  assert wheel.read(name) == subprocess.check_output(["git", "show", f"v1.0.27:{name}"]), name
+          with tarfile.open(root / "project_brain_context-1.0.27.tar.gz") as archive:
+              assert "\nVersion: 1.0.27\n" in archive.extractfile("project_brain_context-1.0.27/PKG-INFO").read().decode()
+          for name in ("install-project-brain.sh", "install-project-brain.ps1"):
+              (root / name).write_bytes(subprocess.check_output(["git", "show", f"v1.0.27:scripts/{name}"]))
+          previous = Path("previous-release")
+          previous.mkdir()
+          subprocess.run(["gh", "release", "download", "v1.0.27", "--dir", str(previous)], check=True)
+          subprocess.run(["sha256sum", "-c", "SHA256SUMS.txt"], cwd=previous, check=True)
+          for path in previous.iterdir():
+              if path.name != "SHA256SUMS.txt":
+                  assert path.read_bytes() == (root / path.name).read_bytes(), path.name
+          (root / "SHA256SUMS.txt").write_text("".join(
+              f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(root.iterdir())), encoding="utf-8")
+          print("PASS: archive integrity, wheel source identity and unchanged published Mac bytes")
+      - name: Attest all qualified release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: "dist/*"
+      - name: Verify provenance before uploading additional platforms
+        run: |
+          for asset in dist/*; do gh attestation verify "$asset" --repo "$GH_REPO"; done
+      - name: Add qualified platforms without replacing published Mac assets
+        run: |
+          gh release upload "$RELEASE_TAG" dist/*-linux-*.tar.gz dist/*-windows-*.zip dist/*.whl \
+            dist/project_brain_context-1.0.27.tar.gz dist/install-project-brain.ps1
+          gh release upload "$RELEASE_TAG" dist/SHA256SUMS.txt --clobber
+      - name: Require complete anonymous downloads and provenance before promoting Latest
+        run: |
+          mkdir anonymous
+          for source in dist/*; do
+            asset="$(basename "$source")"
+            curl --fail --location --silent --show-error --retry 5 --retry-all-errors --retry-delay 5 \
+              "https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}/$asset" --output "anonymous/$asset"
+          done
+          (cd anonymous && sha256sum -c SHA256SUMS.txt)
+          cmp dist/SHA256SUMS.txt anonymous/SHA256SUMS.txt
+          for asset in anonymous/*; do gh attestation verify "$asset" --repo "$GH_REPO"; done
+          git show v1.0.27:RELEASE_NOTES.md | awk '/^---$/ { exit } { print }' > release-notes.md
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("release-notes.md")
+          notes = path.read_text().replace("brew update\nbrew upgrade", "brew update\nbrew trust --formula superorange0707/tap/project-brain\nbrew upgrade")
+          notes += "\nAll five native archives, both installers and Python distributions are now published. "
+          notes += "The previously published macOS executables are unchanged. Full Linux/Windows Python 3.11–3.14 CI "
+          notes += "uses corrected CRLF test fixtures; every product and packaging file is byte-identical to the build tag. "
+          notes += "Fresh Semantic/Precision qualification passed on native macOS and Windows.\n"
+          path.write_text(notes)
+          PY
+          gh release edit "$RELEASE_TAG" --latest --title "Project Brain v1.0.27" --notes-file release-notes.md
