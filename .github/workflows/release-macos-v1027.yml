@@ -4,6 +4,11 @@ name: Publish verified v1.0.27 macOS artifacts
 # Windows qualification does not gate this platform-specific publication.
 on:
   workflow_dispatch:
+    inputs:
+      homebrew_only:
+        description: "Finish Homebrew publication from the already verified public Mac release"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -14,6 +19,7 @@ concurrency:
 
 jobs:
   publish:
+    if: ${{ !inputs.homebrew_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -128,6 +134,7 @@ jobs:
 
   homebrew:
     needs: publish
+    if: ${{ always() && (needs.publish.result == 'success' || inputs.homebrew_only) }}
     runs-on: macos-14
     timeout-minutes: 20
     env:
@@ -136,6 +143,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.homebrew_only && '34865920024' || github.run_id }}
           name: macos-v1027-published-checksums
           path: expected/
       - name: Download final public checksums and current tap
@@ -165,14 +174,16 @@ jobs:
           updated = prefix + "  on_linux do" + linux.replace(old_test, 'assert_match "brain #{version}", shell_output("#{bin}/brain --version")')
           assert original.split("  on_linux do", 1)[1].split("  def install", 1)[0] == updated.split("  on_linux do", 1)[1].split("  def install", 1)[0]
           path.write_text(updated)
-      - name: Install and test the formula against public assets
+      - name: Upgrade the installed formula from 1.0.25 and test public assets
         run: |
           ruby -c homebrew-tap/Formula/project-brain.rb
           git -C homebrew-tap diff --check
           brew update
-          brew tap superorange0707/tap
-          cp homebrew-tap/Formula/project-brain.rb "$(brew --repository superorange0707/tap)/Formula/project-brain.rb"
+          brew trust --formula superorange0707/tap/project-brain
           brew install --formula superorange0707/tap/project-brain
+          test "$(brain --version)" = "brain 1.0.25"
+          cp homebrew-tap/Formula/project-brain.rb "$(brew --repository superorange0707/tap)/Formula/project-brain.rb"
+          brew upgrade --formula superorange0707/tap/project-brain
           test "$(brain --version)" = "brain 1.0.27"
           brain --help >/dev/null
           brew test superorange0707/tap/project-brain
