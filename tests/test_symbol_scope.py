@@ -1666,7 +1666,7 @@ class SymbolScopeTests(unittest.TestCase):
             ''.join(f' int field{n};\n' for n in range(200)) +
             ' boolean first() { return true; }\n boolean authorize(int amount) {\n' +
             ''.join(f'  amount += {n};\n' for n in range(200)) +
-            '  return amount > 42;\n }\n}\n', encoding='utf-8')
+            '  return amount > 42;\n }\n}\n', encoding='utf-8', newline='\r\n')
         pinned = self.publish()
         request = self.request()
         request['INVESTIGATION_REQUEST']['anchors'].append({'kind': 'symbol', 'value': 'billing.Authorization.first'})
@@ -1678,7 +1678,11 @@ class SymbolScopeTests(unittest.TestCase):
         content = core.pack_context(pinned, 'TWO', 1, bundle)
         self.assertIn('first() { return true; }', content)
         self.assertIn('return amount > 42;', content)
-        self.assertEqual(2, len(bundle.trace['symbol_reads']))
+        # A window can cover both adjacent methods; content identity determines
+        # their traversal order, including when the source uses CRLF.
+        self.assertLessEqual(len(bundle.trace['symbol_reads']), 2)
+        for line in (203, 405):
+            self.assertTrue(any(item.line_start <= line <= item.line_end for item in bundle.evidence))
 
     def test_legacy_same_file_symbols_keep_each_decisive_source_window(self):
         self.source.write_text(

@@ -1,0 +1,47 @@
+name: Diagnose Windows source retrieval
+on:
+  push:
+    branches: [codex/windows-source-diagnostic]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: python -m pip install ".[semantic]"
+      - name: Run isolated source regressions and record actual retrieval trace
+        shell: python
+        run: |
+          import json, sys, sqlite3, unittest
+          from unittest import mock
+          from brain import core
+          sys.path.insert(0, "tests")
+          retrieve = core.retrieve_context
+          records = []
+          def traced(*args, **kwargs):
+              bundle = retrieve(*args, **kwargs)
+              records.append({"objective": bundle.objective, "trace": bundle.trace, "unresolved": bundle.unresolved, "warnings": bundle.warnings})
+              return bundle
+          names = [
+              "test_investigation_v1.InvestigationV1Tests.test_checkpoint_retry_keeps_reserved_context_when_retrieval_coverage_changes",
+              "test_investigation_v1.InvestigationV1Tests.test_first_useful_checkpoint_parses_shared_source_once_and_keeps_public_pins",
+              "test_optimization.OptimizationTests.test_execution_flow_batches_validation_without_losing_later_seeds",
+              "test_optimization.OptimizationTests.test_unresolved_external_call_does_not_discard_the_verified_internal_flow",
+              "test_symbol_scope.SymbolScopeTests.test_exact_error_requested_relations_deliver_bodies_without_a_symbol_followup",
+              "test_symbol_scope.SymbolScopeTests.test_same_file_fusion_keeps_both_requested_method_ranges",
+              "test_symbol_trace.SymbolTraceTests.test_multi_symbol_fallback_parses_once_per_request_on_each_ticket_pin",
+          ]
+          print(sys.version, sqlite3.sqlite_version)
+          with mock.patch.object(core, "retrieve_context", traced):
+              result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames(names))
+          for record in records:
+              if "Investigation failed" in record["objective"]:
+                  print(json.dumps(record, default=str))
+          sys.exit(not result.wasSuccessful())

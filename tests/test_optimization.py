@@ -1404,7 +1404,7 @@ class Routes {
 
     def test_execution_flow_batches_validation_without_losing_later_seeds(self) -> None:
         import sqlite3
-        from brain.core import Evidence
+        from brain.core import SearchHit, read_source
         from brain.investigation import _execution_flow, MAX_FLOW_DB_QUERIES, MAX_FLOW_SEEDS
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1420,7 +1420,7 @@ class Routes {
                     f"def middle_{i}():\n    return final_{i}()\n"
                     f"def final_{i}():\n    return {i}\n"
                 )
-                (root / "repo" / path).write_text(sources[path])
+                (root / "repo" / path).write_text(sources[path], encoding="utf-8", newline="\r\n")
             settings = load_settings(config)
             snapshot_indexes(settings)
             generation = current_generation_ref(settings)
@@ -1435,8 +1435,8 @@ class Routes {
                 connection.close()
             self.assertEqual(MAX_FLOW_SEEDS, len(seeds))
             bundle = ContextBundle("Trace every anchored entry", atlas_generation=generation, evidence=[
-                Evidence("repo", path, 1, 6, content, "code", 100, verification_content=content)
-                for path, content in sources.items()
+                read_source(settings, SearchHit("repo", path, 1, "", "code", 100), full=True)
+                for path in sources
             ])
             flow = _execution_flow(settings, generation, seeds, bundle)
             self.assertLessEqual(flow["database_operations"], MAX_FLOW_DB_QUERIES)
@@ -1471,14 +1471,14 @@ class Routes {
 
     def test_unresolved_external_call_does_not_discard_the_verified_internal_flow(self) -> None:
         import sqlite3
-        from brain.core import Evidence
+        from brain.core import SearchHit, read_source
         from brain.investigation import _execution_flow
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "repo").mkdir()
             content = "def entry():\n    logger.info('trace')\n    return service()\ndef service():\n    return 1\n"
-            (root / "repo/main.py").write_text(content)
+            (root / "repo/main.py").write_text(content, encoding="utf-8", newline="\r\n")
             config = root / "brain.toml"
             config.write_text("[project]\nname='external-call'\n[graph]\nenabled=false\n[[repositories]]\nname='repo'\npath='repo'\n")
             settings = load_settings(config)
@@ -1493,7 +1493,7 @@ class Routes {
             finally:
                 connection.close()
             bundle = ContextBundle("Trace through logging", atlas_generation=generation, evidence=[
-                Evidence("repo", "main.py", 1, 5, content, "code", 100, verification_content=content),
+                read_source(settings, SearchHit("repo", "main.py", 1, "", "code", 100), full=True),
             ])
             flow = _execution_flow(settings, generation, [seed], bundle)
             self.assertEqual("ready", flow["status"])
