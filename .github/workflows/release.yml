@@ -708,11 +708,12 @@ jobs:
           ruby -c "$FORMULA"
           git -C homebrew-tap diff --check
           brew update
-          brew tap superorange0707/tap
+          VERIFICATION_NAME="superorange0707/tap/$(basename "$FORMULA" .rb)"
+          brew trust --formula "$VERIFICATION_NAME"
+          brew install --formula "$VERIFICATION_NAME"
           VERIFICATION_FORMULA="$(brew --repository superorange0707/tap)/Formula/$(basename "$FORMULA")"
           cp "$FORMULA" "$VERIFICATION_FORMULA"
-          VERIFICATION_NAME="superorange0707/tap/$(basename "$FORMULA" .rb)"
-          brew install --formula "$VERIFICATION_NAME"
+          brew upgrade --formula "$VERIFICATION_NAME"
           EXPECTED_VERSION="$(python -c 'import pathlib, re; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("brain/__init__.py").read_text()).group(1))')"
           test "$(brain --version)" = "brain ${EXPECTED_VERSION}"
           brain --help >/dev/null
