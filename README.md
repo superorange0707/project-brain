@@ -301,7 +301,13 @@ substitution.
 
 The first response is a full checkpoint. Follow-ups normally return bounded
 deltas identified by stable `context_id` / `base_context_id` lineage. Duplicate
-plans and no-progress waves are rejected instead of repeating expensive search.
+plans are rejected instead of repeating expensive search. There is no fixed
+ticket round limit or extra continuation approval: each submitted request has
+its own resource budget. No-progress and coverage signals guide the next
+evidence request; they do not lock the ticket or change its pinned generation.
+If retrieval saves a context but its AI handoff cannot be written, the UI offers
+**Open saved evidence** so you can copy the existing result without repeating
+retrieval. The internal `context-NNN.md` remains available in that ticket's history.
 
 ## Privacy and safety
 

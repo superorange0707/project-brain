@@ -196,7 +196,7 @@ def _parser() -> argparse.ArgumentParser:
     context.add_argument("--target", choices=("claude", "m365"), help="default: this ticket's last delivery target")
     context.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     context.add_argument("--include-diff", action="store_true")
-    context.add_argument("--continue-investigation", action="store_true", help="approve one more bounded wave on this ticket's original generation; do not reset its evidence or wave counter")
+    context.add_argument("--continue-investigation", action="store_true", help="legacy compatibility flag; new requests need no extra continuation approval")
     context.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
     continue_command = commands.add_parser("continue", help="route a complete AI reply for an existing investigation")
@@ -207,7 +207,7 @@ def _parser() -> argparse.ArgumentParser:
     continue_command.add_argument("--target", choices=("claude", "m365"), help="default: this ticket's last delivery target")
     continue_command.add_argument("--copy", action=argparse.BooleanOptionalAction, default=None)
     continue_command.add_argument("--include-diff", action="store_true")
-    continue_command.add_argument("--continue-investigation", action="store_true", help="approve one more bounded wave on this ticket's original generation; do not reset its evidence or wave counter")
+    continue_command.add_argument("--continue-investigation", action="store_true", help="legacy compatibility flag; new requests need no extra continuation approval")
     continue_command.add_argument("--json", action="store_true", help="print a stable machine-readable result")
 
     resume = commands.add_parser("resume", help="export a bounded handover for a new AI conversation; keep this ticket and its pinned evidence")

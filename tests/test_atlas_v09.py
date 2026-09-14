@@ -170,6 +170,8 @@ class AtlasV09Tests(unittest.TestCase):
         self.assertIn("class EligibilityService", content)
         self.assertNotIn("G2_ONLY", content)
         self.assertIn("bounded, non-replacing handover", content)
+        self.assertIn("No extra round approval is required", content)
+        self.assertNotIn("Existing user-approval pauses", content)
         self.assertIn(old["last_context_id"], content)
         self.assertIn("E0001", content)
         self.assertLessEqual(len(content.encode("utf-8")), 64_000)
@@ -981,6 +983,12 @@ class AtlasV09Tests(unittest.TestCase):
         ))
 
     def test_corrupt_graph_cache_target_is_recomputed(self) -> None:
+        # Metadata-only routing may expand Java calls; Python binding now
+        # requires pinned source and is deliberately absent from route caches.
+        (self.root / 'service/src/Rules.java').write_text(
+            'class Rules {\n boolean recalculate() { return policy(); }\n'
+            ' boolean policy() { return true; }\n}\n', encoding='utf-8')
+        snapshot_indexes(self.settings)
         generation = current_generation_ref(self.settings)
         request = {"version": 4, "objective": "recalculate policy", "searches": [], "paths": [],
                    "symbols": [], "files": [], "history": []}

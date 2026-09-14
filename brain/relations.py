@@ -33,7 +33,10 @@ MAX_RELATIONSHIP_SOURCE_SECONDS = 30.0
 MAX_RELATIONSHIP_FILESYSTEM_ENTRIES = 500_000
 MAX_CONFIG_VALUES = 20_000
 MAX_FACTS_PER_ANALYZER = 8_000
-_RELATIONSHIP_CACHE: dict[tuple[str, str, int, int], list[Relationship]] = {}
+MAX_HTTP_PATH_ALTERNATIVES = 8
+MAX_HTTP_ANNOTATION_BYTES = 8_192
+RELATIONSHIP_EXTRACTOR_VERSION = "relationship-analyzer-v4"
+_RELATIONSHIP_CACHE: dict[tuple[str, str, tuple[tuple[str, str], ...], int, int], list[Relationship]] = {}
 _RELATIONSHIP_RENDER_HASH_CACHE: dict[tuple[str, int, int], str] = {}
 
 
@@ -349,67 +352,295 @@ def _kafka_facts(
     return producers, consumers
 
 
-def _annotation_value(body: str, attribute: str = "value") -> str:
-    named = re.search(rf"\b{attribute}\s*=\s*[\"']([^\"']*)[\"']", body)
-    if named:
-        return named.group(1)
-    unnamed = re.search(r"[\"']([^\"']*)[\"']", body)
-    return unnamed.group(1) if unnamed else ""
+def _annotation_arguments(body: str) -> dict[str, str] | None:
+    """Bounded named/positional fields; quoted commas/equals are not separators."""
+    if len(body.encode("utf-8")) > MAX_HTTP_ANNOTATION_BYTES:
+        return None
+    masked = _structure_mask(body)
+    brackets: list[str] = []
+    for char in masked:
+        if char in "([{":
+            brackets.append(char)
+        elif char in ")]}":
+            if not brackets or brackets.pop() != {")": "(", "]": "[", "}": "{"}[char]:
+                return None
+    if brackets:
+        return None
+    assignments = list(re.finditer(r"(?:^|,)\s*([A-Za-z_$][\w$]*)\s*=", masked))
+    if not assignments:
+        return {"value": body.strip()} if body.strip() else {}
+    # Mixing positional and named Java annotation arguments is not valid.
+    if body[:assignments[0].start()].strip():
+        return None
+    fields: dict[str, str] = {}
+    for index, match in enumerate(assignments):
+        name = match.group(1)
+        if name in fields:
+            return None
+        end = assignments[index + 1].start() if index + 1 < len(assignments) else len(body)
+        fields[name] = body[match.end():end].strip().rstrip(",").strip()
+    return fields
+
+
+def _annotation_paths(body: str, names: set[str], *, default: tuple[str, ...] = ("",)) -> tuple[str, ...] | None:
+    fields = _annotation_arguments(body)
+    if fields is None:
+        return None
+    result = None
+    literal = r'"([^"\\\r\n]{0,500})"'
+    for name in sorted(names & fields.keys()):
+        value = fields[name]
+        if not value:
+            return None
+        if value.startswith("{") and value.endswith("}") or value.startswith("[") and value.endswith("]"):
+            value = value[1:-1].strip().rstrip(",").strip()
+        if value and not re.fullmatch(literal + r'(?:\s*,\s*' + literal + r')*', value):
+            return None
+        values = tuple(dict.fromkeys(match.group(1) for match in re.finditer(literal, value))) or ("",)
+        if len(values) > MAX_HTTP_PATH_ALTERNATIVES or result is not None and result != values:
+            return None
+        result = values
+    return result if result is not None else default
+
+
+def _annotation_methods(body: str) -> tuple[str, ...] | None:
+    fields = _annotation_arguments(body)
+    if fields is None:
+        return None
+    if "method" not in fields:
+        return ("ANY",)
+    value = fields["method"]
+    if not value:
+        return None
+    if value.startswith("{") and value.endswith("}") or value.startswith("[") and value.endswith("]"):
+        value = value[1:-1].strip().rstrip(",").strip()
+    method = r"(?:RequestMethod\.)?(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE)"
+    if not value:
+        return ("ANY",)
+    if not re.fullmatch(method + r"(?:\s*,\s*" + method + r")*", value):
+        return None
+    return tuple(dict.fromkeys(match.group(1) for match in re.finditer(method, value)))
 
 
 def _route(path: str) -> str:
     value = "/" + path.strip().strip("/") if path.strip().strip("/") else "/"
-    value = re.sub(r"\{[^}]+}", "{}", value)
+    # Parameter names do not affect route matching; regex constraints do.
+    value = re.sub(r"\{[A-Za-z_$][\w$-]*(?=[:}])", "{", value)
     return re.sub(r"/+", "/", value)
+
+
+def _http_server_methods(method: str) -> tuple[str, ...]:
+    """Spring MVC request-method conditions for an ordinary (non-preflight) request."""
+    if method == "ANY":
+        return ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "ANY")
+    if method == "OPTIONS":
+        return ("OPTIONS",)  # Unconstrained handlers leave OPTIONS to framework handling.
+    if method == "HEAD":
+        return ("HEAD", "GET", "ANY")
+    return (method, "ANY")
+
+
+def _http_top_level_types(structure: str) -> list[tuple[int, int, int, int, str]]:
+    """Disjoint header/declaration/body spans in an already masked source file.
+
+    Nested/local types are deliberately not HTTP owners. Parentheses exclude
+    annotation arrays and constructor arguments from the top-level brace walk.
+    """
+    # ponytail: literal top-level types only; use a scoped parser if nested or
+    # custom-composed HTTP mappings need authoritative resolution.
+    spans: list[tuple[int, int, int, int, str]] = []
+    depth = parentheses = header = 0
+    declaration = active = None
+    tokens = re.finditer(r"\b(?:class|interface)\s+([A-Za-z_$][\w$]*)|[(){};]", structure)
+    for token in tokens:
+        value = token.group()
+        if value == "(":
+            parentheses += 1
+        elif value == ")":
+            parentheses = max(0, parentheses - 1)
+        elif parentheses:
+            continue
+        elif token.group(1) is not None and depth == 0:
+            if declaration:
+                # Kotlin permits bodyless types. Their annotations cannot be
+                # inherited by the next declaration that happens to have braces.
+                header = declaration[2]
+            declaration = (header, token.start(), token.end(), token.group(1))
+        elif value == "{":
+            if depth == 0 and declaration and token.start() - declaration[2] <= 1_000:
+                active = (declaration[0], declaration[1], token.start(), declaration[3])
+            depth += 1
+        elif value == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                if active:
+                    spans.append((*active[:3], token.start(), active[3]))
+                    if len(spans) >= MAX_FACTS_PER_ANALYZER:
+                        break
+                header, declaration, active = token.end(), None, None
+        elif value == ";" and depth == 0:
+            header, declaration = token.end(), None
+    return spans
+
+
+def _http_mapping_aliases(structure: str, spans: list[tuple[int, int, int, int, str]]) -> frozenset[str]:
+    """Recognize local composed annotations as unresolved, never execute them."""
+    dependents: dict[str, set[str]] = {}
+    for header, declaration, _, _, name in spans:
+        if structure[declaration - 1:declaration] != "@":
+            continue
+        for item in re.finditer(r"@([A-Za-z_$][\w$.]*)", structure[header:declaration - 1]):
+            dependency = item.group(1).rsplit(".", 1)[-1]
+            dependents.setdefault(dependency, set()).add(name)
+    pending = [name for name in dependents if name.endswith("Mapping")]
+    aliases: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name not in aliases:
+            aliases.add(name)
+            pending.extend(dependents.get(name, ()))
+    return frozenset(aliases)
+
+
+def _http_method_mappings(
+    structure: str, opening: int, closing: int, mapping: re.Pattern[str], aliases: frozenset[str],
+) -> Iterable[re.Match[str]]:
+    """One mapping per direct member, not a nested type or annotation value."""
+    # The identifier boundary prevents retrying the entire suffix at every
+    # character of long generated names that are not followed by parentheses.
+    tokens = re.compile(r"@[A-Za-z_$][\w$.]*|\b(?:class|interface|record|enum)\b|"
+                        r"(?<![\w$])(?P<method>[A-Za-z_$][\w$]*)\s*(?=\()|[(){};=]")
+    depth, parentheses, previous, count = 1, 0, opening, 0
+    pending = None
+    for token in tokens.finditer(structure, opening + 1, closing):
+        if token.start() < previous:
+            continue
+        value = token.group()
+        if value == "(":
+            parentheses += 1
+        elif value == ")":
+            parentheses = max(0, parentheses - 1)
+        elif parentheses:
+            continue
+        elif value in {"{", "}"}:
+            depth += 1 if value == "{" else -1
+            pending, count = None, 0
+        elif depth != 1:
+            continue
+        elif value.startswith("@"):
+            match = mapping.match(structure, token.start())
+            if match:
+                # Multiple mappings on one element are ambiguous without the
+                # framework's annotation resolution. Never select a fallback.
+                count = min(2, count + 1)
+                if count == 1:
+                    pending = match
+                previous = match.end()
+                if match.group(2) is None and re.match(r"\s*\(", structure[match.end():match.end() + 100]):
+                    count = 2
+            elif value.endswith("Mapping") or value.removeprefix("@").rsplit(".", 1)[-1] in aliases:
+                # A composed/qualified mapping is not resolved by this literal
+                # parser. It must not be ignored in favour of a built-in sibling.
+                count = 2
+        elif value in {"class", "interface", "record", "enum", ";", "="}:
+            pending, count = None, 0
+        elif token.group("method"):
+            if count == 1 and pending is not None:
+                yield pending
+            pending, count = None, 0
 
 
 def _http_facts(
     documents: Iterable[tuple[str, str, str]],
     configs: dict[str, dict[str, tuple[str, str, int]]],
+    *, resolve_placeholders: bool = True,
 ) -> tuple[list[Fact], list[Fact]]:
     clients: list[Fact] = []
     controllers: list[Fact] = []
-    mapping = re.compile(r"@(Request|Get|Post|Put|Patch|Delete)Mapping\s*(?:\((.*?)\))?", re.S)
+    from .investigation import _mask_java_comments
+
+    arguments = rf"\(([^()]{{0,{MAX_HTTP_ANNOTATION_BYTES}}})\)"
+    mapping = re.compile(r"@(Request|Get|Post|Put|Patch|Delete)Mapping\b\s*(?:" + arguments + r")?")
     for repo, path, text in documents:
         if len(clients) + len(controllers) >= MAX_FACTS_PER_ANALYZER:
             break
         config = configs.get(repo, {})
-        structure = _structure_mask(text)
-        class_match = re.search(r"\b(?:class|interface)\s+[A-Za-z_$][\w$]*", structure)
-        if not class_match:
-            continue
-        header = structure[: class_match.start()]
-        request_mappings = list(re.finditer(r"@RequestMapping\s*(?:\((.*?)\))?", header, re.S))
-        prefix_body = (
-            text[request_mappings[-1].start(1):request_mappings[-1].end(1)]
-            if request_mappings and request_mappings[-1].group(1) is not None else ""
-        )
-        prefix = _resolve(_annotation_value(prefix_body), config) if request_mappings else ""
-        feign = list(re.finditer(r"@FeignClient\s*\((.*?)\)", header, re.S))
-        service = ""
-        feign_prefix = prefix
-        if feign:
-            body = text[feign[-1].start(1):feign[-1].end(1)]
-            service = _resolve(_annotation_value(body, "name") or _annotation_value(body), config)
-            feign_prefix = _resolve(_annotation_value(body, "path"), config) or prefix
-        controller = bool(re.search(r"@(RestController|Controller)\b", header))
-        body_start = class_match.end()
-        for match in mapping.finditer(structure, body_start):
+        kotlin = Path(path).suffix.lower() in {".kt", ".kts"}
+        source = _mask_java_comments(text, nested_comments=kotlin)
+        structure = _structure_mask(source)
+        spans = _http_top_level_types(structure)
+        aliases = _http_mapping_aliases(structure, spans)
+        line_number, line_offset = 1, 0
+        for header_start, declaration, opening, closing, _ in spans:
             if len(clients) + len(controllers) >= MAX_FACTS_PER_ANALYZER:
                 break
-            # A class-level RequestMapping is already represented by `prefix`.
-            between = structure[body_start:match.start()]
-            if match.group(1) == "Request" and not re.search(r"\b(?:public|private|protected|fun)\b[^{};]*$", between[-300:], re.S):
+            header = structure[header_start:declaration]
+            if any(item.group() != "@RequestMapping" and (
+                    item.group().endswith("Mapping") or item.group(1).rsplit(".", 1)[-1] in aliases)
+                   for item in re.finditer(r"@([A-Za-z_$][\w$.]*)", header)):
                 continue
-            method = "ANY" if match.group(1) == "Request" else match.group(1).upper()
-            mapping_body = text[match.start(2):match.end(2)] if match.group(2) is not None else ""
-            suffix = _resolve(_annotation_value(mapping_body), config)
-            if service:
-                route = _route(f"{feign_prefix}/{suffix}")
-                clients.append(Fact(repo, "http-client", f"{method} {route}", path, _line(text, match.start()), service))
-            if controller:
-                route = _route(f"{prefix}/{suffix}")
-                controllers.append(Fact(repo, "http-server", f"{method} {route}", path, _line(text, match.start())))
+            request_mappings = list(mapping.finditer(header))
+            if len(request_mappings) > 1:
+                # Only one mapping per Spring element is authoritative. Do not
+                # guess reflection ordering or combine stacked annotations.
+                continue
+            prefix_mapping = request_mappings[0] if request_mappings else None
+            if prefix_mapping and (prefix_mapping.group(1) != "Request" or (
+                    prefix_mapping.group(2) is None and header[prefix_mapping.end():].lstrip().startswith("("))):
+                continue
+            prefix_body = (source[header_start + prefix_mapping.start(2):header_start + prefix_mapping.end(2)]
+                           if prefix_mapping and prefix_mapping.group(2) is not None else "")
+            prefixes = _annotation_paths(prefix_body, {"value", "path"})
+            prefix_methods = _annotation_methods(prefix_body)
+            feign = list(re.finditer(r"@FeignClient\s*" + arguments, header))
+            service = ""
+            feign_prefixes = prefixes
+            if len(feign) == 1:
+                body = source[header_start + feign[0].start(1):header_start + feign[0].end(1)]
+                services = _annotation_paths(body, {"name", "value"})
+                service = services[0] if services and len(services) == 1 else ""
+                if kotlin and "$" in service or not resolve_placeholders and any(marker in service for marker in ("${", "#{")):
+                    service = ""
+                elif resolve_placeholders:
+                    service = _resolve(service, config)
+                explicit_prefixes = _annotation_paths(body, {"path"}, default=())
+                feign_prefixes = prefixes if explicit_prefixes == () else explicit_prefixes
+            controller = bool(re.search(r"@(RestController|Controller)\b", header))
+            if not service and not controller:
+                continue
+            for match in _http_method_mappings(structure, opening, closing, mapping, aliases):
+                if len(clients) + len(controllers) >= MAX_FACTS_PER_ANALYZER:
+                    break
+                mapping_body = source[match.start(2):match.end(2)] if match.group(2) is not None else ""
+                suffixes = _annotation_paths(mapping_body, {"value", "path"})
+                methods = _annotation_methods(mapping_body) if match.group(1) == "Request" else (match.group(1).upper(),)
+                # Spring RequestMethodsRequestCondition.combine unions non-empty
+                # conditions. Here ANY represents its empty method set.
+                methods = (tuple(dict.fromkeys(method for method in (*prefix_methods, *methods) if method != "ANY")) or ("ANY",)
+                           if prefix_methods is not None and methods is not None else ())
+                line_number += text.count("\n", line_offset, match.start())
+                line_offset = match.start()
+                for kind, targets, base_paths in (
+                    ("http-client", clients, feign_prefixes if service and "${" not in service else None),
+                    ("http-server", controllers, prefixes if controller else None),
+                ):
+                    for prefix in base_paths or ():
+                        for suffix in suffixes or ():
+                            if len(clients) + len(controllers) >= MAX_FACTS_PER_ANALYZER:
+                                break
+                            if kotlin and any("$" in value for value in (prefix, suffix)):
+                                continue
+                            resolved_prefix, resolved_suffix = (
+                                (_resolve(prefix, config), _resolve(suffix, config)) if resolve_placeholders else (prefix, suffix)
+                            )
+                            if any(marker in value for marker in ("${", "#{") for value in (resolved_prefix, resolved_suffix)):
+                                continue
+                            route = _route(f"{resolved_prefix}/{resolved_suffix}")
+                            for method in methods:
+                                if len(clients) + len(controllers) >= MAX_FACTS_PER_ANALYZER:
+                                    break
+                                targets.append(Fact(repo, kind, f"{method} {route}", path, line_number,
+                                                    service if kind == "http-client" else ""))
     return clients, controllers
 
 
@@ -498,7 +729,11 @@ def analyze_relationships(settings: Settings) -> tuple[list[Fact], list[Relation
     for server in http_servers:
         http_by_key.setdefault(server.key, []).append(server)
     for client in sorted(http_clients, key=lambda item: (item.key, item.repo, item.path, item.line)):
-        matched = [server for server in http_by_key.get(client.key, []) if server.repo != client.repo]
+        if per_key.get(("HTTP", client.key), 0) >= MAX_RELATIONSHIPS_PER_KEY:
+            continue
+        method, _, route = client.key.partition(" ")
+        keys = [f"{verb} {route}" for verb in _http_server_methods(method)]
+        matched = [server for key in keys for server in http_by_key.get(key, []) if server.repo != client.repo]
         for server in sorted(matched, key=lambda item: (item.repo, item.path, item.line)):
             if not add(Relationship(client.repo, server.repo, "HTTP", client.key, _evidence(client), _evidence(server))):
                 break
@@ -521,7 +756,9 @@ def _relationship_payload_hash(value: dict[str, object]) -> str:
     ).hexdigest()
 
 
-def valid_relationship_payload(value: object, expected_snapshots: dict[str, str]) -> bool:
+def valid_relationship_payload(
+    value: object, expected_snapshots: dict[str, str], *, expected_extractor_version: str | None = None,
+) -> bool:
     if not isinstance(value, dict):
         return False
     if len(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > MAX_RELATIONSHIP_ARTIFACT_BYTES:
@@ -536,6 +773,7 @@ def valid_relationship_payload(value: object, expected_snapshots: dict[str, str]
         return False
     if (
         value.get("version") != 2
+        or expected_extractor_version is not None and value.get("extractor_version") != expected_extractor_version
         or source_projection != expected_snapshots
         or value.get("payload_hash") != _relationship_payload_hash(value)
         or len(relationships) > MAX_RELATIONSHIPS
@@ -571,8 +809,13 @@ def _cached_relationships(settings: Settings, generation: object | None = None) 
         metadata = path.stat()
         if metadata.st_size > MAX_RELATIONSHIP_ARTIFACT_BYTES:
             return None
-        expected_identity = str(component.get("content_hash") or "") if generation is not None else "current"
-        cache_key = (str(path), expected_identity, metadata.st_mtime_ns, metadata.st_size)
+        expected_snapshots = (
+            {str(name): str(sha or "working-tree") for name, sha in generation.snapshots.items()}  # type: ignore[attr-defined]
+            if generation is not None
+            else {repo.name: str(repo.source_sha or "working-tree") for repo in settings.repositories}
+        )
+        expected_identity = str(component.get("content_hash") or "") if generation is not None else f"current:{RELATIONSHIP_EXTRACTOR_VERSION}"
+        cache_key = (str(path), expected_identity, tuple(sorted(expected_snapshots.items())), metadata.st_mtime_ns, metadata.st_size)
         if cache_key in _RELATIONSHIP_CACHE:
             return list(_RELATIONSHIP_CACHE[cache_key])
         value = json.loads(read_managed_text(
@@ -583,13 +826,11 @@ def _cached_relationships(settings: Settings, generation: object | None = None) 
 
             if _content_hash(value) != component.get("content_hash"):
                 return None
-        expected_snapshots = (
-            {repo.name: str(generation.snapshots.get(repo.name) or "working-tree") for repo in settings.repositories}  # type: ignore[attr-defined]
-            if generation is not None
-            else {repo.name: str(repo.source_sha or "working-tree") for repo in settings.repositories}
-        )
         if (
-            not valid_relationship_payload(value, expected_snapshots)
+            not valid_relationship_payload(
+                value, expected_snapshots,
+                expected_extractor_version=RELATIONSHIP_EXTRACTOR_VERSION if generation is None else None,
+            )
         ):
             return None
         parsed = [Relationship(**item) for item in value.get("relationships") or []]
@@ -730,6 +971,7 @@ def generate_relationship_map(settings: Settings) -> str:
     text = "\n".join(output).rstrip() + "\n"
     payload: dict[str, object] = {
         "version": 2,
+        "extractor_version": RELATIONSHIP_EXTRACTOR_VERSION,
         "sources": _source_signature(settings),
         "relationships": [item.__dict__ for item in relationships],
         "rendered_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),

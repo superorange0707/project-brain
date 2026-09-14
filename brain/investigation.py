@@ -13,11 +13,16 @@ import hashlib
 import hmac
 import json
 import re
+import sqlite3
+import time
+from bisect import bisect_right
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from functools import lru_cache
-from pathlib import Path
+from itertools import islice
+from pathlib import Path, PurePosixPath
+from threading import RLock
 from typing import TYPE_CHECKING, Any, Iterable
 
 from .atlas import (
@@ -59,6 +64,7 @@ MAX_FACTS_PER_FILE = 256
 MAX_ANCHOR_INPUTS = 50
 MAX_ANCHOR_INPUT_BYTES = 24_000
 MAX_ANCHOR_CANDIDATES = 50
+MAX_ANCHOR_REQUEST_CACHE_BYTES = 2 * 1024 * 1024
 MAX_HYPOTHESES = 100
 MAX_EXACT_ANCHOR_QUERIES = 16
 MAX_COMPOUND_ANCHOR_QUERIES = 12
@@ -68,12 +74,14 @@ MAX_FLOW_DEPTH = 3
 MAX_FLOW_BRANCH = 8
 MAX_FLOW_STEPS = 96
 MAX_FLOW_DB_QUERIES = 40
+MAX_FLOW_SECONDS = .5
 MAX_RUNTIME_DB_OPERATIONS = 128
 MAX_SLICE_INPUT_BYTES = 64_000
 MAX_SLICE_STATEMENTS = 160
-DEFAULT_MAX_WAVES = 3
-AUTOMATIC_MAX_WAVES = 4
-HARD_MAX_WAVES = AUTOMATIC_MAX_WAVES  # Legacy import; not a lifetime ticket limit.
+# Legacy imports remain available; requests are bounded, ticket wave counts are not.
+DEFAULT_MAX_WAVES = None
+AUTOMATIC_MAX_WAVES = None
+HARD_MAX_WAVES = None
 EXECUTION_EDGE_TYPES = (
     "DEFINES", "CALLS", "IMPLEMENTS", "EXTENDS", "REFERENCES", "EXPOSES_ENDPOINT",
     "CALLS_ENDPOINT", "PUBLISHES", "CONSUMES", "READS_CONFIG", "WRITES_TABLE",
@@ -90,7 +98,7 @@ _JAVA_SUFFIXES = {".java", ".kt", ".kts", ".groovy"}
 _CONFIG_SUFFIXES = {".properties", ".yaml", ".yml", ".toml", ".xml"}
 
 # Pure source transforms only: never memoize evidence authority or delivery.
-# At most 16 masked views and eight endpoint sets; each source is <= 1 MB.
+# At most 16 masked views and eight sets per fact transform; each source is <= 1 MB.
 _SOURCE_VERIFICATION_CACHE: ContextVar[Any] = ContextVar("source_verification_cache", default=None)
 
 
@@ -99,8 +107,11 @@ def source_verification_scope():
     if _SOURCE_VERIFICATION_CACHE.get() is not None:
         yield
         return
+    from .python_bindings import source_bindings
     cached = (lru_cache(maxsize=16)(_mask_java_comments_uncached),
-              lru_cache(maxsize=8)(_verification_endpoints))
+              lru_cache(maxsize=8)(_verification_endpoints),
+              lru_cache(maxsize=8)(_literal_java_topics),
+              lru_cache(maxsize=8)(source_bindings))
     token = _SOURCE_VERIFICATION_CACHE.set(cached)
     try:
         yield
@@ -290,20 +301,21 @@ def _line(content: str, position: int) -> int:
     return content.count("\n", 0, position) + 1
 
 
-def _mask_java_comments(content: str, *, strings: bool = False) -> str:
+def _mask_java_comments(content: str, *, strings: bool = False, nested_comments: bool = False) -> str:
     """Mask comments, and optionally literals, without changing source offsets."""
     if "//" not in content and "/*" not in content and (not strings or ('"' not in content and "'" not in content)):
         return content
     cached = _SOURCE_VERIFICATION_CACHE.get()
     transform = cached[0] if cached is not None and _cacheable_verification_source(content) else _mask_java_comments_uncached
-    return transform(content, strings=strings)
+    return transform(content, strings=strings, nested_comments=nested_comments)
 
 
-def _mask_java_comments_uncached(content: str, *, strings: bool = False) -> str:
+def _mask_java_comments_uncached(content: str, *, strings: bool = False, nested_comments: bool = False) -> str:
     output = list(content)
     index = 0
     state = "code"
     quote = ""
+    block_depth = 0
     while index < len(content):
         current = content[index]
         following = content[index + 1] if index + 1 < len(content) else ""
@@ -317,6 +329,7 @@ def _mask_java_comments_uncached(content: str, *, strings: bool = False) -> str:
                 output[index] = output[index + 1] = " "
                 index += 2
                 state = "block"
+                block_depth = 1
                 continue
             if content.startswith('"""', index):
                 quote = '"""'
@@ -336,10 +349,17 @@ def _mask_java_comments_uncached(content: str, *, strings: bool = False) -> str:
             else:
                 output[index] = " "
         elif state == "block":
+            if nested_comments and current == "/" and following == "*":
+                output[index] = output[index + 1] = " "
+                index += 2
+                block_depth += 1
+                continue
             if current == "*" and following == "/":
                 output[index] = output[index + 1] = " "
                 index += 2
-                state = "code"
+                block_depth -= 1
+                if block_depth == 0:
+                    state = "code"
                 continue
             if current != "\n":
                 output[index] = " "
@@ -1103,6 +1123,15 @@ def _bounded_anchor_queries(values: Iterable[object]) -> list[tuple[str | None, 
     return result
 
 
+def _runtime_anchor_inputs(request: dict[str, Any]) -> list[object]:
+    """One bounded, priority-preserving input contract for checkpoint and runtime."""
+    values = [
+        *(item for item in request.get("anchors") or [] if isinstance(item, dict)),
+        *(request.get("resolve") or []), *(request.get("runtime_facts") or []), request.get("objective"),
+    ]
+    return [{"kind": kind, "value": value} for kind, value in _bounded_anchor_queries(values)]
+
+
 def _component_identity(generation: AtlasGenerationRef, name: str, schema: str) -> str:
     component = generation.component(name)
     return _hash(schema, generation.identity, component.get("schema_version"), component.get("content_hash"))
@@ -1138,17 +1167,30 @@ def _compound_terms(value: str) -> list[str]:
 _ENTITY_NAME_QUERY = re.compile(
     r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:#[A-Za-z_$][A-Za-z0-9_$]*)?"
 )
+_ENTITY_ID_QUERY = re.compile(r"sha256:[0-9a-f]{64}")
+_ENTITY_PATH_QUERY = re.compile(r"([A-Za-z0-9_.-]+):([^:\r\n]+):([A-Za-z_$][A-Za-z0-9_.$]*)")
 
 
 def _qualified_symbol_queries(values: Iterable[object]) -> list[str]:
+    # Recognition is not the resolver's physical work budget. All public anchor
+    # slots retain qualified ownership, even beyond one bounded resolver batch.
     return list(dict.fromkeys(
-        value for kind, value in _bounded_anchor_queries(values)
-        if kind == "symbol" and _ENTITY_NAME_QUERY.fullmatch(value) and re.search(r"[.#]", value)
-    ))[:MAX_EXACT_ANCHOR_QUERIES]
+        value for raw in islice(values, MAX_ANCHOR_INPUTS)
+        for kind, value in _bounded_anchor_queries([raw])
+        if kind == "symbol" and (_ENTITY_ID_QUERY.fullmatch(value)
+            or _ENTITY_PATH_QUERY.fullmatch(value)
+            or (_ENTITY_NAME_QUERY.fullmatch(value) and re.search(r"[.#]", value)))
+    ))
+
+
+def _python_module_filenames(parts: list[str]) -> list[str]:
+    splits = range(max(1, len(parts) - MAX_FLOW_BRANCH), len(parts))
+    return list(dict.fromkeys([*(parts[split - 1] + ".py" for split in splits), "__init__.py"]))
 
 
 def _python_module_entities(
     connection: Any, generation: AtlasGenerationRef, query: str,
+    *, file_names: set[str] | None = None,
 ) -> tuple[dict[str, list[str]], int]:
     """Seek flat/src-layout source modules and at most eight nested source scopes.
 
@@ -1156,17 +1198,18 @@ def _python_module_entities(
     """
     parts = query.replace("#", ".").split(".")
     splits = range(max(1, len(parts) - MAX_FLOW_BRANCH), len(parts))
-    filenames = list(dict.fromkeys([*(parts[split - 1] + ".py" for split in splits), "__init__.py"]))
+    filenames = _python_module_filenames(parts)
     # Most Java-qualified queries have no corresponding Python source at all.
     # Avoid setting up nested scope joins until the existing file index matches.
-    if connection.execute(
+    operations = int(file_names is None)
+    if (file_names is not None and not file_names.intersection(filenames)) or (file_names is None and connection.execute(
         "SELECT 1 FROM atlas_entities f INDEXED BY atlas_entities_name "
         "CROSS JOIN generation_entities g ON g.entity_id=f.entity_id AND g.generation=? "
         f"WHERE f.simple_name IN ({','.join('?' for _ in filenames)}) "
         "AND f.kind='file' AND f.language='python' LIMIT 1",
         (generation.generation, *filenames),
-    ).fetchone() is None:
-        return {}, 1
+    ).fetchone() is None):
+        return {}, operations
     statements, parameters = [], []
     for split in splits:
         module, scope = "/".join(parts[:split]), parts[split:]
@@ -1199,14 +1242,15 @@ def _python_module_entities(
                            module + "/__init__.py", "src/" + module + "/__init__.py", MAX_FLOW_BRANCH))
         statements.append("SELECT * FROM (" + sql + ")")
     if not statements:
-        return {}, 1
+        return {}, operations
     return {str(row[0]): [str(value) for value in row[1:] if value is not None]
             for row in connection.execute(" UNION ALL ".join(statements) + " LIMIT ?",
-                                          (*parameters, MAX_ANCHOR_CANDIDATES))}, 2
+                                          (*parameters, MAX_ANCHOR_CANDIDATES))}, operations + 1
 
 
 def _entity_name_anchor_rows(
     connection: Any, generation: AtlasGenerationRef, names: list[str],
+    *, query_entities: dict[str, set[str]] | None = None,
 ) -> tuple[list[tuple[Any, ...]], int, bool]:
     """Recover registered anchors omitted by the legacy bounded term projection."""
     hierarchy = generation.component("hierarchy")
@@ -1218,17 +1262,75 @@ def _entity_name_anchor_rows(
     owners: dict[str, str] = {}
     package_rows: dict[str, tuple[Any, ...]] = {}
     python_owners: dict[str, list[str]] = {}
+    memberships: dict[str, set[str]] = {name: set() for name in names}
+    mapping_complete = len(names) <= MAX_EXACT_ANCHOR_QUERIES
     operations = 0
+    identity_queries = [query for query in names[:MAX_EXACT_ANCHOR_QUERIES] if _ENTITY_ID_QUERY.fullmatch(query)]
+    path_queries = [query for query in names[:MAX_EXACT_ANCHOR_QUERIES] if _ENTITY_PATH_QUERY.fullmatch(query)]
+    path_ids: set[str] = set()
+    if path_queries:
+        rows = connection.execute(
+            f"WITH requested(query,repo,path) AS (VALUES {','.join('(?,?,?)' for _ in path_queries)}) "
+            "SELECT r.query,e.entity_id,e.parent_entity_id FROM requested r "
+            "CROSS JOIN atlas_entities e INDEXED BY atlas_entities_repo_path ON e.repo=r.repo AND e.path=r.path "
+            "CROSS JOIN generation_entities g ON g.entity_id=e.entity_id AND g.generation=? "
+            "WHERE e.qualified_name=r.query AND e.kind!='file' ORDER BY r.query,e.entity_id LIMIT ?",
+            (*[value for query in path_queries for value in (query, *_ENTITY_PATH_QUERY.fullmatch(query).groups()[:2])],
+             generation.generation, MAX_ANCHOR_CANDIDATES + 1),
+        ).fetchall()
+        operations += 1
+        mapping_complete &= len(rows) <= MAX_ANCHOR_CANDIDATES
+        for query, identifier, parent in rows[:MAX_ANCHOR_CANDIDATES]:
+            identifiers[str(identifier)] = None
+            path_ids.add(str(identifier))
+            memberships[str(query)].add(str(identifier))
+            if parent:
+                owners[str(identifier)] = str(parent)
+    if identity_queries:
+        # Published entity IDs already distinguish overloaded/nested declarations.
+        # Membership, parent and registered source identities are rechecked below.
+        rows = connection.execute(
+            "SELECT e.entity_id,e.parent_entity_id FROM atlas_entities e "
+            "CROSS JOIN generation_entities g ON g.entity_id=e.entity_id AND g.generation=? "
+            f"WHERE e.entity_id IN ({','.join('?' for _ in identity_queries)}) AND e.kind!='file'",
+            (generation.generation, *identity_queries),
+        ).fetchall()
+        operations += 1
+        identifiers.update((str(row[0]), None) for row in rows)
+        for row in rows:
+            memberships[str(row[0])].add(str(row[0]))
+            if row[1]:
+                owners[str(row[0])] = str(row[1])
+    qualified = [query for query in names[:MAX_EXACT_ANCHOR_QUERIES]
+                 if re.search(r"[.#]", query) and query not in path_queries]
+    python_files: set[str] | None = None
+    if len(qualified) > 1:
+        # One generation-scoped index probe replaces repeated negative Python
+        # probes for Java names; actual Python module/owner checks stay intact.
+        filenames = sorted({name for query in qualified
+                            for name in _python_module_filenames(query.replace("#", ".").split("."))})
+        python_files = {str(row[0]) for row in connection.execute(
+            f"WITH requested(name) AS (VALUES {','.join('(?)' for _ in filenames)}) "
+            "SELECT r.name FROM requested r WHERE EXISTS ("
+            "SELECT 1 FROM atlas_entities f INDEXED BY atlas_entities_name "
+            "CROSS JOIN generation_entities g ON g.entity_id=f.entity_id AND g.generation=? "
+            "WHERE f.simple_name=r.name AND f.kind='file' AND f.language='python' LIMIT 1)",
+            (*filenames, generation.generation),
+        )}
+        operations += 1
     for query in names[:MAX_EXACT_ANCHOR_QUERIES]:
-        if re.search(r"[.#]", query):
-            found, work = _python_module_entities(connection, generation, query)
+        if query in qualified:
+            found, work = _python_module_entities(connection, generation, query, file_names=python_files)
             python_owners.update(found)
+            memberships[query].update(found)
+            mapping_complete &= len(found) < MAX_FLOW_BRANCH
             operations += work
             if len(python_owners) >= MAX_ANCHOR_CANDIDATES:
                 break
     identifiers.update((key, None) for key in python_owners)
     for query, as_type in (
         (query, as_type) for query in names[:MAX_EXACT_ANCHOR_QUERIES]
+        if not _ENTITY_ID_QUERY.fullmatch(query) and query not in path_queries
         for as_type in ((False, True) if "." in query and "#" not in query else (False,))
     ):
         parts = query.replace("#", ".").split(".")
@@ -1290,6 +1392,8 @@ def _entity_name_anchor_rows(
         rows = connection.execute(sql + "ORDER BY e.qualified_name,e.entity_id LIMIT ?",
                                   (*parameters, MAX_FLOW_BRANCH)).fetchall()
         identifiers.update((str(row[0]), None) for row in rows)
+        memberships[query].update(str(row[0]) for row in rows)
+        mapping_complete &= len(rows) < MAX_FLOW_BRANCH
         if owner:
             owners.update((str(row[0]), str(row[1])) for row in rows)
         if package:
@@ -1298,6 +1402,8 @@ def _entity_name_anchor_rows(
             break
     selected = list(identifiers)[:MAX_ANCHOR_CANDIDATES]
     if not selected:
+        if query_entities is not None and mapping_complete:
+            query_entities.update(memberships)
         return [], operations, False
     operations += 1
     required = list(dict.fromkeys([
@@ -1338,12 +1444,22 @@ def _entity_name_anchor_rows(
         (GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION, *normalized, generation.generation,
          *selected, MAX_ANCHOR_CANDIDATES),
     ).fetchall()
+    if (set(identity_queries).intersection(selected) | path_ids.intersection(selected)) - {str(row[6]) for row in rows}:
+        # A known pinned entity with no compatible registered anchor is not a
+        # clean negative lookup. Never persist component damage as "not found".
+        return [], operations, True
     if any((row[2], row[4], row[5], row[7], row[8], row[9]) != (
         entities[str(row[6])]["qualified_name"], entities[str(row[6])]["repo"],
         entities[str(row[6])]["module_id"], entities[str(row[6])]["path"],
         entities[str(row[6])]["line_start"], entities[str(row[6])]["blob_sha"],
     ) for row in rows):
         return [], operations, True
+    # A batch that reached a global cap cannot prove a singleton's complete
+    # result. Keep its normal bounded result, but never alias it to that input.
+    if query_entities is not None and mapping_complete and (
+        len(identifiers) < MAX_ANCHOR_CANDIDATES and len(rows) < MAX_ANCHOR_CANDIDATES
+    ):
+        query_entities.update(memberships)
     return rows, operations, False
 
 
@@ -1354,6 +1470,97 @@ def resolve_runtime_anchors(
     *,
     limit: int = MAX_ANCHOR_CANDIDATES,
     use_cache: bool = True,
+) -> dict[str, Any]:
+    """Reuse validated envelopes only inside the current retrieval request."""
+    from .core import _ACTIVE_RETRIEVAL_CACHE, _ACTIVE_RETRIEVAL_TRACE
+
+    cache = _ACTIVE_RETRIEVAL_CACHE.get()
+    if cache is None:
+        return _resolve_runtime_anchors(settings, generation, values, limit=limit, use_cache=use_cache)
+    query_inputs = _bounded_anchor_queries(values)
+    limit = max(1, min(int(limit), MAX_ANCHOR_CANDIDATES))
+    compatibility = _hash(
+        str(settings.state_dir.resolve()), generation.generation, generation.identity, generation.source_signature,
+        json.dumps(generation.snapshots, sort_keys=True),
+        json.dumps([generation.component('runtime_anchors'), generation.component('hierarchy')], sort_keys=True),
+        RUNTIME_ANCHOR_TERM_SCHEMA_VERSION, GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION, limit, use_cache,
+    )
+    # Stored JSON is an immutable copy; returned candidates remain caller-owned.
+    # One existing request cache owns at most 50 envelopes / 2 MiB, never a ticket
+    # wave, a worker-global generation, or another persistent source of truth.
+    entries, lock = cache.setdefault(('runtime-anchor-results',), ({}, RLock()))
+
+    def key(queries: list[tuple[str | None, str]]) -> str:
+        return _hash(compatibility, json.dumps(queries))
+
+    def remember(queries: list[tuple[str | None, str]], result: dict[str, Any]) -> None:
+        payload = json.dumps(result, sort_keys=True).encode('utf-8')
+        with lock:
+            if len(entries) < MAX_ANCHOR_INPUTS and sum(map(len, entries.values())) + len(payload) <= MAX_ANCHOR_REQUEST_CACHE_BYTES:
+                entries[key(queries)] = payload
+
+    with lock:
+        payload = entries.get(key(query_inputs))
+    if payload is not None:
+        result = json.loads(payload)
+        result.update(request_cache_hit=True, database_operations=0)
+        trace = _ACTIVE_RETRIEVAL_TRACE.get()
+        if trace is not None:
+            trace.add_cache_hit()
+        return result
+    query_entities: dict[str, set[str]] = {}
+    qualified = _qualified_symbol_queries({'kind': kind, 'value': value} for kind, value in query_inputs)
+    trace = _ACTIVE_RETRIEVAL_TRACE.get() if qualified and len(qualified) == len(query_inputs) else None
+    # Qualified lookups share this reservation across routing and definitions.
+    # Cache hits above have no physical work; relationship traversal still owns
+    # its separate reservation at the caller.
+    if trace is not None and not trace.try_reserve_backend():
+        trace.stop_reason = 'physical_budget'
+        return {
+            'status': 'degraded', 'reason': 'runtime-anchor lookup was not executed within the physical-operation budget',
+            'generation': generation.generation, 'schema_version': RUNTIME_ANCHOR_SCHEMA_VERSION,
+            'compatibility_identity': _component_identity(generation, 'runtime_anchors', RUNTIME_ANCHOR_SCHEMA_VERSION),
+            'inputs': [value for _, value in query_inputs], 'candidates': [], 'cache_hit': False,
+            'database_operations': 0,
+        }
+    started = time.perf_counter()
+    try:
+        result = _resolve_runtime_anchors(
+            settings, generation, [{'kind': kind, 'value': value} for kind, value in query_inputs],
+            limit=limit, use_cache=use_cache, query_entities=query_entities,
+        )
+    finally:
+        if trace is not None:
+            trace.complete_reserved_backend('runtime_anchor', (time.perf_counter() - started) * 1000)
+    if result.get('status') == 'ready':
+        remember(query_inputs, result)
+        candidates = result.get('candidates') or []
+        # The query-work bound may leave a tail unexecuted. Reuse only the
+        # complete, canonically validated prefix, never infer tail absence.
+        qualified_batch = qualified[:MAX_EXACT_ANCHOR_QUERIES]
+        if 1 < len(query_inputs) == len(qualified) <= MAX_ANCHOR_INPUTS and (
+            set(query_entities) == set(qualified_batch) and len(candidates) < limit
+            and all(item.get('method') == 'entity_name' for item in candidates)
+            and {item['entity_id'] for item in candidates} == set().union(*query_entities.values())
+        ):
+            for query in qualified_batch:
+                selected = [item for item in candidates if item['entity_id'] in query_entities[query]]
+                remember([('symbol', query)], {
+                    **result, 'inputs': [query], 'candidates': selected,
+                    'ambiguous': len(selected) > 1,
+                    'bounds': {**result['bounds'], 'input_items': 1},
+                })
+    return result
+
+
+def _resolve_runtime_anchors(
+    settings: Settings,
+    generation: AtlasGenerationRef,
+    values: Iterable[object],
+    *,
+    limit: int = MAX_ANCHOR_CANDIDATES,
+    use_cache: bool = True,
+    query_entities: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Resolve only within the explicitly pinned generation; never substitute current."""
     limit = max(1, min(int(limit), MAX_ANCHOR_CANDIDATES))
@@ -1379,12 +1586,15 @@ def resolve_runtime_anchors(
                 "candidates": [], "inputs": [], "cache_hit": False}
     entity_specs = list(dict.fromkeys(
         value for kind, value in query_inputs if kind in (None, "symbol")
-        and _ENTITY_NAME_QUERY.fullmatch(value)
+        and (_ENTITY_NAME_QUERY.fullmatch(value) or (kind == 'symbol' and (
+            _ENTITY_ID_QUERY.fullmatch(value) or _ENTITY_PATH_QUERY.fullmatch(value))))
         and (kind == "symbol" or not re.search(r"[.#]", value))
     ))[:MAX_EXACT_ANCHOR_QUERIES]
-    qualified_specs = [value for value in entity_specs if re.search(r"[.#]", value)]
+    qualified_specs = [value for value in entity_specs if re.search(r"[.#]", value)
+                       or _ENTITY_ID_QUERY.fullmatch(value) or _ENTITY_PATH_QUERY.fullmatch(value)]
     # Explicit qualified symbols must not broaden to unrelated same-name methods.
-    broad_inputs = [(kind, value) for kind, value in query_inputs if not (kind == "symbol" and value in qualified_specs)]
+    qualified_inputs = set(_qualified_symbol_queries({"kind": kind, "value": value} for kind, value in query_inputs))
+    broad_inputs = [(kind, value) for kind, value in query_inputs if not (kind == "symbol" and value in qualified_inputs)]
     exact_specs = list(dict.fromkeys(
         (_normalize(value), kind) for kind, value in broad_inputs if _normalize(value)
     ))[:MAX_EXACT_ANCHOR_QUERIES]
@@ -1405,7 +1615,7 @@ def resolve_runtime_anchors(
     compatibility = _component_identity(generation, "runtime_anchors", RUNTIME_ANCHOR_SCHEMA_VERSION)
     cache_key = _hash(
         "runtime-anchors", compatibility, limit,
-        json.dumps(exact_specs), json.dumps(term_specs), json.dumps(path_inputs), json.dumps(entity_specs),
+        json.dumps(query_inputs), json.dumps(exact_specs), json.dumps(term_specs), json.dumps(path_inputs), json.dumps(entity_specs),
     )
     seal_key = (str(settings.state_dir.resolve()), generation.generation, cache_key)
     candidates: dict[str, dict[str, Any]] = {}
@@ -1520,7 +1730,10 @@ def resolve_runtime_anchors(
                 entities = _valid_generation_entities(connection, generation.generation, entity_ids) if entity_ready else {}
                 qualified_ids: set[str] = set()
                 if qualified_specs and entity_ids:
-                    qualified_rows, operations, poisoned = _entity_name_anchor_rows(connection, generation, qualified_specs)
+                    qualified_rows, operations, poisoned = _entity_name_anchor_rows(
+                        connection, generation, qualified_specs,
+                        **({'query_entities': query_entities} if query_entities is not None else {}),
+                    )
                     database_operations += operations
                     qualified_ids = {str(row[6]) for row in qualified_rows}
                     poisoned_row |= poisoned
@@ -1667,7 +1880,12 @@ def resolve_runtime_anchors(
             item.get("kind") == "symbol" and item.get("entity_id")
             and item["value"].rsplit(":", 1)[-1] == name for item in candidates.values()
         )]
-        entity_rows, entity_operations, poisoned_entity = _entity_name_anchor_rows(connection, generation, unresolved_names)
+        if query_entities is not None:
+            query_entities.clear()
+        entity_rows, entity_operations, poisoned_entity = _entity_name_anchor_rows(
+            connection, generation, unresolved_names,
+            **({'query_entities': query_entities} if query_entities is not None else {}),
+        )
         database_operations += entity_operations
         for row in entity_rows:
             item = candidate_from_row(row, "entity_name", 1.0)
@@ -1747,21 +1965,104 @@ def _verified_location(bundle: ContextBundle, repo: str, path: str, line: int) -
     )
 
 
-def _verification_endpoints(repo: str, path: str, content: str) -> frozenset[tuple[str, int]]:
-    _, extracted = _java_file_intelligence(repo, path, "verification", None, content)
+def _verification_endpoints(repo: str, path: str, content: str) -> frozenset[tuple[str, int, str, str, str]]:
+    from .relations import _http_facts
+
+    if not _cacheable_verification_source(content) or "Mapping" not in content:
+        return frozenset()
+    code = _mask_java_comments(content, strings=True, nested_comments=Path(path).suffix.lower() in {".kt", ".kts"})
+    newlines = [match.start() for match in re.finditer("\n", content)]
+    type_lines: dict[int, int] = {}
+    for match in re.finditer(r"\b(?:class|interface|record|enum)\s+[A-Za-z_$][\w$]*", code):
+        line = bisect_right(newlines, match.start()) + 1
+        type_lines[line] = type_lines.get(line, 0) + 1
+    clients, servers = _http_facts([(repo, path, content)], {}, resolve_placeholders=False)
     return frozenset(
-        (_normalize(item.get("key")), int(item.get("line") or 1))
-        for item in extracted
-        if item.get("kind") == "endpoint" and bool((item.get("provenance") or {}).get("exact_source"))
+        (item.key.partition(" ")[2], item.line, direction, item.key.partition(" ")[0], item.detail)
+        for direction, facts in (("outbound", clients), ("inbound", servers)) for item in facts
+        if type_lines.get(item.line, 0) <= 1
     )
 
 
+def _verified_http_methods(
+    bundle: ContextBundle, repo: str, path: str, line: int, value: object, direction: str = "",
+) -> frozenset[tuple[str, str]]:
+    """Literal HTTP contracts in delivered pinned source, not persisted route guesses."""
+    from .relations import _route
+
+    route = _route(str(value))
+    result: set[tuple[str, str]] = set()
+    for evidence in bundle.evidence:
+        if not (
+            _pinned_repository_evidence(bundle, evidence)
+            and evidence.repo == repo and evidence.path == path
+            and evidence.line_start <= line <= evidence.line_end
+            and Path(path).suffix.lower() in {".java", ".kt", ".kts"}
+        ):
+            continue
+        content = evidence.verification_content or (evidence.content if evidence.line_start == 1 else None)
+        if content is None or not _cacheable_verification_source(content):
+            continue
+        cached = _SOURCE_VERIFICATION_CACHE.get()
+        extract = cached[1] if cached is not None else _verification_endpoints
+        result.update(
+            (method, service) for found_route, found_line, found_direction, method, service in extract(repo, path, content)
+            if found_route == route and found_line == line and (not direction or found_direction == direction)
+        )
+    return frozenset(result)
+
+
+def _literal_java_topics(content: str, *, kotlin: bool = False) -> frozenset[tuple[str, int, int, str]]:
+    """Literal topic, declaration line, value line and direction; never a payload link.
+
+    Deliberately exclude expressions, patterns and escaped/interpolated values.
+    Those remain navigation candidates in the published index, not exact topic IDs.
+    """
+    if not _cacheable_verification_source(content):
+        return frozenset()
+    # Kotlin interpolation may contain quoted code inside a string. Without
+    # resolving that syntax, retain its source as candidate-only evidence.
+    if kotlin and "${" in content:
+        return frozenset()
+    source = _mask_java_comments(content, nested_comments=kotlin)
+    code = _mask_java_comments(content, strings=True, nested_comments=kotlin)
+    newlines = [match.start() for match in re.finditer("\n", content)]
+    literal = r'"[A-Za-z0-9._-]{1,500}"'
+    opening, closing = (r'\[', r'\]') if kotlin else (r'\{', r'\}')
+    attribute = re.compile(r'(?:^|,)\s*topics\s*=\s*(' + literal + r'|' + opening + r'\s*' + literal +
+                           r'(?:\s*,\s*' + literal + r')*\s*,?\s*' + closing + r')\s*(?=,|$)')
+    result: set[tuple[str, int, int, str]] = set()
+    for match in re.finditer(r'@KafkaListener\s*\(([^()]*)\)', code):
+        body = source[match.start(1):match.end(1)]
+        for field in attribute.finditer(body):
+            assignment = code[match.start(1) + field.start():match.start(1) + field.start(1)]
+            if not re.search(r'\btopics\s*=\s*$', assignment):
+                continue
+            for value in re.finditer(literal, field.group(1)):
+                position = match.start(1) + field.start(1) + value.start()
+                result.add((value.group()[1:-1], bisect_right(newlines, match.start()) + 1,
+                            bisect_right(newlines, position) + 1, 'inbound'))
+                if len(result) >= MAX_FACTS_PER_FILE:
+                    return frozenset(result)
+    for match in re.finditer(r'\b(?:kafkaTemplate|KafkaTemplate)\s*\.\s*send\s*\(', code):
+        value = re.match(r'\s*(' + literal + r')\s*,', source[match.end():match.end() + 1_024])
+        if value:
+            position = match.end() + value.start(1)
+            result.add((value.group(1)[1:-1], bisect_right(newlines, match.start()) + 1,
+                        bisect_right(newlines, position) + 1, 'outbound'))
+            if len(result) >= MAX_FACTS_PER_FILE:
+                break
+    return frozenset(result)
+
+
 def _verified_value_location(
-    bundle: ContextBundle, repo: str, path: str, line: int, value: object, *, kind: str = "",
+    bundle: ContextBundle, repo: str, path: str, line: int, value: object, *, kind: str = "", direction: str = "",
 ) -> bool:
     normalized = _normalize(value).casefold()
     if not normalized:
         return False
+    if kind == "endpoint":
+        return bool(_verified_http_methods(bundle, repo, path, line, value, direction))
     for evidence in bundle.evidence:
         if not (
             _pinned_repository_evidence(bundle, evidence)
@@ -1784,13 +2085,21 @@ def _verified_value_location(
         )
         if structural_content is None:
             continue
+        if kind == "topic":
+            if suffix not in {".java", ".kt", ".kts"}:
+                continue
+            cached = _SOURCE_VERIFICATION_CACHE.get()
+            extract = cached[2] if cached is not None and _cacheable_verification_source(structural_content) else _literal_java_topics
+            if any(
+                topic == str(value) and line in {declaration_line, value_line}
+                and evidence.line_start <= declaration_line <= value_line <= evidence.line_end
+                and (not direction or direction == topic_direction)
+                for topic, declaration_line, value_line, topic_direction in extract(structural_content, kotlin=suffix in {".kt", ".kts"})
+            ):
+                return True
+            continue
         comment_aware_content = _mask_java_comments(structural_content) if suffix in _JAVA_SUFFIXES else structural_content
         code_only_content = _mask_java_comments(structural_content, strings=True) if suffix in _JAVA_SUFFIXES else structural_content
-        if kind == "endpoint" and suffix == ".java":
-            cached = _SOURCE_VERIFICATION_CACHE.get()
-            extract = cached[1] if cached is not None and _cacheable_verification_source(structural_content) else _verification_endpoints
-            if (normalized, line) in extract(repo, path, structural_content):
-                return True
         lines = comment_aware_content.splitlines()
         code_lines = code_only_content.splitlines()
         relative = line - 1
@@ -1799,8 +2108,6 @@ def _verified_value_location(
         code_only = "\n".join(code_lines[max(0, relative - 1):relative + 2])
         local_folded = comment_aware.casefold()
         if normalized in local_folded:
-            if kind == "endpoint":
-                return bool(re.search(r"@(Get|Post|Put|Delete|Patch|Request)Mapping\b|@FeignClient\b", code_only))
             if kind in {"topic", "event"}:
                 return bool(re.search(r"@KafkaListener\b|\bkafkaTemplate\s*\.\s*send\s*\(|\b(?:class|record|interface)\s+", code_only))
             if kind == "queue":
@@ -1832,6 +2139,7 @@ def _verified_anchor(bundle: ContextBundle, item: dict[str, Any]) -> bool:
     return _verified_value_location(
         bundle, str(item.get("repo")), str(item.get("path")), int(item.get("line") or 1),
         item.get("value"), kind=str(item.get("kind") or ""),
+        direction=str((item.get("provenance") or {}).get("direction") or ""),
     )
 
 
@@ -1961,26 +2269,231 @@ def _exact_evidence_anchors(
     return result
 
 
+def _python_bound_targets(
+    connection: sqlite3.Connection, generation: AtlasGenerationRef,
+    edges: dict[str, dict[str, Any]], entities: dict[str, dict[str, Any]],
+    sources: dict[tuple[str, str], str],
+    load_sources: Any = None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve syntax-backed Python bindings with exact, pinned indexed seeks."""
+    from .index import _blob_identity_valid
+    from .python_bindings import source_bindings, MAX_BINDING_SOURCE_BYTES
+
+    cache = _SOURCE_VERIFICATION_CACHE.get()
+    parse = cache[3] if cache is not None else source_bindings
+    facts: dict[tuple[str, str], dict[Any, Any]] = {}
+    wanted: dict[tuple[str, tuple[str, ...], str, int, str], list[str]] = {}
+    source_ids = list(dict.fromkeys(str(edge['source_id']) for edge in list(edges.values())[:MAX_FLOW_STEPS]))
+    if not source_ids:
+        return {}
+    registered = {str(row[0]) for row in connection.execute(
+        "SELECT e.entity_id FROM atlas_entities e JOIN generation_intelligence_files f "
+        "ON f.repo=e.repo AND f.path=e.path AND f.blob_sha=e.blob_sha "
+        f"WHERE f.generation=? AND f.schema_version=? AND e.entity_id IN ({','.join('?' for _ in source_ids)})",
+        (generation.generation, GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION, *source_ids))}
+    for identifier, edge in list(edges.items())[:MAX_FLOW_STEPS]:
+        if edge['edge_type'] != 'CALLS' or PurePosixPath(edge['path']).suffix.lower() != '.py':
+            continue
+        source = entities.get(str(edge['source_id']))
+        key = edge['repo'], edge['path']
+        if source is None or source['entity_id'] not in registered:
+            continue
+        if key not in facts:
+            content = sources.get(key)
+            raw = content.encode('utf-8') if content is not None else b''
+            facts[key] = parse(content)[0] if content is not None and len(raw) <= MAX_BINDING_SOURCE_BYTES and (
+                _blob_identity_valid(source['blob_sha'], content, len(raw))
+            ) else {}
+        metadata = edge['metadata']
+        owner = 0 if source['kind'] == 'file' else int(source['line_start'])
+        bound = facts[key].get((owner, int(edge['line_start']), str(metadata.get('target_name') or ''),
+                               metadata.get('receiver')))
+        if bound is None:
+            continue
+        kind, module, level, name, line = bound
+        initializer = ''
+        if kind == 'definition':
+            paths = (str(edge['path']),)
+        else:
+            parent = PurePosixPath(edge['path']).parent.parts
+            if level and level > len(parent):
+                continue
+            parts = (*parent[:len(parent) - level + 1], *module.split('.')) if level else tuple(module.split('.'))
+            parts = tuple(part for part in parts if part)
+            if any(not part.isidentifier() for part in parts):
+                continue
+            base = '/'.join(parts)
+            paths = ((base + '.py', base + '/__init__.py') if base else ('__init__.py',))
+            if kind == 'module-member':
+                initializer = '/'.join((*parts[:-1], '__init__.py'))
+        wanted.setdefault((edge['repo'], paths, name, line, initializer), []).append(identifier)
+    if not wanted:
+        return {}
+    queries, parameters = [], []
+    for ordinal, (repo, paths, name, line, initializer) in enumerate(wanted):
+        queries.append(
+            "SELECT * FROM (SELECT ? AS ordinal,e.entity_id,p.path,p.blob_sha,p.schema_version "
+            "FROM atlas_entities e INDEXED BY atlas_entities_repo_path "
+            "JOIN generation_entities g ON g.entity_id=e.entity_id AND g.generation=? "
+            "JOIN generation_intelligence_files f ON f.generation=g.generation AND f.repo=e.repo AND f.path=e.path "
+            "AND f.blob_sha=e.blob_sha AND f.schema_version=? "
+            "LEFT JOIN generation_intelligence_files p ON p.generation=g.generation AND p.repo=e.repo AND p.path=? "
+            f"WHERE e.repo=? AND e.path IN ({','.join('?' for _ in paths)}) AND e.simple_name=? "
+            "AND e.kind IN ('function','method','constructor','class','test') "
+            + ("AND e.line_start=? " if line else "AND e.parent_entity_id IS NULL ") + "LIMIT 2)"
+        )
+        parameters.extend((ordinal, generation.generation, GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION,
+                           initializer, repo, *paths, name, *((line,) if line else ())))
+    rows = connection.execute(' UNION ALL '.join(queries), parameters).fetchall()
+    valid = _valid_generation_entities(connection, generation.generation, (str(row[1]) for row in rows))
+    parents = _valid_generation_entities(connection, generation.generation, (
+        str(item['parent_entity_id']) for item in [*valid.values(), *(entities[key] for key in registered if key in entities)]
+        if item.get('parent_entity_id')))
+
+    def valid_owner(item: dict[str, Any]) -> bool:
+        parent_id = item.get('parent_entity_id')
+        parent = parents.get(str(parent_id))
+        return not parent_id or bool(parent and
+            (parent['repo'], parent['path'], parent['module_id'], parent['blob_sha']) ==
+            (item['repo'], item['path'], item['module_id'], item['blob_sha'])
+            and parent['line_start'] <= item['line_start'] <= item['line_end'] <= parent['line_end'])
+
+    if load_sources is not None:
+        sources.update(load_sources(list(dict.fromkeys(
+            key for row in rows if str(row[1]) in valid
+            for key in [(valid[str(row[1])]['repo'], valid[str(row[1])]['path']),
+                        *([(valid[str(row[1])]['repo'], str(row[2]))] if row[2] else [])]
+        ))) or {})
+    grouped: dict[int, list[str]] = {}
+    packages = {}
+    for ordinal, identifier, package_path, package_blob, package_schema in rows:
+        grouped.setdefault(int(ordinal), []).append(str(identifier))
+        packages[int(ordinal)] = (package_path, package_blob, package_schema)
+    result = {}
+    for ordinal, ((repo, paths, name, line, initializer), identifiers) in enumerate(wanted.items()):
+        targets = grouped.get(ordinal, [])
+        if len(targets) == 1 and targets[0] in valid:
+            target = valid[targets[0]]
+            if not valid_owner(target):
+                continue
+            if initializer:
+                package_path, package_blob, package_schema = packages[ordinal]
+                content = sources.get((repo, initializer))
+                # An explicit package initializer must prove that the imported
+                # child module is not replaced by a same-name export/dynamic hook.
+                if package_path != initializer or package_schema != GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION or (
+                    content is None or len(content.encode('utf-8')) > MAX_BINDING_SOURCE_BYTES
+                    or not _blob_identity_valid(package_blob, content, len(content.encode('utf-8')))
+                ):
+                    continue
+                namespace = parse(content)[2]
+                child_name = PurePosixPath(paths[0]).stem
+                if namespace is None or child_name in namespace or '__getattr__' in namespace:
+                    continue
+            if not line:
+                content = sources.get((target['repo'], target['path']))
+                if content is None or len(content.encode('utf-8')) > MAX_BINDING_SOURCE_BYTES or not (
+                    _blob_identity_valid(target['blob_sha'], content, len(content.encode('utf-8')))
+                    and parse(content)[1].get(name) == target['line_start']
+                ):
+                    continue
+            result.update((identifier, target) for identifier in identifiers
+                          if valid_owner(entities[str(edges[identifier]['source_id'])]))
+    return result
+
+
+def _python_incoming_rows(connection, generation, seeds, sources, deadline):
+    """Admit import-alias callsites; binding proof still owns every endpoint."""
+    from .python_bindings import source_bindings, MAX_BINDING_SOURCE_BYTES
+
+    entities = _valid_generation_entities(connection, generation.generation, seeds)
+    targets = {}
+    for ordinal, identifier in enumerate(seeds):
+        item = entities.get(identifier)
+        if item and item['path'].lower().endswith('.py'):
+            targets.setdefault((item['repo'], item['simple_name']), []).append(ordinal)
+    if not targets:
+        return [], False
+    cache = _SOURCE_VERIFICATION_CACHE.get()
+    parse = cache[3] if cache is not None else source_bindings
+    candidates = []
+    truncated = len(sources) > MAX_FLOW_SEEDS
+    for (repo, path), content in list(sources.items())[:MAX_FLOW_SEEDS]:
+        if time.monotonic() >= deadline:
+            truncated = True
+            break
+        if repo not in {key[0] for key in targets} or not path.lower().endswith('.py'):
+            continue
+        if len(content.encode('utf-8')) > MAX_BINDING_SOURCE_BYTES:
+            truncated = True
+            continue
+        # These facts are admission hints only. _python_bound_targets checks
+        # their source blob, file registration, scope and exact target again.
+        facts, _, namespace = parse(content)
+        truncated = truncated or namespace is None
+        matches = list(islice(((repo, path, owner, line, name, receiver, ordinal)
+                   for (owner, line, name, receiver), bound in facts.items()
+                   for ordinal in targets.get((repo, bound[3]), [])), MAX_FLOW_STEPS + 1))
+        candidates.append(matches)
+        truncated = truncated or len(matches) > MAX_FLOW_STEPS
+    wanted = [rows[index] for index in range(max(map(len, candidates), default=0))
+              for rows in candidates if index < len(rows)]
+    truncated = truncated or len(wanted) > MAX_FLOW_STEPS
+    queries, parameters = [], []
+    for repo, path, owner, line, name, receiver, ordinal in wanted[:MAX_FLOW_STEPS]:
+        queries.append(
+            "SELECT * FROM (SELECT c.edge_id,c.source_id AS neighbor_id,? AS seed_order,"
+            "c.confidence,c.edge_type,'' AS selection_order,1 AS callsites "
+            "FROM atlas_entities e INDEXED BY atlas_entities_repo_path "
+            "CROSS JOIN generation_entities ge ON ge.entity_id=e.entity_id "
+            "CROSS JOIN atlas_edges c INDEXED BY atlas_edges_source ON c.source_id=e.entity_id "
+            "CROSS JOIN generation_edges g ON g.edge_id=c.edge_id AND g.generation=ge.generation "
+            "WHERE ge.generation=? AND e.repo=? AND e.path=? AND e.line_start=? "
+            + ("AND e.kind='file' " if not owner else "AND e.kind!='file' ") +
+            "AND c.edge_type='CALLS' AND c.line_start=? AND json_valid(c.metadata_json) "
+            "AND json_extract(c.metadata_json,'$.target_name')=? "
+            "AND json_extract(c.metadata_json,'$.receiver') IS ? ORDER BY c.edge_id LIMIT 1)"
+        )
+        parameters.extend((ordinal, generation.generation, repo, path, owner or 1, line, name, receiver))
+    return (connection.execute(' UNION ALL '.join(queries), parameters).fetchall() if queries else []), truncated
+
+
 def _execution_flow(
     settings: Settings, generation: AtlasGenerationRef, seeds: list[str], bundle: ContextBundle,
+    *, incoming_types: tuple[str, ...] = (), outgoing_types: tuple[str, ...] = EXECUTION_EDGE_TYPES,
+    python_sources: dict[tuple[str, str], str] | None = None, load_python_sources: Any = None,
 ) -> dict[str, Any]:
     component = generation.component("typed_graph")
     compatibility = _component_identity(generation, "typed_graph", EXECUTION_FLOW_SCHEMA_VERSION)
-    if component.get("status") != "ready" or component.get("schema_version") != ATLAS_SCHEMA_VERSION:
+    if (bundle.atlas_generation != generation or component.get("status") != "ready"
+            or component.get("schema_version") != ATLAS_SCHEMA_VERSION):
         return {"schema_version": EXECUTION_FLOW_SCHEMA_VERSION, "compatibility_identity": compatibility,
                 "generation": generation.generation, "status": "degraded",
-                "reason": "typed graph is unavailable or incompatible for the pinned generation", "steps": [],
+                "reason": "delivered source does not match the pinned typed-graph generation" if bundle.atlas_generation != generation
+                else "typed graph is unavailable or incompatible for the pinned generation", "steps": [],
                 "database_operations": 0}
-    seeds = list(dict.fromkeys(value for value in seeds if value))[:MAX_FLOW_SEEDS]
+    seeds = list(dict.fromkeys(value for value in seeds if value))
+    seed_overflow = len(seeds) > MAX_FLOW_SEEDS
+    seeds = seeds[:MAX_FLOW_SEEDS]
     if not seeds:
         return {"schema_version": EXECUTION_FLOW_SCHEMA_VERSION, "compatibility_identity": compatibility,
                 "generation": generation.generation, "status": "degraded", "reason": "no anchored entities", "steps": [],
                 "database_operations": 0}
     connection = connect(settings)
     steps: list[dict[str, Any]] = []
+    seen_edges: set[str] = set()
+    seen_python_calls: set[tuple[Any, ...]] = set()
     frontier = list(seeds)
     seen = set(seeds)
     database_operations = 0
+    truncated = seed_overflow
+    failure_reason: str | None = None
+    python_sources = {**bundle._python_package_sources, **(python_sources or {})}
+    python_sources.update({(item.repo, item.path): item.verification_content for item in bundle.evidence
+                           if item.path.endswith('.py') and item.verification_content is not None
+                           and _pinned_repository_evidence(bundle, item)})
+    unknown_bindings: set[str] = set()
+    deadline = time.monotonic() + MAX_FLOW_SECONDS
 
     def count_query(_statement: str) -> None:
         nonlocal database_operations
@@ -1988,7 +2501,9 @@ def _execution_flow(
 
     try:
         connection.set_trace_callback(count_query)
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1_000)
         for depth in range(MAX_FLOW_DEPTH):
+            truncated = truncated or len(frontier) > MAX_FLOW_SEEDS
             # One bounded seek per seed, one validation batch per depth. A
             # global LIMIT would let the first busy entity starve later seeds;
             # a window query would materialize every outgoing edge first.
@@ -1998,28 +2513,72 @@ def _execution_flow(
             queries: list[str] = []
             parameters: list[Any] = []
             for ordinal, source_id in enumerate(frontier[:MAX_FLOW_SEEDS]):
-                queries.append(
-                    "SELECT * FROM (SELECT e.edge_id,e.target_id,? AS seed_order,e.confidence,e.edge_type "
-                    "FROM generation_edges g JOIN atlas_edges e ON e.edge_id=g.edge_id "
-                    f"WHERE g.generation=? AND e.source_id=? AND e.edge_type IN ({','.join('?' for _ in EXECUTION_EDGE_TYPES)}) "
-                    "ORDER BY e.confidence DESC,e.edge_type,e.target_id LIMIT ?)"
-                )
-                parameters.extend((ordinal, generation.generation, source_id, *EXECUTION_EDGE_TYPES, MAX_FLOW_BRANCH))
+                for origin, neighbor, edge_types in (
+                    ("source", "target", outgoing_types), ("target", "source", incoming_types),
+                ):
+                    if not edge_types:
+                        continue
+                    # A repeated callsite must not consume every branch before
+                    # another callee gets a chance. Preserve one deterministic
+                    # source edge per outgoing CALLS target; report compaction.
+                    # Other edges (including every incoming caller) stay distinct.
+                    selection = (
+                        "CASE WHEN json_valid(e.metadata_json) THEN CASE "
+                        "WHEN json_extract(e.metadata_json,'$.resolved')=1 AND "
+                        "(json_extract(e.metadata_json,'$.receiver') IS NULL OR "
+                        "json_extract(e.metadata_json,'$.receiver')='this') THEN '0' "
+                        "WHEN json_extract(e.metadata_json,'$.resolved')=1 THEN '1' ELSE '2' END ELSE '2' END"
+                        "||printf('%012d',e.line_start)||e.edge_id"
+                    )
+                    projection = (
+                        f"substr(min({selection}),14) AS edge_id,e.{neighbor}_id AS neighbor_id,? AS seed_order,"
+                        f"max(e.confidence) AS confidence,e.edge_type,min({selection}) AS selection_order,"
+                        "CASE WHEN e.edge_type='CALLS' AND lower(e.path) LIKE '%.py' "
+                        "THEN count(DISTINCT e.line_start) ELSE count(*) END AS callsites "
+                        if origin == "source" else
+                        f"e.edge_id,e.{neighbor}_id AS neighbor_id,? AS seed_order,e.confidence,e.edge_type,'' AS selection_order,1 AS callsites "
+                    )
+                    grouping = (
+                        "GROUP BY e.edge_type,CASE WHEN e.edge_type='CALLS' THEN CASE "
+                        "WHEN lower(e.path) LIKE '%.py' AND json_valid(e.metadata_json) "
+                        "THEN json_array(json_extract(e.metadata_json,'$.receiver'),json_extract(e.metadata_json,'$.target_name')) "
+                        "ELSE e.target_id END ELSE e.edge_id END "
+                        if origin == "source" else ""
+                    )
+                    queries.append(
+                        f"SELECT * FROM (SELECT {projection}"
+                        f"FROM atlas_edges e INDEXED BY atlas_edges_{origin} "
+                        "CROSS JOIN generation_edges g ON e.edge_id=g.edge_id "
+                        f"WHERE g.generation=? AND e.{origin}_id=? AND e.edge_type IN ({','.join('?' for _ in edge_types)}) "
+                        f"{grouping}ORDER BY selection_order,confidence DESC,e.edge_type,neighbor_id LIMIT ?)"
+                    )
+                    parameters.extend((ordinal, generation.generation, source_id, *edge_types, MAX_FLOW_BRANCH + 1))
+            if not queries:
+                break
             rows = connection.execute(
-                " UNION ALL ".join(queries) + " ORDER BY seed_order,confidence DESC,edge_type,target_id",
+                " UNION ALL ".join(queries) + " ORDER BY seed_order,selection_order,confidence DESC,edge_type,neighbor_id",
                 parameters,
             ).fetchall()
+            if depth == 0 and 'CALLS' in incoming_types and python_sources:
+                if database_operations + 7 <= MAX_FLOW_DB_QUERIES:
+                    incoming, incomplete = _python_incoming_rows(connection, generation, frontier[:MAX_FLOW_SEEDS],
+                                                                  python_sources, deadline)
+                    rows = list(dict.fromkeys([*rows, *incoming]))
+                    truncated = truncated or incomplete
+                else:
+                    truncated = True
             valid_edges = _valid_generation_edges(
                 connection, generation.generation, (str(row[0]) for row in rows),
             )
-            valid_targets = _valid_generation_entities(
-                connection, generation.generation, (str(row[1]) for row in rows),
+            valid_entities = _valid_generation_entities(
+                connection, generation.generation,
+                (str(value) for edge in valid_edges.values() for value in (edge["source_id"], edge["target_id"])),
             )
             if any(
                 str(row[0]) not in valid_edges or (
-                    str(row[1]) not in valid_targets and not (
-                        valid_edges[str(row[0])]["edge_type"] == "CALLS"
-                        and valid_edges[str(row[0])]["metadata"].get("resolved") is False
+                    str(row[1]) not in valid_entities and not (
+                        str(row[1]) == str(valid_edges[str(row[0])]["target_id"])
+                        and not bool(valid_edges[str(row[0])]["metadata"].get("resolved"))
                     )
                 ) for row in rows
             ):
@@ -2031,51 +2590,152 @@ def _execution_flow(
                     "reason": "typed graph content identity is incompatible",
                     "steps": [], "paths": [], "database_operations": database_operations,
                 }
+            python_edges = {key: edge for key, edge in valid_edges.items()
+                            if edge['edge_type'] == 'CALLS' and edge['path'].lower().endswith('.py')}
+            bound_targets: dict[str, dict[str, Any]] = {}
+            if python_edges:
+                truncated = truncated or len(python_edges) > MAX_FLOW_STEPS
+                if load_python_sources is not None:
+                    python_sources.update(load_python_sources(list(dict.fromkeys(
+                        (edge['repo'], edge['path']) for edge in python_edges.values()))) or {})
+                if database_operations + 4 <= MAX_FLOW_DB_QUERIES:
+                    bound_targets = _python_bound_targets(connection, generation, python_edges, valid_entities,
+                                                          python_sources, load_python_sources)
+                    valid_entities.update((item['entity_id'], item) for item in bound_targets.values())
+                else:
+                    truncated = True
             next_frontier: list[str] = []
+            branches: dict[tuple[int, str], int] = {}
             for row in rows:
                 edge = valid_edges[str(row[0])]
-                target_entity = valid_targets.get(str(row[1]))
+                direction = "outgoing" if str(edge["source_id"]) == frontier[int(row[2])] else "incoming"
+                branch = (int(row[2]), direction)
+                if str(edge["edge_id"]) in seen_edges:
+                    continue
+                target_entity = valid_entities.get(str(edge["target_id"]))
+                # Legacy simple-name reconciliation could bind state.get() to
+                # an unrelated unique get(). A receiver without type ownership
+                # remains a callsite candidate, never a dispatch/traversal seed.
+                unbound_receiver = edge["edge_type"] == "CALLS" and edge["metadata"].get("receiver") not in {None, "this"}
+                neighbor = str(row[1])
                 target = str(edge["target_id"])
+                identity = str(edge['edge_id'])
+                python_call = identity in python_edges
+                if python_call:
+                    target_entity = bound_targets.get(identity)
+                    unbound_receiver = target_entity is None
+                    if target_entity is not None:
+                        target = str(target_entity['entity_id'])
+                        # An incoming name-only candidate may actually bind a
+                        # different function. Never report it as this seed's caller.
+                        if direction == 'incoming' and target != frontier[int(row[2])]:
+                            continue
+                        if direction == 'outgoing':
+                            neighbor = target
+                        if target != str(edge['target_id']):
+                            identity = _hash('python-lexical-binding-v1', identity, target)
+                    else:
+                        unknown_bindings.add(identity)
+                        if direction == 'incoming':
+                            continue
+                if identity in seen_edges:
+                    continue
+                if python_call:
+                    callsite = (edge['source_id'], edge['line_start'], edge['metadata'].get('receiver'), target, direction)
+                    if callsite in seen_python_calls:
+                        continue
+                    seen_python_calls.add(callsite)
+                seen_edges.add(identity)
+                branches[branch] = branches.get(branch, 0) + 1
+                if branches[branch] > MAX_FLOW_BRANCH:
+                    truncated = True
+                    continue
                 target_name = str(
                     (target_entity["simple_name"] if target_entity else edge["metadata"].get("target_name")) or target
                 )
-                # A canonical unresolved call (for example logger.info) is a
-                # navigation leaf, not corrupted graph data or verified dispatch.
-                state = "verified" if target_entity is not None and _verified_value_location(
-                    bundle, str(edge["repo"]), str(edge["path"]), int(edge["line_start"]),
-                    target_name, kind="symbol",
-                ) else "candidate"
+                # Canonical unresolved calls/types are navigation leaves, not
+                # corrupted graph data or verified dispatch/implementation.
+                if edge["edge_type"] == "EXPOSES_ENDPOINT":
+                    endpoint = valid_entities.get(str(edge["source_id"]))
+                    local_owner = bool(
+                        endpoint is not None and endpoint["kind"] == "endpoint" and target_entity is not None
+                        and target_entity["kind"] in {"method", "constructor"}
+                        and endpoint.get("parent_entity_id") == target_entity["entity_id"]
+                        and (endpoint["repo"], endpoint["path"]) == (target_entity["repo"], target_entity["path"])
+                    )
+                    state = "verified" if local_owner and _verified_value_location(
+                        bundle, str(target_entity["repo"]), str(target_entity["path"]), int(target_entity["line_start"]),
+                        target_name, kind="symbol",
+                    ) else "candidate"
+                else:
+                    state = "verified" if target_entity is not None and not unbound_receiver and _verified_value_location(
+                        bundle, str(edge["repo"]), str(edge["path"]), int(edge["line_start"]),
+                        str(edge['metadata'].get('target_name') or target_name) if python_call else target_name, kind="symbol",
+                    ) else "candidate"
+                if state == "verified":
+                    # A real handler does not make a legacy/ambiguous route
+                    # authoritative. Verify both endpoint sides from delivered
+                    # pinned source, including EXPOSES_ENDPOINT and call edges.
+                    for entity_id in (edge["source_id"], edge["target_id"]):
+                        endpoint = valid_entities.get(str(entity_id))
+                        if endpoint is not None and endpoint["kind"] == "endpoint" and not _verified_value_location(
+                            bundle, str(endpoint["repo"]), str(endpoint["path"]), int(endpoint["line_start"]),
+                            str(endpoint["simple_name"]), kind="endpoint",
+                        ):
+                            state = "candidate"
+                            break
                 steps.append({
-                    "identity": str(edge["edge_id"]), "order": len(steps) + 1, "depth": depth,
+                    "identity": identity, "source_edge_id": str(edge['edge_id']), "order": len(steps) + 1, "depth": depth,
                     "edge_type": str(edge["edge_type"]), "source_id": str(edge["source_id"]),
                     "target_id": target, "target": target_name,
+                    **{f"{side}_symbol": {
+                        "entity_id": entity["entity_id"], "repo": entity["repo"],
+                        "path": entity["path"], "line": entity["line_start"],
+                        "value": entity["qualified_name"], "module_id": entity["module_id"],
+                    } if entity is not None and (not unbound_receiver or side == 'source' and python_call)
+                    and entity["kind"] in {"function", "method", "constructor", "test"} else None
+                       for side, entity in (("source", valid_entities.get(str(edge["source_id"]))), ("target", target_entity))},
                     "module_id": target_entity["module_id"] if target_entity else None, "repo": str(edge["repo"]),
                     "path": str(edge["path"]), "line": int(edge["line_start"]),
                     "confidence": float(edge["confidence"]),
                     "state": state, "evidence_authority": "exact_source" if state == "verified" else "atlas_candidate",
+                    "collapsed_callsite_count": int(row[6]) - 1,
                 })
+                truncated = truncated or int(row[6]) > 1
                 # Visit a node once, but retain every bounded source edge.
                 # Shared callees and other seeds are not duplicate evidence.
-                if target not in seen:
-                    seen.add(target)
-                    if target_entity is not None:
-                        next_frontier.append(target)
+                if neighbor not in seen and neighbor in valid_entities and not unbound_receiver:
+                    seen.add(neighbor)
+                    next_frontier.append(neighbor)
                 if len(steps) >= MAX_FLOW_STEPS:
                     break
             frontier = next_frontier
             if not frontier or len(steps) >= MAX_FLOW_STEPS or database_operations >= MAX_FLOW_DB_QUERIES:
                 break
+    except sqlite3.Error as error:
+        if getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT:
+            # Earlier depths passed canonical validation. A later timeout
+            # limits coverage, not the validity of that already-found evidence.
+            failure_reason = "pinned graph time budget reached; only completed validated depths are available"
+            truncated = True
+        else:
+            return {"schema_version": EXECUTION_FLOW_SCHEMA_VERSION, "compatibility_identity": compatibility,
+                    "generation": generation.generation, "status": "degraded",
+                    "reason": "pinned graph query failed", "steps": [], "paths": [],
+                    "database_operations": database_operations}
     finally:
         connection.close()
     paths = _execution_paths(steps)
     return {
         "schema_version": EXECUTION_FLOW_SCHEMA_VERSION, "compatibility_identity": compatibility,
-        "generation": generation.generation, "status": "ready" if steps else "degraded",
-        "reason": None if steps else "no bounded Atlas path from resolved anchors", "steps": steps,
+        "generation": generation.generation, "status": "ready" if steps and not failure_reason else "degraded",
+        "reason": failure_reason or (None if steps else "no bounded Atlas path from resolved anchors"), "steps": steps,
+        "unresolved_python_bindings": len(unknown_bindings),
         "paths": paths,
         "order_semantics": "static source-to-target graph paths; never runtime chronology",
+        "truncated": truncated or bool(frontier) or len(steps) >= MAX_FLOW_STEPS,
         "bounds": {"seed_limit": MAX_FLOW_SEEDS, "depth": MAX_FLOW_DEPTH, "branch": MAX_FLOW_BRANCH, "step_limit": MAX_FLOW_STEPS,
-                   "database_query_limit": MAX_FLOW_DB_QUERIES},
+                   "database_query_limit": MAX_FLOW_DB_QUERIES, "seconds": MAX_FLOW_SECONDS},
         "database_operations": database_operations,
     }
 
@@ -2130,10 +2790,12 @@ def _execution_paths(steps: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _integration_flow(
     settings: Settings, generation: AtlasGenerationRef, anchors: list[dict[str, Any]], bundle: ContextBundle,
+    *, requested_topics: set[str] | None = None,
 ) -> dict[str, Any]:
     component = generation.component("java_intelligence")
     compatibility = _component_identity(generation, "java_intelligence", INTEGRATION_FLOW_SCHEMA_VERSION)
-    if component.get("status") != "ready" or component.get("schema_version") != JAVA_INTELLIGENCE_SCHEMA_VERSION:
+    if (bundle.atlas_generation != generation or component.get("status") != "ready"
+            or component.get("schema_version") != JAVA_INTELLIGENCE_SCHEMA_VERSION):
         return {"schema_version": INTEGRATION_FLOW_SCHEMA_VERSION, "compatibility_identity": compatibility,
                 "generation": generation.generation, "status": "degraded",
                 "reason": "Java integration intelligence is unavailable for the pinned generation",
@@ -2195,26 +2857,166 @@ def _integration_flow(
     ordered = sorted(unique.values(), key=lambda row: (str(row[2]).casefold(), direction_order.get(str(row[10]), 9), str(row[4]), str(row[7]), int(row[8])))[:MAX_FLOW_STEPS]
     steps = []
     for row in ordered:
-        state = "verified" if _verified_value_location(
-            bundle, str(row[4]), str(row[7]), int(row[8]), row[2], kind=str(row[1]),
-        ) else "candidate"
+        topic_matches_request = not requested_topics or row[1] != "topic" or row[2] in requested_topics
+        provenance = json.loads(row[13])
+        if row[1] == "endpoint":
+            contracts = _verified_http_methods(bundle, str(row[4]), str(row[7]), int(row[8]), row[2], str(row[10]))
+            verified = bool(contracts)
+            provenance = {**provenance, "http_methods": sorted({method for method, _ in contracts}),
+                          "http_target_services": sorted({service for _, service in contracts if service})}
+        else:
+            verified = topic_matches_request and _verified_value_location(
+                bundle, str(row[4]), str(row[7]), int(row[8]), row[2], kind=str(row[1]), direction=str(row[10]),
+            )
+        state = "verified" if verified else "candidate"
         steps.append({
             "identity": str(row[0]), "order": len(steps) + 1, "kind": str(row[1]), "key": str(row[2]),
             "repo": str(row[4]), "module_id": row[5], "entity_id": row[6], "path": str(row[7]),
             "line": int(row[8]), "direction": str(row[10]), "framework": str(row[11]),
             "confidence": float(row[12]), "state": state,
-            "provenance": json.loads(row[13]),
+            "provenance": provenance,
             "evidence_authority": "exact_source" if state == "verified" else "atlas_candidate",
         })
+    from .relations import _route
+
+    # Old registered facts remain navigation inputs. Effective Feign prefixes
+    # can be recovered from source already delivered for this request, without
+    # rewriting the index, borrowing an entity ID, or performing more repo I/O.
+    source_steps = _source_http_steps(bundle, anchors) if not requested_topics or any(
+        item.get("kind") == "endpoint" for item in anchors
+    ) else []
+    source_keys = {(item["repo"], item["path"], item["line"], item["direction"], item["key"]) for item in source_steps}
+    steps = source_steps + [item for item in steps if item["kind"] != "endpoint" or (
+        item["repo"], item["path"], item["line"], item["direction"], _route(item["key"])
+    ) not in source_keys]
+    steps = sorted(steps, key=lambda item: (
+        item["state"] != "verified", str(item["key"]).casefold(),
+        direction_order.get(str(item["direction"]), 9), item["repo"], item["path"], item["line"],
+    ))[:MAX_FLOW_STEPS]
+    for order, item in enumerate(steps, 1):
+        item["order"] = order
     repos = {item["repo"] for item in steps}
+    connected = _verified_integration_pair(steps) is not None
     return {
         "schema_version": INTEGRATION_FLOW_SCHEMA_VERSION,
         "compatibility_identity": compatibility, "generation": generation.generation,
-        "status": "ready" if len(repos) > 1 else "degraded",
-        "reason": None if len(repos) > 1 else "cross-repository integration is not established",
-        "steps": steps, "repositories": sorted(repos), "bounds": {"key_limit": MAX_FLOW_SEEDS, "step_limit": MAX_FLOW_STEPS},
+        "status": "ready" if connected else "degraded",
+        "reason": None if connected else "cross-repository integration is not established from compatible pinned-source contracts",
+        "steps": steps, "repositories": sorted(repos),
+        "bounds": {"key_limit": MAX_FLOW_SEEDS, "step_limit": MAX_FLOW_STEPS,
+                   "source_file_limit": MAX_FLOW_BRANCH, "source_file_bytes": MAX_REFRESH_FILE_BYTES},
         "database_operations": database_operations,
     }
+
+
+def _source_http_steps(bundle: ContextBundle, anchors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Bounded navigation from delivered source; not an exhaustive route inventory."""
+    from .relations import _http_top_level_types, _route
+
+    if bundle.atlas_generation is None:
+        return []
+    anchors = anchors[:MAX_FLOW_SEEDS]
+    routes = {_route(str(item.get("value"))) for item in anchors if item.get("kind") == "endpoint" and item.get("value")}
+    by_path: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for anchor in anchors:
+        if anchor.get("kind") in {"endpoint", "symbol"} and anchor.get("repo") and anchor.get("path"):
+            by_path.setdefault((str(anchor["repo"]), str(anchor["path"])), []).append(anchor)
+    if not routes and not by_path:
+        return []
+    sources: dict[tuple[str, str], tuple[str, list[Any]]] = {}
+    for evidence in sorted(bundle.evidence, key=lambda item: (item.repo, item.path) not in by_path):
+        if not _pinned_repository_evidence(bundle, evidence) or Path(evidence.path).suffix.lower() not in {".java", ".kt", ".kts"}:
+            continue
+        content = evidence.verification_content
+        if content is None or not _cacheable_verification_source(content) or "Mapping" not in content:
+            continue
+        key = (evidence.repo, evidence.path)
+        if key not in sources:
+            if len(sources) >= MAX_FLOW_BRANCH:
+                continue
+            sources[key] = (content, [])
+        if content == sources[key][0]:
+            sources[key][1].append(evidence)
+    steps: list[dict[str, Any]] = []
+    cached = _SOURCE_VERIFICATION_CACHE.get()
+    extract = cached[1] if cached is not None else _verification_endpoints
+    declarations: dict[tuple[str, str], list[tuple[str, int, str, str, str]]] = {}
+    for (repo, path), (content, windows) in sources.items():
+        rows = [item for item in extract(repo, path, content)
+                if any(window.line_start <= item[1] <= window.line_end for window in windows)]
+        declarations[(repo, path)] = rows
+        path_anchors = by_path.get((repo, path), [])
+        owners: dict[tuple[str, int], list[tuple[int, int]]] = {}
+        if any(anchor.get("kind") == "symbol" for anchor in path_anchors):
+            code = _mask_java_comments(content, strings=True, nested_comments=Path(path).suffix.lower() in {".kt", ".kts"})
+            newlines = [match.start() for match in re.finditer("\n", content)]
+            for _, declaration, opening, closing, name in _http_top_level_types(code):
+                owners.setdefault((name, bisect_right(newlines, declaration) + 1), []).append(
+                    (bisect_right(newlines, opening) + 1, bisect_right(newlines, closing) + 1))
+        for anchor in path_anchors:
+            if anchor.get("kind") == "endpoint" and (anchor.get("provenance") or {}).get("direction") == "outbound":
+                suffix = _route(str(anchor.get("value") or ""))
+                routes.update(route for route, line, direction, _, _ in rows
+                              if line == anchor.get("line") and direction == "outbound"
+                              and (suffix == "/" or route.endswith(suffix)))
+            elif anchor.get("kind") == "symbol":
+                name = re.split(r"[.$#:]", str(anchor.get("value") or ""))[-1]
+                spans = owners.get((name, anchor.get("line")), [])
+                if (len(spans) == 1
+                        and any(window.line_start <= anchor["line"] <= window.line_end for window in windows)):
+                    routes.update(item[0] for item in rows if spans[0][0] <= item[1] <= spans[0][1])
+    for (repo, path), (content, windows) in sources.items():
+        grouped: dict[tuple[str, int, str], set[tuple[str, str]]] = {}
+        for route, line, direction, method, target in declarations[(repo, path)]:
+            if route in routes:
+                grouped.setdefault((route, line, direction), set()).add((method, target))
+        if not grouped:
+            continue
+        source_identity = _hash(content)
+        for (route, line, direction), contracts in sorted(grouped.items()):
+            methods = sorted({method for method, _ in contracts})
+            targets = sorted({target for _, target in contracts if target})
+            steps.append({
+                "identity": _hash("literal-http-source-v1", bundle.atlas_generation.identity, repo, path,
+                                  source_identity, route, line, direction, *methods, "targets", *targets),
+                "order": len(steps) + 1, "kind": "endpoint", "key": route, "repo": repo,
+                "path": path, "line": line, "direction": direction, "module_id": None, "entity_id": None,
+                "framework": "spring-feign" if direction == "outbound" else "spring-mvc",
+                "confidence": 1.0, "state": "verified", "evidence_authority": "exact_source",
+                "provenance": {"extractor": "literal-http-source-v1", "source_identity": source_identity,
+                               "http_methods": methods, "http_target_services": targets},
+            })
+            if len(steps) >= MAX_FLOW_STEPS:
+                return steps
+    return steps
+
+
+def _verified_integration_pair(steps: Iterable[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Match literal source contracts; not proof of deployment or runtime causality."""
+    from .relations import _http_server_methods, _route
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in steps:
+        kind = str(item.get("kind") or "")
+        if item.get("state") == "verified" and kind in {"endpoint", "topic"}:
+            key = str(item.get("key") or "")
+            grouped.setdefault((kind, _route(key) if kind == "endpoint" else key), []).append(item)
+    for (kind, _), values in grouped.items():
+        for outbound in values:
+            if outbound.get("direction") != "outbound":
+                continue
+            outgoing = outbound.get("provenance") or {}
+            methods = set(outgoing.get("http_methods") or []) - {"ANY"}
+            for inbound in values:
+                if inbound.get("direction") != "inbound" or outbound.get("repo") == inbound.get("repo"):
+                    continue
+                if kind == "topic":
+                    return outbound, inbound
+                accepts = set((inbound.get("provenance") or {}).get("http_methods") or [])
+                if (any(accepts.intersection(_http_server_methods(method)) for method in methods)
+                        and str(inbound.get("repo")) in (outgoing.get("http_target_services") or [])):
+                    return outbound, inbound
+    return None
 
 
 def _program_slice(bundle: ContextBundle) -> dict[str, Any]:
@@ -2880,12 +3682,11 @@ def build_ticket_runtime(
     if pinned is not None and int(pinned) != generation.generation:
         raise RuntimeError("investigation runtime generation changed inside a pinned ticket")
     wave = int(existing.get("wave") or 0) + 1
-    if wave > AUTOMATIC_MAX_WAVES and continue_investigation is not True:
-        raise RuntimeError("investigation continuation requires user approval")
-    values: list[object] = [
-        *(item for item in request.get("anchors") or [] if isinstance(item, dict)),
-        *(request.get("resolve") or []), *(request.get("runtime_facts") or []), request.get("objective"),
-    ]
+    requested_topics = {
+        str(item.get("value") or "") for item in request.get("anchors") or []
+        if isinstance(item, dict) and item.get("kind") == "topic" and item.get("value")
+    }
+    values = _runtime_anchor_inputs(request)
     ablations = set(str(value) for value in request.get("_evaluation_ablation") or [])
     if "anchors" in ablations:
         resolved = {
@@ -3008,6 +3809,12 @@ def build_ticket_runtime(
             ),
         )[:MAX_ANCHOR_CANDIDATES]
         for item in resolved["candidates"]:
+            # Case-folded lookup and retained priors are navigation, not a
+            # replacement for an explicitly requested concrete topic identity.
+            if requested_topics and item.get("kind") == "topic" and item.get("value") not in requested_topics:
+                item["evidence_authority"] = "atlas_candidate"
+                item["provenance"] = {**dict(item.get("provenance") or {}), "exact_source": False}
+                continue
             verified = _verified_anchor(bundle, item)
             if item.get("evidence_authority") != "exact_source":
                 item["evidence_authority"] = "exact_source" if verified else "atlas_candidate"
@@ -3063,21 +3870,50 @@ def build_ticket_runtime(
         str(item.get("entity_id")) for item in anchors
         if item.get("entity_id") and not is_test_path(str(item.get("path") or ""))
     ])))
-    execution_input = _hash("execution-input", *seeds)
+    from .retrieval.planner import requested_symbol_relations
+
+    requested_relations = requested_symbol_relations(request)
+    incoming_types = (
+        *(("CALLS",) if "callers" in requested_relations else ()),
+        *(("IMPLEMENTS", "EXTENDS") if "implementations" in requested_relations else ()),
+    )
+    if requested_relations:
+        # Reuse per-query disambiguation from this retrieval, not persisted
+        # session/trace hints. Multiple exact symbols remain a valid batch.
+        requested_symbols = {str(item.get("value")) for item in request.get("anchors") or []
+                             if isinstance(item, dict) and item.get("kind") in {'symbol', 'log_literal', 'error_code', 'exception'}}
+        seeds = list(dict.fromkeys(
+            identifier for query, identifier in bundle._resolved_relation_seeds.items()
+            if query in requested_symbols
+        )) if resolved.get("status") == "ready" and bundle.atlas_generation == generation else []
+        if seeds:
+            # Per-query resolution covers more anchors than the bulk resolver's
+            # preview. Validate against the pinned catalog, not that preview.
+            connection = connect(settings)
+            try:
+                valid_seeds = _valid_generation_entities(connection, generation.generation, seeds)
+            finally:
+                connection.close()
+            resolved["database_operations"] = int(resolved.get("database_operations") or 0) + 1
+            seeds = [identifier for identifier in seeds if not is_test_path(valid_seeds[identifier]["path"])] if (
+                len(valid_seeds) == len(seeds)
+            ) else []
+    execution_input = _hash("execution-input", *seeds, *incoming_types)
     execution_compatibility = _component_identity(generation, "typed_graph", EXECUTION_FLOW_SCHEMA_VERSION)
     # Flow subsets change with the current exact-evidence verification state. Rebuild the
     # bounded traversal from the pinned graph instead of treating ticket/session state as
     # an authoritative cache that could hide an omitted edge.
-    execution = _execution_flow(settings, generation, seeds, bundle)
+    execution = _execution_flow(settings, generation, seeds, bundle, incoming_types=incoming_types)
     execution.update({"input_identity": execution_input, "cache_reused": False})
     execution["cache_identity"] = _flow_cache_identity(EXECUTION_FLOW_SCHEMA_VERSION, execution.get("steps") or [])
     integration_input = _hash(
         "integration-input", *(str(item.get("identity") or item.get("value")) for item in anchors),
+        "requested-topics", *sorted(requested_topics),
     )
     integration_compatibility = _component_identity(
         generation, "java_intelligence", INTEGRATION_FLOW_SCHEMA_VERSION,
     )
-    integration = _integration_flow(settings, generation, anchors, bundle)
+    integration = _integration_flow(settings, generation, anchors, bundle, requested_topics=requested_topics)
     integration.update({"input_identity": integration_input, "cache_reused": False})
     integration["cache_identity"] = _flow_cache_identity(
         INTEGRATION_FLOW_SCHEMA_VERSION, integration.get("steps") or [],
@@ -3094,6 +3930,8 @@ def build_ticket_runtime(
                 step["evidence_authority"] = "atlas_candidate"
         if flow_name == "execution":
             flow["paths"] = _execution_paths(flow.get("steps") or [])
+        elif _verified_integration_pair(flow.get("steps") or []) is None:
+            flow.update(status="degraded", reason="cross-repository integration is not established from compatible pinned-source contracts")
         flow_identity = _hash("ticket-flow", generation.identity, flow_name)
         flow["flow_id"] = _allocate(registry, "flows", flow_identity, "F", 3)
     if "program_slice" in ablations:
@@ -3201,35 +4039,7 @@ def build_ticket_runtime(
             coverage_proofs["main_execution_flow"] = flow_ids
     elif execution.get("steps"):
         coverage["main_execution_flow"] = "candidate"
-    verified_integrations: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for item in integration.get("steps") or []:
-        if item.get("state") != "verified":
-            continue
-        key = (str(item.get("kind") or ""), _normalize(item.get("key")))
-        verified_integrations.setdefault(key, []).append(item)
-    established_pair: tuple[dict[str, Any], dict[str, Any]] | None = None
-    for (kind, _), values in verified_integrations.items():
-        for index, first in enumerate(values):
-            for second in values[index + 1:]:
-                if str(first.get("repo")) == str(second.get("repo")):
-                    continue
-                by_direction = {str(first.get("direction")): first, str(second.get("direction")): second}
-                if set(by_direction) != {"inbound", "outbound"}:
-                    continue
-                if kind == "topic":
-                    established_pair = first, second
-                    break
-                if kind == "endpoint":
-                    outbound = by_direction["outbound"]
-                    inbound = by_direction["inbound"]
-                    target_service = (outbound.get("provenance") or {}).get("target_service")
-                    if target_service and _normalize(target_service) == _normalize(inbound.get("repo")):
-                        established_pair = first, second
-                        break
-            if established_pair is not None:
-                break
-        if established_pair is not None:
-            break
+    established_pair = _verified_integration_pair(integration.get("steps") or [])
     if established_pair is not None:
         if integration_ids := exact_ids(established_pair):
             coverage["cross_repo_integration"] = "verified"
@@ -3315,10 +4125,6 @@ def build_ticket_runtime(
         stop_reason = "coverage_satisfied"
     elif int(state.get("no_progress_rounds") or 0) >= 2:
         stop_reason = "no_progress"
-    elif continue_investigation:
-        stop_reason = "awaiting_user_continuation"
-    elif wave >= DEFAULT_MAX_WAVES:
-        stop_reason = "default_wave_limit"
     else:
         stop_reason = "continue"
     database_operations = retention_database_operations + sum(
@@ -3394,12 +4200,9 @@ def build_ticket_runtime(
             "database_operations": database_operations,
             "database_operation_limit": MAX_RUNTIME_DB_OPERATIONS,
             "physical_operations_used": total_physical_operations,
-            "physical_operation_limit": (
-                prior_physical_operations + settings.max_backend_operations if continue_investigation
-                else settings.max_backend_operations * AUTOMATIC_MAX_WAVES
-            ),
+            "physical_operation_limit": None,
             "physical_operation_limit_per_wave": settings.max_backend_operations,
-            "budget_scope": "single_user_approved_wave" if continue_investigation else "automatic_investigation",
+            "budget_scope": "per_request",
             "context_byte_limit_per_wave": settings.hard_context_chars,
             "repo_scope_count": int(bundle.metrics.get("repo_scope_count") or 0),
             "repo_scope_limit": int(bundle.metrics.get("repo_scope_limit") or settings.widen_repo_limit),
@@ -3452,16 +4255,15 @@ def stable_evidence_id(state: dict[str, Any], item: Any) -> str:
     return _allocate({"evidence": registry}, "evidence", identity, "E", 4)
 
 
-def render_protocol_v5(runtime: dict[str, Any], *, delta: bool = False) -> str:
+def render_protocol_v5(runtime: dict[str, Any], *, delta: bool = False, compact: bool = False) -> str:
     """Render bounded derived navigation state; source remains separately rendered."""
     sections = [
         "## Protocol v5 investigation state", "",
         f"- Runtime schema: `{runtime.get('schema_version')}`",
         f"- Pinned generation: `{runtime.get('generation')}`",
-        f"- Wave: `{runtime.get('wave')}` (automatic allowance: `{runtime.get('automatic_max_waves', AUTOMATIC_MAX_WAVES)}`; no lifetime ticket wave limit)",
-        f"- User-approved continuation: `{bool(runtime.get('user_approved_continuation'))}`; approval covers this wave only",
+        f"- Wave: `{runtime.get('wave')}` (no fixed ticket wave limit; each request has its own resource budget)",
         f"- Stop reason: `{runtime.get('stop_reason')}`",
-        "- A stop reason pauses automatic investigation; it is not proof that enough evidence exists. The user can approve one focused continuation without resetting this ticket or changing its pinned generation.",
+        "- Stop reasons are evidence guidance, not a lock on this ticket. If a material repository fact is still missing, submit a focused request on the same pinned generation without extra continuation approval. Change approach when no new evidence is found; do not repeat an unchanged request.",
         f"- Context mode: `{'delta' if delta else 'full checkpoint'}`", "",
     ]
     serving = runtime.get("serving_state") or {}
@@ -3490,6 +4292,11 @@ def render_protocol_v5(runtime: dict[str, Any], *, delta: bool = False) -> str:
         flow = runtime.get(key) or {}
         flow_steps = (delta_state.get(key) if delta else flow.get("steps")) or []
         sections.extend(["", f"### {title} `{flow.get('flow_id', 'unassigned')}`", ""])
+        if flow.get("truncated"):
+            sections.append("- Partial bounded graph; additional relationships may exist. This is not a complete runtime call graph.")
+        compacted = sum(int(item.get('collapsed_callsite_count') or 0) for item in flow_steps)
+        if compacted:
+            sections.append(f"- {compacted} additional same-target callsite candidates compacted; representative pinned callsites are shown.")
         for item in flow_steps:
             label = item.get("edge_type") or item.get("kind")
             sections.append(
@@ -3501,7 +4308,10 @@ def render_protocol_v5(runtime: dict[str, Any], *, delta: bool = False) -> str:
             sections.append(f"- {('No changed steps' if delta else flow.get('reason')) or 'No bounded flow found'}")
     slice_items = (delta_state.get("program_slice") if delta else (runtime.get("program_slice") or {}).get("statements")) or []
     sections.extend(["", "### Program Slice Lite", ""])
-    for item in slice_items[:MAX_SLICE_STATEMENTS]:
+    if compact and slice_items:
+        sections.append(f"- {len(slice_items)} navigation statements retained locally; exact file content is below. "
+                        "This summary does not establish an execution slice or source delivery.")
+    for item in ([] if compact else slice_items[:MAX_SLICE_STATEMENTS]):
         sections.append(
             f"- `{item.get('kind')}` `{item.get('repo')}:{item.get('path')}:{item.get('line')}` "
             f"— `{item.get('evidence_authority')}`"
@@ -3524,6 +4334,10 @@ def render_protocol_v5(runtime: dict[str, Any], *, delta: bool = False) -> str:
     surfaces = delta_state.get("surfaces") if delta else runtime.get("surfaces") or {}
     for name in ("implementation", "test", "impact", "contract", "config_data"):
         rows = surfaces.get(name) or []
+        if compact and rows:
+            sections.append(f"- `{name}`: {len(rows)} retained navigation entries; "
+                            "only embedded source blocks establish visible evidence.")
+            continue
         rendered = ", ".join(
             f"{item['repo']}:{item['path']} [{item['state']}; "
             f"{', '.join(item.get('evidence_ids') or []) or 'candidate-only'}]" for item in rows[:20]

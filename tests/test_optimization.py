@@ -16,6 +16,273 @@ from brain.retrieval.ranker import fuse_and_rank
 
 
 class OptimizationTests(unittest.TestCase):
+    def test_explicit_anchor_source_precedes_optional_source_in_bounded_context(self) -> None:
+        from dataclasses import replace
+        from brain import core
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'repo').mkdir()
+            config = root / 'brain.toml'
+            config.write_text("[project]\nname='literal-delivery'\n[[repositories]]\nname='repo'\npath='repo'\n", encoding='utf-8')
+            settings = replace(load_settings(config), hard_context_chars=10_000)
+            exact = core.Evidence('repo', 'guard.py', 1, 1, 'raise RuntimeError("PIN MISSING")',
+                                  'code, requested anchor match', 90, ['sqlite trigram index'])
+            optional = core.Evidence('repo', 'noise.py', 1, 1, '#' + 'x' * 9_000,
+                                     'code', 1_000, ['Atlas hierarchical router'])
+            for delta in (False, True):
+                with self.subTest(delta=delta):
+                    emitted = set()
+                    bundle = ContextBundle('Find the error', evidence=[optional, exact])
+                    identifiers = {core._evidence_id(item) for item in bundle.evidence}
+                    progress = {'context_id': 'CTX-002', 'base_context_id': 'CTX-001'}
+                    content = core.pack_delta_context(settings, 'LITERAL', 2, bundle, progress, identifiers,
+                                                     emitted_ids=emitted) if delta else (
+                        core.pack_context(settings, 'LITERAL', 1, bundle, emitted_ids=emitted))
+                    self.assertIn(core._evidence_id(exact), emitted)
+                    self.assertIn(exact.content, content)
+                    self.assertLessEqual(len(content.encode('utf-8')), settings.hard_context_chars)
+
+    def test_source_delivery_summarizes_repeated_memory_without_losing_decisions(self) -> None:
+        from dataclasses import replace
+        from brain import core
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'repo').mkdir()
+            config = root / 'brain.toml'
+            config.write_text("[project]\nname='memory-density'\n[[repositories]]\nname='repo'\npath='repo'\n", encoding='utf-8')
+            settings = replace(load_settings(config), hard_context_chars=10_000)
+            source = core.Evidence('repo', 'Adaptor.java', 1, 1, 'class Adaptor { int answer = 42; }',
+                                   'requested file', 100, ['direct file request'])
+            restored = core.Evidence('repo', 'RestoredEvidence.java', 9, 12, 'return previousDecision;',
+                                     'checkpoint recovery', 90, ['checkpoint lineage recovery'])
+            facts = [{'evidence_id': f'E{number:04d}', 'reference': f'repo:Old{number}.java:1-100',
+                      'kind': 'code', 'verified_by': ['direct file request']} for number in range(100)]
+            memory = {'verified_facts': facts, 'verified_references': [row['reference'] for row in facts],
+                      'implementation_surface': [row['reference'] for row in facts],
+                      'runtime_facts': ['An external timeout was observed'],
+                      'decisions': ['Do not retry writes without an idempotency key'],
+                      'blocking_unknowns': ['Which retry policy handles the timeout?']}
+            progress = {'context_id': 'CTX-002', 'base_context_id': 'CTX-001', 'operations': 1,
+                        'new_evidence': 1, 'known_evidence': 100, 'no_progress_rounds': 0,
+                        'investigation_memory': memory, 'memory_changes': memory,
+                        'superseded_evidence_ids': ['E0999'],
+                        'evidence_public_ids': {core._evidence_id(restored): 'E0201'},
+                        'checkpoint': True, 'checkpoint_replacement': 'incomplete_non_replacing',
+                        'retained_evidence_manifest': [
+                            {'evidence_id': core._evidence_id(source), 'repo': 'repo', 'path': 'Adaptor.java',
+                             'line_start': 1, 'line_end': 1, 'status': 'included'},
+                            {'evidence_id': 'E0200', 'repo': 'repo', 'path': 'PriorEvidence.java',
+                             'line_start': 5, 'line_end': 8, 'status': 'retained_not_embedded'},
+                            {'evidence_id': 'E0201', 'repo': 'repo', 'path': 'RestoredEvidence.java',
+                             'line_start': 9, 'line_end': 12, 'status': 'included'},
+                        ]}
+            original = json.dumps(progress, sort_keys=True)
+            for delta in (False, True):
+                with self.subTest(delta=delta):
+                    emitted = set()
+                    bundle = ContextBundle('Read the exact adaptor', evidence=[source, restored], trace={'direct_files_only': True})
+                    content = core.pack_delta_context(settings, 'DENSITY', 2, bundle, progress,
+                                                     {core._evidence_id(source)}, emitted_ids=emitted) if delta else (
+                        core.pack_context(settings, 'DENSITY', 2, bundle, progress, emitted_ids=emitted))
+                    self.assertIn(source.content, content)
+                    self.assertEqual({core._evidence_id(source)} | (set() if delta else {'E0201'}), emitted)
+                    self.assertIn('An external timeout was observed', content)
+                    self.assertIn('Do not retry writes without an idempotency key', content)
+                    self.assertIn('Which retry policy handles the timeout?', content)
+                    self.assertIn('E0999', content)
+                    self.assertIn('retained_count', content)
+                    self.assertNotIn('repo:Old99.java', content)
+                    if not delta:
+                        self.assertIn('1 current-request source regions catalogued', content)
+                        self.assertIn('`E0200` `repo:PriorEvidence.java:5-8` — `retained_not_embedded`', content)
+                        self.assertIn('`E0201` `repo:RestoredEvidence.java:9-12` — `included`', content)
+                        self.assertIn('Replacement status: `incomplete_non_replacing`', content)
+                    self.assertLessEqual(len(content.encode('utf-8')), 10_000)
+                    self.assertEqual(original, json.dumps(progress, sort_keys=True))
+
+    def test_source_memory_summary_preserves_delta_removals_and_reset(self) -> None:
+        from brain.core import _source_request_memory
+
+        for changes in ({'added': [{'evidence_id': 'E0002'}], 'removed': [{'evidence_id': 'E0001'}]},
+                        {'reset': True, 'verified_count': 0, 'authority': 'Source only'}):
+            memory = {'verified_facts': changes, 'decisions': ['A prior decision was withdrawn']}
+            original = json.dumps(memory, sort_keys=True)
+            self.assertEqual(memory, _source_request_memory(memory))
+            self.assertEqual(original, json.dumps(memory, sort_keys=True))
+
+    def test_compact_file_navigation_preserves_runtime_protocol_and_invalidations(self) -> None:
+        from brain.investigation import render_protocol_v5
+
+        slice_rows = [{'kind': 'return', 'repo': 'repo', 'path': f'LongAdaptor{number}.java',
+                       'line': 1, 'evidence_authority': 'derived_navigation_only'} for number in range(50)]
+        surfaces = {'implementation': [{'repo': 'repo', 'path': f'LongAdaptor{number}.java',
+                                        'state': 'verified', 'evidence_ids': [f'E{number:04d}']}
+                                       for number in range(20)]}
+        ledger = [{'hypothesis_id': 'H001', 'status': 'contradicted', 'statement': 'Retries are not safe'}]
+        frontier = [{'blocker_id': 'B001', 'status': 'unresolved', 'statement': 'Check the idempotency key'}]
+        runtime = {'schema_version': 'test', 'generation': 7, 'wave': 12, 'stop_reason': 'continue',
+                   'serving_state': {'semantic': 'unavailable'}, 'program_slice': {'statements': slice_rows},
+                   'surfaces': surfaces, 'hypothesis_ledger': {'items': ledger},
+                   'evidence_frontier': {'items': frontier}, 'execution_flow': {'flow_id': 'F001'},
+                   'delta_state': {'program_slice': slice_rows, 'surfaces': surfaces,
+                                   'hypothesis_ledger': ledger, 'evidence_frontier': frontier,
+                                   'removed': {'anchors': ['A0001'], 'execution_flow': ['F0001']}}}
+        original = json.dumps(runtime, sort_keys=True)
+        for delta in (False, True):
+            with self.subTest(delta=delta):
+                complete = render_protocol_v5(runtime, delta=delta)
+                compact = render_protocol_v5(runtime, delta=delta, compact=True)
+                self.assertIn('LongAdaptor0.java', complete)
+                self.assertNotIn('LongAdaptor0.java', compact)
+                self.assertLess(len(compact.encode('utf-8')), len(complete.encode('utf-8')) // 2)
+                for phrase in ('Pinned generation: `7`', 'Wave: `12`', '`semantic`: `unavailable`',
+                               'H001', 'contradicted', 'Retries are not safe', 'B001',
+                               'Check the idempotency key', 'F001', 'Evidence authority'):
+                    self.assertIn(phrase, compact)
+                if delta:
+                    self.assertIn('Superseded investigation state', compact)
+                    self.assertIn('A0001', compact)
+                    self.assertIn('F0001', compact)
+                self.assertIn('does not establish an execution slice or source delivery', compact)
+                self.assertEqual(original, json.dumps(runtime, sort_keys=True))
+
+    def test_current_requested_file_pages_outrank_optional_source_in_full_and_delta_context(self) -> None:
+        from dataclasses import replace
+        from brain.core import _evidence_id, pack_delta_context, parse_context_request, retrieve_context
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "Requested.java").write_text("class Requested {\n" + "".join(
+                f"  // requested line {i:03d} EXACT_REQUESTED_FILE\n" for i in range(1, 180)
+            ) + "}\n", encoding="utf-8")
+            for i in range(12):
+                (repo / f"Noise{i}.java").write_text(f"class Noise{i} {{\n" + "".join(
+                    f"  // optional region {j:03d} NOISE_{i}\n" for j in range(1, 90)
+                ) + f"  void Noise{i}() {{}}\n}}\n", encoding="utf-8")
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='explicit-file-priority'\n[graph]\nenabled=false\n"
+                              "[experience]\nenabled=false\n[[repositories]]\nname='repo'\npath='repo'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            settings = replace(settings, atlas_generation=current_generation_ref(settings), atlas_generation_mode="pinned",
+                               hard_context_chars=10_000, hydrate_limit=18, max_regions_per_repo=8, max_regions_per_file=2)
+            request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                "version": 5, "mode": "implementation_plan", "objective": "Read the requested file and inspect noise definitions",
+                "files": [{"repo": "repo", "path": "Requested.java"}],
+                "anchors": [{"kind": "symbol", "value": f"Noise{i}"} for i in range(12)],
+            }}))
+            bundle = retrieve_context(settings, request)
+            requested = next(item for item in bundle.evidence if item.path == "Requested.java")
+            self.assertTrue(any(item.score > requested.score for item in bundle.evidence))
+            progress = {"context_id": "CTX-002", "base_context_id": "CTX-001"}
+            for delta in (False, True):
+                with self.subTest(delta=delta):
+                    emitted: set[str] = set()
+                    content = pack_delta_context(settings, "PRIORITY", 2, bundle, progress,
+                                                 {_evidence_id(item) for item in bundle.evidence}, emitted_ids=emitted) if delta else (
+                        pack_context(settings, "PRIORITY", 2, bundle, emitted_ids=emitted)
+                    )
+                    self.assertIn(requested.content, content)
+                    self.assertIn(_evidence_id(requested), emitted)
+                    self.assertLessEqual(len(content.encode("utf-8")), 10_000)
+            # A historical direct-file marker alone must not displace this request.
+            for item in bundle.evidence:
+                if item is not requested:
+                    item.found_by.append("direct file request")
+            self.assertIn(requested.content, pack_context(settings, "PRIORITY", 2, bundle))
+            emitted = set()
+            impossible = pack_context(replace(settings, hard_context_chars=4_000), "PRIORITY", 2, bundle, emitted_ids=emitted)
+            self.assertNotIn(_evidence_id(requested), emitted)
+            self.assertIn("## Omitted evidence IDs", impossible)
+            self.assertIn(f"`{_evidence_id(requested)}` — omitted", impossible)
+            self.assertLessEqual(len(impossible.encode("utf-8")), 4_000)
+
+    def test_direct_ranges_reuse_one_verified_file_within_request_only(self) -> None:
+        from dataclasses import replace
+        from brain import core, index
+        from brain.core import parse_context_request, retrieve_context
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "service").mkdir()
+            source = "\n".join(f"// exact pinned line {number} 数据" for number in range(1, 50_001)) + "\n"
+            (root / "service/Adaptor.java").write_text(source, encoding="utf-8")
+            config = root / "brain.toml"
+            config.write_text("[project]\nname='range-reuse'\n[graph]\nenabled=false\n"
+                              "[[repositories]]\nname='service'\npath='service'\n", encoding="utf-8")
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            generation = current_generation_ref(settings)
+            pinned = replace(settings, atlas_generation=generation, atlas_generation_mode="pinned", max_backend_operations=1)
+            request = parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {
+                "version": 5, "mode": "implementation_plan", "objective": "Compare the four exact adaptor ranges",
+                "files": [{"repo": "service", "path": "Adaptor.java", "lines": lines}
+                          for lines in ("1-5", "5000-5005", "25000-25005", "49990-50000")],
+            }}))
+            with mock.patch.object(index, "read_indexed_file", wraps=index.read_indexed_file) as reads, \
+                    mock.patch.object(core, "_source_line_offsets", wraps=core._source_line_offsets) as offsets:
+                bundle = retrieve_context(pinned, request)
+                self.assertEqual(1, reads.call_count)
+                self.assertEqual(1, offsets.call_count, "decompose the large file once, not once per range")
+                self.assertEqual(4, len(bundle.evidence))
+                self.assertEqual([], bundle.unresolved)
+                self.assertEqual(1, bundle.trace["physical_backend_operations"])
+                self.assertEqual(3, bundle.trace["cache_hits"])
+                self.assertEqual([len(source.rstrip("\n").encode("utf-8")), 0, 0, 0],
+                                 [item["source_bytes_read"] for item in bundle.trace["file_reads"]])
+                for item in bundle.evidence:
+                    self.assertEqual("\n".join(source.splitlines()[item.line_start - 1:item.line_end]), item.content)
+                retrieve_context(pinned, request)
+                self.assertEqual(2, reads.call_count, "a later request must revalidate pinned source")
+                self.assertEqual(2, offsets.call_count, "line offsets must not survive the request")
+            with mock.patch("brain.core.MAX_PINNED_HYDRATION_BYTES", len(source.rstrip("\n").encode("utf-8"))), \
+                    mock.patch.object(index, "read_indexed_file", wraps=index.read_indexed_file) as reads:
+                uncached = retrieve_context(replace(pinned, max_backend_operations=4), request)
+                self.assertEqual(4, reads.call_count, "retained offsets must count toward the source-cache byte budget")
+                self.assertEqual(4, len(uncached.evidence), "cache capacity is not a source-read quota")
+                self.assertEqual(0, uncached.trace["cache_hits"])
+            with mock.patch.object(index, "read_indexed_file", return_value=None):
+                missing = retrieve_context(pinned, request)
+            self.assertEqual([], missing.evidence, "no cached source survives into another request")
+
+    def test_source_page_offsets_preserve_reader_line_semantics_and_cached_source(self) -> None:
+        from dataclasses import replace
+        from brain.core import _requested_file_page
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'service').mkdir()
+            config = root / 'brain.toml'
+            config.write_text("[project]\nname='line-offsets'\n[[repositories]]\nname='service'\npath='service'\n", encoding='utf-8')
+            pinned = replace(load_settings(config), atlas_generation_mode='pinned')
+            item = {'repo': 'service', 'path': 'Source.java'}
+            for raw in ('', '\n', '\r\n', 'one', 'one\n', 'one\r\n', 'one\n\nthree',
+                        '证据\r\n\r\n末尾\n', 'one\u2028two\x85three\vfour\ffive\x1csix'):
+                with self.subTest(raw=raw):
+                    cache = {}
+                    lines = raw.splitlines()
+                    first, report = _requested_file_page(pinned, item, max_bytes=8_000, source_cache=cache, _indexed_source=raw)
+                    self.assertEqual(len(lines), report['total_lines'])
+                    if not lines:
+                        self.assertIsNone(first)
+                        self.assertEqual('empty', report['status'])
+                        continue
+                    self.assertEqual('\n'.join(lines), first.content)
+                    self.assertEqual('complete_file', report['status'])
+                    first.content = 'mutated page, never mutate the full cache'
+                    first.found_by.append('page-only')
+                    last, report = _requested_file_page(
+                        pinned, {**item, 'lines': f'{len(lines)}-{len(lines)}'}, max_bytes=8_000,
+                        source_cache=cache, _indexed_source='must not replace cached pinned source')
+                    self.assertEqual(lines[-1], last.content)
+                    self.assertEqual(0, report['source_bytes_read'])
+                    self.assertEqual('\n'.join(lines), cache[('service', 'Source.java')][0].content)
+                    self.assertNotIn('page-only', last.found_by)
+
     def test_verification_parses_each_source_once_per_context(self) -> None:
         from brain import investigation
         from brain.core import create_context, start_session
@@ -40,12 +307,12 @@ class OptimizationTests(unittest.TestCase):
                 request = {"version": 5, "mode": "flow_trace", "objective": "Inspect Routes",
                            "anchors": [{"kind": "endpoint", "value": f"/routes/{number}"} for number in range(16)],
                            "files": [{"repo": "service", "path": "Routes.java"}]}
-                with mock.patch.object(investigation, "_java_file_intelligence", wraps=investigation._java_file_intelligence) as parsed, \
+                with mock.patch.object(investigation, "_verification_endpoints", wraps=investigation._verification_endpoints) as parsed, \
                         mock.patch.object(investigation, "_mask_java_comments_uncached", wraps=investigation._mask_java_comments_uncached) as masked:
                     content, _, _ = create_context(settings, "VERIFY-101", json.dumps({"INVESTIGATION_REQUEST": request}))
                 for number in range(16):
                     self.assertIn(f'@GetMapping("/routes/{number}")', content)
-                self.assertEqual(1, sum(call.args[2] == "verification" for call in parsed.call_args_list))
+                self.assertEqual(1, parsed.call_count)
                 self.assertEqual(2, sum(call.args[0] == source for call in masked.call_args_list))
                 self.assertIsNone(investigation._SOURCE_VERIFICATION_CACHE.get())
 
@@ -94,8 +361,10 @@ class OptimizationTests(unittest.TestCase):
             for number in range(30):
                 investigation._mask_java_comments(f"/*{number}*/ class Test {{}}")
                 cached[1]("repo", f"Test{number}.java", "class Test {}")
+                cached[2](f'class Test{number} {{}}')
             self.assertEqual(16, cached[0].cache_info().currsize)
             self.assertEqual(8, cached[1].cache_info().currsize)
+            self.assertEqual(8, cached[2].cache_info().currsize)
             with mock.patch.object(investigation, "MAX_REFRESH_FILE_BYTES", 16):
                 for source in ("/*" + "a" * 17 + "*/", "/*" + "界" * 5 + "*/"):
                     before = cached[0].cache_info()
@@ -104,11 +373,11 @@ class OptimizationTests(unittest.TestCase):
                     self.assertEqual(before, cached[0].cache_info())
             raise RuntimeError("expected")
         self.assertIsNone(investigation._SOURCE_VERIFICATION_CACHE.get())
-        self.assertEqual([0, 0], [item.cache_info().currsize for item in cached])
+        self.assertTrue(all(item.cache_info().currsize == 0 for item in cached))
         with investigation.source_verification_scope():
             fresh = investigation._SOURCE_VERIFICATION_CACHE.get()
             self.assertIsNot(cached, fresh)
-            self.assertEqual([0, 0], [item.cache_info().currsize for item in fresh])
+            self.assertTrue(all(item.cache_info().currsize == 0 for item in fresh))
 
     def test_verification_scopes_are_thread_local(self) -> None:
         from concurrent.futures import ThreadPoolExecutor
@@ -571,6 +840,21 @@ class OptimizationTests(unittest.TestCase):
         self.assertEqual(["policy.py"], [hit.path for hit in selected])
         self.assertEqual(["noise.py"], [hit.path for hit in omitted])
 
+    def test_explicit_symbols_do_not_consume_discovery_diversity_slots(self) -> None:
+        from brain.query import select_candidates
+
+        settings = mock.Mock(candidate_limit=20, hydrate_limit=10, max_regions_per_file=1, max_regions_per_repo=2)
+        explicit = [SearchHit('repo', f'A{number}.java', 1, '', 'definition', 100,
+                              ['generation-validated qualified symbol']) for number in range(5)]
+        related = [SearchHit('repo', f'Test{number}.java', 1, '', 'test', 1000) for number in range(4)]
+        selected, omitted = select_candidates(settings, [*related, *explicit], already_fused=True)
+        self.assertEqual([item.path for item in explicit] + ['Test0.java', 'Test1.java'], [item.path for item in selected])
+        self.assertEqual(['Test2.java', 'Test3.java'], [item.path for item in omitted])
+        settings.hydrate_limit = 2
+        selected, omitted = select_candidates(settings, [*related, *explicit], already_fused=True)
+        self.assertEqual(['A0.java', 'A1.java'], [item.path for item in selected])
+        self.assertEqual(7, len(omitted), 'explicit source still obeys the global hydration budget')
+
     def test_reranker_skips_protected_only_work_and_flat_scores_add_no_relevance(self) -> None:
         from brain.models import rerank_candidates
         from brain.retrieval.models import RetrievalTrace
@@ -670,6 +954,94 @@ class OptimizationTests(unittest.TestCase):
         source = "String url = " + literal + "; // comment\n/* block */\nchar slash = '/';\n"
         self.assertEqual("String url = " + literal + "; " + " " * 10 + "\n" + " " * 11 + "\nchar slash = '/';\n", _mask_java_comments(source))
         self.assertEqual("String url = " + " " * len(literal) + "; " + " " * 10 + "\n" + " " * 11 + "\nchar slash = " + " " * 3 + ";\n", _mask_java_comments(source, strings=True))
+
+    def test_atlas_java_mask_reuse_preserves_complete_payload_and_byte_boundaries(self) -> None:
+        import hashlib
+        from brain import atlas, investigation
+
+        source = '''package demo;
+// @GetMapping("/comment-ghost")
+@RestController
+@RequestMapping("/api")
+class Routes {
+    String docs = """
+    @GetMapping("/literal-ghost")
+    /* not a real comment */
+    """;
+    @GetMapping("/real")
+    String read() { return "https://example/界"; }
+    @KafkaListener(topics="events.real")
+    void listen() { this.read(); }
+}
+'''
+        unicode_boundary = source + "/*" + "界" * investigation.MAX_REFRESH_FILE_BYTES
+        cases = (source, source.replace("\n", "\r\n"),
+                 source + "// bounded filler\n" * 70_000, unicode_boundary)
+        for number, content in enumerate(cases):
+            with self.subTest(case=number):
+                blob = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                # Force the original uncached transforms as an identity oracle:
+                # every entity, region, edge and source coordinate must match.
+                with mock.patch.object(investigation, "_mask_java_comments",
+                                       side_effect=investigation._mask_java_comments_uncached):
+                    expected = atlas._file_intelligence("repo", "Routes.java", blob, content)
+                with mock.patch.object(investigation, "_mask_java_comments_uncached",
+                                       wraps=investigation._mask_java_comments_uncached) as masked:
+                    actual = atlas._file_intelligence("repo", "Routes.java", blob, content)
+                self.assertEqual(expected, actual)
+                self.assertEqual(["/api/real"], [row["simple_name"] for row in actual[1] if row["kind"] == "endpoint"])
+                bounded = content.encode("utf-8")[:investigation.MAX_REFRESH_FILE_BYTES].decode("utf-8", errors="replace")
+                # Replacement of a split UTF-8 character can exceed the cache's
+                # byte cap; that input must still use the uncached safe path.
+                expected_scans = 2 if investigation._cacheable_verification_source(bounded) else 4
+                self.assertEqual(expected_scans, masked.call_count)
+                self.assertIsNone(investigation._SOURCE_VERIFICATION_CACHE.get())
+
+    def test_atlas_java_mask_scope_releases_views_on_failure_and_preserves_outer_scope(self) -> None:
+        from brain import atlas, investigation
+
+        source = '/* comment */ class Routes { String value = "literal"; }\n'
+        captured = []
+
+        def fail(*args, **kwargs):
+            captured.append(investigation._SOURCE_VERIFICATION_CACHE.get())
+            raise atlas.AtlasCapacityError("synthetic parser failure")
+
+        with mock.patch.object(atlas, "_java_entities", side_effect=fail), self.assertRaisesRegex(
+            atlas.AtlasCapacityError, "synthetic parser failure",
+        ):
+            atlas._file_intelligence("repo", "Routes.java", "blob", source)
+        self.assertIsNotNone(captured[0])
+        self.assertTrue(all(view.cache_info().currsize == 0 for view in captured[0]))
+        self.assertIsNone(investigation._SOURCE_VERIFICATION_CACHE.get())
+        with investigation.source_verification_scope():
+            outer = investigation._SOURCE_VERIFICATION_CACHE.get()
+            atlas._file_intelligence("repo", "Routes.java", "blob", source)
+            self.assertIs(outer, investigation._SOURCE_VERIFICATION_CACHE.get())
+            self.assertEqual(2, outer[0].cache_info().misses)
+        self.assertTrue(all(view.cache_info().currsize == 0 for view in outer))
+
+    def test_atlas_java_mask_reuse_reduces_physical_scans_at_refresh_input_limit(self) -> None:
+        from statistics import median
+        from brain import atlas, investigation
+
+        source = '@RestController class Routes { @GetMapping("/real") String read() { return "ok"; } }\n'
+        source += "// bounded filler\n" * 70_000
+        elapsed = {"uncached": [], "scoped": []}
+        payloads = []
+        for _ in range(3):
+            for mode in elapsed:
+                start = time.perf_counter()
+                if mode == "uncached":
+                    with mock.patch.object(investigation, "_mask_java_comments",
+                                           side_effect=investigation._mask_java_comments_uncached):
+                        payload = atlas._file_intelligence("repo", "Routes.java", "blob", source)
+                else:
+                    payload = atlas._file_intelligence("repo", "Routes.java", "blob", source)
+                elapsed[mode].append((time.perf_counter() - start) * 1000)
+                payloads.append(payload)
+        self.assertTrue(all(payload == payloads[0] for payload in payloads))
+        print(json.dumps({"java_parse_mask_reuse_ms": {mode: round(median(samples), 3) for mode, samples in elapsed.items()}}, sort_keys=True))
 
     def test_documentation_only_route_widens_to_exact_implementation(self) -> None:
         from brain.core import parse_context_request, retrieve_context
@@ -842,7 +1214,8 @@ class OptimizationTests(unittest.TestCase):
         definition = SearchHit("repo", "policy.py", 1, "def evaluate_policy(record):")
         with mock.patch("brain.core.search", return_value=[reference, definition]), \
                 mock.patch("brain.graph.graph_symbol_hits", return_value=[]):
-            self.assertEqual([definition], symbol_hits(mock.Mock(), "evaluate_policy"))
+            hits = symbol_hits(mock.Mock(atlas_generation=None, atlas_generation_mode="legacy_source_pin"), "evaluate_policy")
+            self.assertEqual([("policy.py", 1, "definition")], [(hit.path, hit.line, hit.kind) for hit in hits])
 
     def test_response_format_score_never_claims_causal_correctness(self) -> None:
         from brain.evaluation import evaluate_m365_response
@@ -910,6 +1283,125 @@ class OptimizationTests(unittest.TestCase):
             self.assertIn("- Omitted evidence IDs due to byte limit: `E0001`", bounded)
             self.assertIn("Request the missing method.", bounded)
 
+    def test_protocol_metadata_updates_never_rewrite_fenced_source_literals(self) -> None:
+        from brain.core import _bounded_protocol_context, _source_markdown_block
+
+        source = (
+            '- Embedded evidence IDs: `SOURCE_LITERAL`\r\n'
+            '- Omitted evidence IDs due to byte limit: `SOURCE_LITERAL`\r\n'
+            '- Replacement status: `complete_replacement`\r\n'
+            '- `E0002` `literal source reference` — `included`\r\n'
+            '### E9999 — source heading, not evidence\r\n'
+        )
+        # Exercise both generated fence choices and the escaped HTML fallback.
+        contents = [prefix + value for prefix in ('', '~~~\n', '`' * 70 + '\n' + '~' * 70 + '\n')
+                    for value in (source, source.replace('\r\n', '\n'))]
+        for content in contents:
+            block = '\n'.join(_source_markdown_block(content, 'text'))
+            for truncate in (False, True):
+                with self.subTest(prefix=content[:8], crlf='\r' in content, truncate=truncate):
+                    text = (
+                        '# Context\n\n- Embedded evidence IDs: `E0001, E0002`\n'
+                        '- Omitted evidence IDs due to byte limit: `none`\n'
+                        '- Replacement status: `complete_replacement`\n'
+                        '- `E0002` `repo:large.txt:1-1` — `included`\n\n'
+                        '## Source\n\n### E0001 — source\n\n' + block + '\n\n'
+                        '### E0002 — other source\n\n' + '\n'.join(_source_markdown_block(
+                            'x' * (30_000 if truncate else 20), 'text')) + '\n'
+                    )
+                    emitted: set[str] = set()
+                    bounded = _bounded_protocol_context(text, 10_000, ['E0001', 'E0002'], emitted_ids=emitted)
+                    self.assertIn(block, bounded)
+                    self.assertLessEqual(len(bounded.encode('utf-8')), 10_000)
+                    self.assertEqual({'E0001'} if truncate else {'E0001', 'E0002'}, emitted)
+                    outer = bounded.split('## Source', 1)[0]
+                    self.assertIn('- Embedded evidence IDs: `E0001' + ('`' if truncate else ', E0002`'), outer)
+                    self.assertIn('- Omitted evidence IDs due to byte limit: `' + ('E0002' if truncate else 'none') + '`', outer)
+                    self.assertIn('- Replacement status: `' + ('incomplete_non_replacing' if truncate else 'complete_replacement') + '`', outer)
+                    self.assertIn('- `E0002` `repo:large.txt:1-1` — `' + ('omitted_by_byte_limit' if truncate else 'included') + '`', outer)
+
+    def test_full_and_delta_delivery_preserve_protocol_looking_source(self) -> None:
+        from brain.core import Evidence, _evidence_id, _source_markdown_block, pack_delta_context
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'repo').mkdir()
+            config = root / 'brain.toml'
+            config.write_text("[project]\nname='source-delivery'\n[[repositories]]\nname='repo'\npath='repo'\n", encoding='utf-8')
+            settings = load_settings(config)
+            settings.hard_context_chars = 10_000
+            source = ('- Embedded evidence IDs: `literal`\n'
+                      '- Omitted evidence IDs due to byte limit: `literal`\n'
+                      '- Replacement status: `complete_replacement`\n'
+                      '- `E0002` `literal reference` — `included`\n')
+            evidence = [Evidence('repo', 'Protocol.md', 1, 4, source, 'code', 100),
+                        Evidence('repo', 'Large.md', 1, 1, 'x' * 30_000, 'code', 90)]
+            public = {_evidence_id(item): f'E{index:04d}' for index, item in enumerate(evidence, 1)}
+            progress = {
+                'context_id': 'CTX-002', 'base_context_id': 'CTX-001', 'operations': 1,
+                'new_evidence': 2, 'known_evidence': 0, 'no_progress_rounds': 0,
+                'evidence_public_ids': public, 'checkpoint': True, 'checkpoint_replacement': 'complete_replacement',
+            }
+            for delta in (False, True):
+                with self.subTest(delta=delta):
+                    emitted: set[str] = set()
+                    bundle = ContextBundle('Inspect exact protocol source', evidence=evidence)
+                    rendered = pack_delta_context(settings, 'SOURCE', 2, bundle, progress, set(public), emitted_ids=emitted) if delta else (
+                        pack_context(settings, 'SOURCE', 2, bundle, progress, emitted_ids=emitted))
+                    self.assertIn('\n'.join(_source_markdown_block(source, 'text')), rendered)
+                    self.assertEqual({'E0001'}, emitted)
+                    self.assertIn('- Embedded evidence IDs: `E0001`', rendered)
+                    self.assertIn('- Omitted evidence IDs due to byte limit: `E0002`', rendered)
+            for marker in ('```text', '~~~text', '<pre data-language="text"><code>', '`' * 70 + 'text'):
+                for field in ('objective', 'history', 'experience'):
+                    with self.subTest(field=field, marker=marker):
+                        prose = 'Inspect exact protocol source\n' + marker
+                        objective = prose if field == 'objective' else 'Inspect source'
+                        metadata = {**progress, 'history': [
+                            {'number': 1, 'objective': prose, 'new_evidence': 1}] if field == 'history' else []}
+                        emitted = set()
+                        bundle = ContextBundle(objective, evidence=evidence, experience=prose if field == 'experience' else '')
+                        rendered = pack_context(settings, 'SOURCE', 2, bundle,
+                                                metadata, emitted_ids=emitted)
+                        self.assertIn('\n'.join(_source_markdown_block(source, 'text')), rendered)
+                        self.assertEqual({'E0001'}, emitted)
+                        self.assertIn('- Omitted evidence IDs due to byte limit: `E0002`', rendered)
+
+    def test_ticket_delta_and_resume_keep_exact_protocol_literals_after_refresh(self) -> None:
+        from brain import core
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'repo').mkdir()
+            source = ('- Embedded evidence IDs: `PINNED_LITERAL`\n'
+                      '- Omitted evidence IDs due to byte limit: `PINNED_LITERAL`\n'
+                      '- Replacement status: `complete_replacement`')
+            path = root / 'repo/Protocol.md'
+            path.write_text(source, encoding='utf-8')
+            config = root / 'brain.toml'
+            config.write_text("[project]\nname='literal-pin'\n[graph]\nenabled=false\n[experience]\nenabled=false\n"
+                              "[[repositories]]\nname='repo'\npath='repo'\n", encoding='utf-8')
+            settings = load_settings(config)
+            snapshot_indexes(settings)
+            core.start_session(settings, 'LITERAL', 'Inspect the protocol source')
+            request = {'version': 5, 'mode': 'root_cause', 'objective': 'Read exact protocol text',
+                       'files': [{'repo': 'repo', 'path': 'Protocol.md'}]}
+            first, _, _ = core.create_context(settings, 'LITERAL', json.dumps({'INVESTIGATION_REQUEST': request}))
+            state = core.session_state(settings, 'LITERAL')
+            path.write_text(source.replace('PINNED_LITERAL', 'NEW_GENERATION'), encoding='utf-8')
+            snapshot_indexes(settings)
+            request.update(objective='Re-read exact protocol text', base_context_id=state['last_context_id'])
+            second, _, _ = core.create_context(settings, 'LITERAL', json.dumps({'INVESTIGATION_REQUEST': request}))
+            self.assertIn('# PROJECT BRAIN CONTEXT DELTA', second)
+            before_resume = core.session_state(settings, 'LITERAL')
+            resumed, _ = core.resume_session(settings, 'LITERAL', notes=source)
+            after_resume = core.session_state(settings, 'LITERAL')
+            for content in (first, second, resumed):
+                self.assertIn('\n'.join(core._source_markdown_block(source, 'text')), content)
+                self.assertNotIn('NEW_GENERATION', content)
+            for key in ('atlas_generation_id', 'last_context_id', 'requests', 'evidence_records'):
+                self.assertEqual(before_resume[key], after_resume[key])
+
     def test_execution_flow_batches_validation_without_losing_later_seeds(self) -> None:
         import sqlite3
         from brain.core import Evidence
@@ -964,10 +1456,11 @@ class OptimizationTests(unittest.TestCase):
             self.assertEqual([], bounded["steps"])
             connection = sqlite3.connect(settings.state_dir / "catalog.sqlite3")
             try:
-                connection.execute(
+                changed = connection.execute(
                     "UPDATE atlas_edges SET target_id='poisoned-target' WHERE edge_id=?",
-                    (flow["steps"][-1]["identity"],),
+                    (flow["steps"][-1]["source_edge_id"],),
                 )
+                self.assertEqual(1, changed.rowcount)
                 connection.commit()
             finally:
                 connection.close()
@@ -1150,6 +1643,7 @@ const ctx = { URLSearchParams, location: {search:""},
 };
 vm.createContext(ctx);
 vm.runInContext(input.script, ctx, {timeout:5000});
+const originalWaitForJob = ctx.waitForJob;
 ctx.renderRecovery({action:"retry_refresh", title:"Atlas timeout", message:"Known file exceeded parse budget"});
 if (elements["retry-atlas-refresh"].hidden) throw Error("Atlas timeout has no retry action");
 const normalRefresh = ctx.refreshBrain;
@@ -1199,21 +1693,14 @@ if (!elements["run-request"].disabled || elements["review-ticket"].value !== "TI
   elements["request-ticket"].value = "TICKET-B";
   elements["request-text"].value = "new focused request";
   ctx.renderPreview(paused);
-  if (elements["run-request"].textContent !== "Continue gathering evidence") throw Error("continuation action hidden");
-  if (!elements["request-message"].innerHTML.includes("no refresh or reset")) throw Error("wrong continuation guidance");
+  if (elements["run-request"].textContent !== "Run retrieval") throw Error("legacy round state imposed an approval gate");
   let calls = [];
   ctx.api = async (path, options) => {calls.push({path, body:JSON.parse(options.body)}); return {id:"job"};};
   ctx.waitForJob = async () => ({kind:"context_request"});
   ctx.loadStatus = async () => {};
-  ctx.window.confirm = () => false;
+  ctx.window.confirm = () => {throw Error("normal request must not require extra round approval");};
   await elements["run-request"].listeners.click.call(elements["run-request"]);
-  if (calls.length) throw Error("cancelled continuation ran retrieval");
-  ctx.window.confirm = message => {
-    if (!message.includes("wave 5") || !message.includes("generation 1") || !message.includes("32 backend")) throw Error("approval is not scoped");
-    return true;
-  };
-  await elements["run-request"].listeners.click.call(elements["run-request"]);
-  if (calls.length !== 1 || calls[0].body.continue_investigation !== true || calls[0].body.continuation_token !== paused.continuation.token) throw Error("approval not sent");
+  if (calls.length !== 1 || "continue_investigation" in calls[0].body || "continuation_token" in calls[0].body) throw Error("request requires legacy approval fields");
   if (ctx.state.preview || !elements["run-request"].disabled) throw Error("approval remains armed after use");
   await elements["run-request"].listeners.click.call(elements["run-request"]);
   if (calls.length !== 1) throw Error("approval reused without preview");
@@ -1222,6 +1709,42 @@ if (!elements["run-request"].disabled || elements["review-ticket"].value !== "TI
   if (ctx.state.preview) throw Error("changed request retains approval");
   ctx.report({message:"Investigation paused", recovery:{action:"continue_investigation", message:"Continue with AI"}});
   if (elements["error-recovery"].dataset.go !== "request" || elements["page-title"].textContent !== "Continue with AI") throw Error("wave pause routed to health/refresh");
+  ctx.report({message:"Handoff unavailable", recovery:{action:"open_saved_context", message:"Evidence is saved",
+    ticket:"TICKET-B", artifact:"context-005.md"}});
+  if (elements["error-recovery"].textContent !== "Open saved evidence") throw Error("saved evidence recovery is missing");
+  let reads = 0;
+  ctx.api = async path => {
+    if (path !== "/api/artifact?ticket=TICKET-B&name=context-005.md") throw Error("recovery reran work instead of reading the committed artifact");
+    reads += 1; return {name:"context-005.md",content:"Exact saved evidence"};
+  };
+  await elements["error-recovery"].listeners.click();
+  if (reads !== 1 || ctx.state.deliveries["view-request"].content !== "Exact saved evidence") throw Error("saved evidence not opened");
+  if (ctx.state.contextRecovery) throw Error("completed saved-evidence recovery remains armed");
+  const checkpointRecovery = {action:"retry_checkpoint", title:"Early checkpoint preserved",
+    message:"Retry the saved request", action_label:"Retry saved request", ticket:"TICKET-B"};
+  ctx.api = async () => ({delivery:{target:"m365"}, artifacts:[], checkpoint_recovery:checkpointRecovery});
+  elements["session-select"].value = "TICKET-B";
+  await ctx.openSession();
+  if (elements["error-recovery"].textContent !== "Retry saved request" ||
+      !elements["request-message"].innerHTML.includes("Early checkpoint preserved")) throw Error("reopened checkpoint has no request-view recovery");
+  calls = [];
+  ctx.api = async (path, options) => {calls.push({path, body:JSON.parse(options.body)}); return {id:"retry-job"};};
+  ctx.waitForJob = async () => ({kind:"context_request", delivery:{content:"RECOVERED_G1"},
+    progressive_delivery:{continuation_artifact:"checkpoint-delta-001.md"}});
+  elements["request-text"].value = "unrelated draft must not replace the saved request";
+  await elements["error-recovery"].listeners.click.call(elements["error-recovery"]);
+  if (calls.length !== 1 || calls[0].path !== "/api/retrieval" ||
+      JSON.stringify(calls[0].body) !== JSON.stringify({ticket:"TICKET-B",retry_checkpoint:true})) throw Error("retry does not use server-owned request");
+  if (ctx.state.deliveries["view-request"].content !== "RECOVERED_G1" || ctx.state.contextRecovery ||
+      !elements["global-error"].hidden || elements["checkpoint-continuation"].hidden) throw Error("retry bypassed shared result delivery");
+  const manualRecovery = {...checkpointRecovery, action:"restore_checkpoint_request", action_label:"Paste original request"};
+  ctx.report({message:"Saved request unavailable", recovery:manualRecovery});
+  await elements["error-recovery"].listeners.click.call(elements["error-recovery"]);
+  if (calls.length !== 1 || elements["page-title"].textContent !== "Continue with AI") throw Error("manual recovery guessed or executed a request");
+  ctx.report({message:"Retry G1", recovery:checkpointRecovery});
+  ctx.selectTicket("TICKET-C");
+  await elements["error-recovery"].listeners.click.call(elements["error-recovery"]);
+  if (calls.length !== 1 || ctx.state.contextRecovery) throw Error("checkpoint retry crossed tickets");
   ctx.api = async () => ({delivery:{target:"m365"}, artifacts:[], session_path:".runs/TICKET-B", handoff_path:"generated/handoffs/TICKET-B"});
   elements["session-select"].value = "TICKET-B";
   await ctx.openSession();
@@ -1253,6 +1776,76 @@ if (!elements["run-request"].disabled || elements["review-ticket"].value !== "TI
   if (ctx.state.deliveries["view-request"].content !== "CONTINUATION_ONLY") throw Error("explicit checkpoint continuation unavailable");
   ctx.selectTicket("TICKET-C");
   if (ctx.state.checkpointContinuation || !elements["checkpoint-continuation"].hidden) throw Error("checkpoint continuation crossed tickets");
+  ctx.renderPreview(paused);
+  elements["request-text"].value = "Ticket C request";
+  let statusStarted, finishStatus;
+  const enteredStatus = new Promise(resolve => {statusStarted = resolve;});
+  ctx.loadStatus = () => {statusStarted(); return new Promise(resolve => {finishStatus = resolve;});};
+  ctx.waitForJob = async () => ({kind:"context_request", delivery:{content:"Ticket C completed"}});
+  const finishing = elements["run-request"].listeners.click.call(elements["run-request"]);
+  await enteredStatus;
+  ctx.selectTicket("TICKET-D");
+  const newPreview = {valid:true, kind:"context_request"};
+  const newRecovery = {...checkpointRecovery, ticket:"TICKET-D"};
+  elements["request-text"].value = "Ticket D draft must survive";
+  ctx.state.preview = newPreview;
+  ctx.state.contextRecovery = newRecovery;
+  elements["global-error"].hidden = false;
+  elements["request-message"].textContent = "Ticket D recovery";
+  finishStatus();
+  await finishing;
+  if (elements["request-text"].value !== "Ticket D draft must survive" || ctx.state.preview !== newPreview ||
+      ctx.state.contextRecovery !== newRecovery || elements["global-error"].hidden ||
+      elements["request-message"].textContent !== "Ticket D recovery") throw Error("older completion cleared the newly selected ticket");
+  ctx.loadStatus = async () => {};
+  ctx.waitForJob = originalWaitForJob;
+  const delays = [];
+  ctx.pause = async milliseconds => {
+    delays.push(milliseconds);
+    if (milliseconds > 350 && !elements["activity-summary"].textContent.includes("Reconnecting")) throw Error("reconnection status disappeared before the retry");
+  };
+  let polls = 0;
+  ctx.api = async path => {
+    if (path !== "/api/job?id=running-job") throw Error("polling replayed the operation");
+    if (++polls === 1) throw Object.assign(Error("temporary disconnect"), {retryable:true});
+    return {id:"running-job", name:"retrieval", status:"succeeded", result:{content:"recovered"}};
+  };
+  const recovered = await ctx.waitForJob({id:"running-job", name:"retrieval", ticket:"TICKET-D", status:"running"});
+  if (recovered.content !== "recovered" || polls !== 2 || delays[1] <= delays[0] || ctx.state.watchedJobs.size) throw Error("transient polling failure lost the running job");
+  ctx.api = async () => {throw Object.assign(Error("Unauthorized"), {retryable:false});};
+  await ctx.waitForJob({id:"denied",name:"retrieval",status:"running"}).then(
+    () => {throw Error("authorization failure ignored");}, error => {if (error.message !== "Unauthorized") throw error;});
+  if (ctx.state.watchedJobs.size) throw Error("terminal failure leaked watcher");
+  let resumed, resumeCount = 0;
+  const resumedResult = new Promise(resolve => {resumed = resolve;});
+  ctx.finishRetrieval = async (result, ticket) => {resumeCount++; resumed({result,ticket});};
+  ctx.api = async path => {
+    if (path !== "/api/job?id=reload-job") throw Error("reload submitted another request");
+    return {id:"reload-job",name:"retrieval",status:"succeeded",result:{delivery:{content:"restored evidence"}}};
+  };
+  const active = {jobs:[{id:"reload-job",name:"retrieval",ticket:"TICKET-D",status:"running"}]};
+  ctx.resumeActiveJobs(active);
+  ctx.resumeActiveJobs(active);
+  if (!elements["run-request"].disabled) throw Error("reload permits duplicate submission");
+  const restored = await resumedResult;
+  if (restored.ticket !== "TICKET-D" || restored.result.delivery.content !== "restored evidence" || resumeCount !== 1) throw Error("reload did not resume exactly one watcher");
+  for (const generation of [7, null]) {
+    const question = "Find why HelloService retries fail: preserve this plain text.";
+    elements["request-text"].value = question;
+    calls = [];
+    ctx.api = async (path, options) => {
+      calls.push(path);
+      if (path.startsWith("/api/session?")) return {atlas_generation:generation, context_id:"CTX-007"};
+      if (path !== "/api/preview") throw Error("plain text conversion executed retrieval");
+      const payload = JSON.parse(JSON.parse(options.body).text);
+      const request = payload.INVESTIGATION_REQUEST || payload.CONTEXT_REQUEST;
+      if (request.objective !== question || request.version !== (generation ? 5 : 3) || "wave" in request ||
+          (generation && request.base_context_id !== "CTX-007")) throw Error("plain text conversion changed intent or lineage");
+      return {valid:true, kind:"context_request", objective:question, operation_count:1, actions:[]};
+    };
+    await elements["text-request"].listeners.click.call(elements["text-request"]);
+    if (calls.length !== 2 || !JSON.parse(elements["request-text"].value) || !ctx.state.preview) throw Error("plain text request was not previewed");
+  }
   for (const fn of timers.values()) fn();
   timers.clear();
 })().then(() => {

@@ -1771,6 +1771,97 @@ String docs = """
         )
         self.assertLess(len(checkpoint["internal_evidence_ids"]), len(evidence))
 
+    def test_first_useful_checkpoint_parses_shared_source_once_and_keeps_public_pins(self) -> None:
+        from brain import core, investigation
+
+        relative = "src/main/java/demo/CheckpointController.java"
+        rows = ["package demo;", "@RestController", "class CheckpointController {"]
+        ranges = []
+        for number in range(3):
+            rows.extend(["// separate pinned source regions"] * (60 if number else 0))
+            start = len(rows) + 1
+            rows.extend([f'  @GetMapping("/checkpoint/{number}")',
+                         f'  String route{number}() {{ return "G1_VALUE_{number}"; }}'])
+            ranges.append((start, len(rows)))
+        rows.append("}")
+        original = "\n".join(rows) + "\n"
+        path = self.root / "customer-api" / relative
+        path.write_text(original, encoding="utf-8")
+        first = self.publish("sha-checkpoint-source-g1", "CHECKPOINT_G1")
+        start_session(self.settings, "CHECKPOINT-OLD", "Inspect the original entry points")
+        updated = original.replace("G1_VALUE", "G2_VALUE")
+        path.write_text(updated, encoding="utf-8")
+        second = self.publish("sha-checkpoint-source-g2", "CHECKPOINT_G2")
+        start_session(self.settings, "CHECKPOINT-NEW", "Inspect the updated entry points")
+        request = {"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "flow_trace", "objective": "Read the established entry point regions",
+            "files": [{"repo": "customer-api", "path": relative, "lines": f"{start}-{end}"}
+                      for start, end in ranges],
+        }}
+        for ticket, source, generation in (("CHECKPOINT-OLD", original, first), ("CHECKPOINT-NEW", updated, second)):
+            with self.subTest(ticket=ticket), mock.patch.object(
+                investigation, "_java_file_intelligence", wraps=investigation._java_file_intelligence,
+            ) as extracted:
+                content, _, _ = create_context(self.settings, ticket, json.dumps(request))
+                state = session_state(self.settings, ticket)
+                checkpoint = state["progressive_checkpoint"]
+                self.assertEqual(generation.identity, state["atlas_generation_id"])
+                self.assertEqual(generation.generation, checkpoint["generation"])
+                self.assertEqual(ranges, [(proof["line_start"], proof["line_end"]) for proof in checkpoint["evidence_proofs"]])
+                expected = []
+                for proof, (start, end) in zip(checkpoint["evidence_proofs"], ranges):
+                    fragment = "\n".join(source.splitlines()[start - 1:end])
+                    self.assertIn(fragment, content)
+                    evidence = Evidence("customer-api", relative, start, end, fragment, "code", 100)
+                    self.assertEqual(core._evidence_id(evidence), proof["internal_evidence_id"])
+                    self.assertEqual(hashlib.sha256(fragment.encode("utf-8")).hexdigest(), proof["content_sha256"])
+                    expected.append((proof["public_id"], evidence))
+                self.assertEqual(3, len(set(checkpoint["evidence_ids"])))
+                rendered = (self.settings.runs_dir / ticket / checkpoint["artifact"]).read_text(encoding="utf-8")
+                self.assertEqual(core._render_first_useful_checkpoint(
+                    self.settings, ticket, 1, checkpoint["checkpoint_id"], checkpoint["context_id"],
+                    checkpoint["base_context_id"], generation, expected,
+                ), rendered)
+                self.assertEqual(checkpoint["content_hash"], "sha256:" + hashlib.sha256(rendered.encode("utf-8")).hexdigest())
+                self.assertNotIn("G2_VALUE" if ticket == "CHECKPOINT-OLD" else "G1_VALUE", rendered)
+                self.assertEqual([source], [call.args[4] for call in extracted.call_args_list])
+
+    def test_first_useful_checkpoint_source_dedup_keeps_repo_path_and_full_content_scope(self) -> None:
+        from brain import investigation
+
+        source = ('class ScopedController {\n  @GetMapping("/scope/first") void first() {}\n'
+                  + "\n" * 100 + '  @GetMapping("/scope/last") void last() {}\n}\n')
+        paths = [("customer-api", "src/main/java/demo/ScopedController.java"),
+                 ("customer-api", "src/main/java/demo/OtherController.java"),
+                 ("customer-client", "src/main/java/demo/ScopedController.java")]
+        for repo, relative in paths:
+            (self.root / repo / relative).write_text(source, encoding="utf-8")
+        generation = self.publish("sha-checkpoint-source-scope", "CHECKPOINT_SCOPE")
+        repo, relative = paths[0]
+        evidence = [Evidence(repo, relative, 1, 1, source.splitlines()[0], "code", 100)]
+        evidence.extend(Evidence(repo, relative, line, line, source.splitlines()[line - 1], "code", 100, [], source)
+                        for line in (2, 103))
+        evidence.extend(Evidence(repo, relative, 2, 2, source.splitlines()[1], "code", 100, [], source)
+                        for repo, relative in paths[1:])
+        ticket = "CHECKPOINT-SOURCE-SCOPE"
+        start_session(self.settings, ticket, "Read the distinct source scopes")
+        state = session_state(self.settings, ticket)
+        with mock.patch.object(investigation, "_java_file_intelligence", wraps=investigation._java_file_intelligence) as extracted:
+            checkpoint = _publish_first_useful_checkpoint(
+                self.settings, ticket, 1, "CTX-001", None,
+                ContextBundle("source scope", evidence=evidence, atlas_generation=generation),
+                {"objective": "Read entry point scopes"}, "scope-signature", state,
+                self.settings.runs_dir / ticket, None,
+            )
+        self.assertIsNotNone(checkpoint)
+        self.assertEqual([(2, 2), (103, 103), (2, 2)],
+                         [(proof["line_start"], proof["line_end"]) for proof in checkpoint["evidence_proofs"]])
+        # A partial line-one source cannot suppress the later complete source;
+        # identical bytes in a different repository or path require extraction.
+        self.assertEqual([(paths[0][0], paths[0][1], source.splitlines()[0]),
+                          *((repo, relative, source) for repo, relative in paths)],
+                         [(call.args[0], call.args[1], call.args[4]) for call in extracted.call_args_list])
+
     def test_first_useful_checkpoint_publication_is_atomic_and_revalidates_artifacts(self) -> None:
         from brain import core as core_module
 
@@ -1820,7 +1911,7 @@ String docs = """
             if item.get("context_id") == failed["progressive_checkpoint"]["checkpoint_id"]:
                 item["content_hash"] = fake_hash
         core_module.save_session(self.settings, "CHECKPOINT-CORRUPT", failed)
-        with self.assertRaisesRegex(BrainError, "does not match pinned evidence"):
+        with self.assertRaisesRegex(BrainError, "checkpoint artifact is corrupt or unavailable"):
             create_context(self.settings, "CHECKPOINT-CORRUPT", request)
 
     def test_protocol_v5_multiwave_generation_pin_and_corrupt_semantic_fail_closed(self) -> None:
@@ -1962,17 +2053,12 @@ String docs = """
         self.assertEqual(generation_two.generation, session_state(self.settings, "TICKET-B")["prefetch"]["generation"])
 
         fifth_request = self.request("Find additional G1 source evidence", base="CTX-004", wave=5)
-        before = state_path.read_bytes()
         artifacts = {path: path.read_bytes() for path in state_path.parent.glob("*.md")}
-        with self.assertRaisesRegex(InvestigationContinuationRequired, "Continue gathering evidence"):
-            create_context(self.settings, "TICKET-A", fifth_request)
-        self.assertEqual(before, state_path.read_bytes())
         approval = response_preview(fifth_request, self.settings, "TICKET-A")["continuation"]
-        self.assertTrue(approval["required"])
+        self.assertFalse(approval["required"])
         self.assertEqual(5, approval["next_wave"])
         fifth, _, number = create_context(
             self.settings, "TICKET-A", fifth_request,
-            continue_investigation=True, continuation_token=approval["token"],
         )
         state_five = session_state(self.settings, "TICKET-A")
         self.assertEqual(5, number)
@@ -1988,29 +2074,27 @@ String docs = """
         for path, content in artifacts.items():
             self.assertEqual(content, path.read_bytes(), path.name)
         sixth_request = self.request("Check another G1 blocker", base="CTX-005", wave=6)
-        with self.assertRaises(InvestigationContinuationRequired):
-            create_context(self.settings, "TICKET-A", sixth_request)
         with self.assertRaisesRegex(BrainError, "changed after approval"):
             create_context(self.settings, "TICKET-A", sixth_request,
                            continue_investigation=True, continuation_token=approval["token"])
-        create_context(self.settings, "TICKET-A", sixth_request, continue_investigation=True)
+        create_context(self.settings, "TICKET-A", sixth_request)
         state_six = session_state(self.settings, "TICKET-A")
         self.assertEqual(6, state_six["investigation_runtime"]["wave"])
         self.assertEqual(generation_one.identity, state_six["atlas_generation_id"])
-        self.assertTrue(state_six["request_history"][-1]["retrieval"]["user_approved_continuation"])
+        self.assertFalse(state_six["request_history"][-1]["retrieval"]["user_approved_continuation"])
         self.assertIsNone(state_six["investigation_runtime"]["hard_max_waves"])
-        self.assertEqual(4, HARD_MAX_WAVES)
+        self.assertIsNone(HARD_MAX_WAVES)
 
-    def test_continuation_pause_is_derived_and_ai_cannot_approve_it(self) -> None:
-        for reason in ("coverage_satisfied", "no_progress", "awaiting_user_continuation"):
+    def test_prior_stopping_guidance_does_not_lock_new_requests(self) -> None:
+        for reason in ("coverage_satisfied", "no_progress", "awaiting_user_continuation", "default_wave_limit"):
             with self.subTest(reason=reason):
                 pause = investigation_continuation(self.settings, {
                     "investigation_runtime": {"wave": 1, "stop_reason": reason},
                 })
-                self.assertTrue(pause["required"])
+                self.assertFalse(pause["required"])
                 self.assertEqual(2, pause["next_wave"])
         fourth = {"investigation_runtime": {"wave": 3}}
-        self.assertTrue(investigation_continuation(self.settings, fourth)["required"])
+        self.assertFalse(investigation_continuation(self.settings, fourth)["required"])
         fourth["investigation_runtime"]["evidence_frontier"] = {
             "items": [{"status": "unresolved", "priority": "high"}],
         }
@@ -2035,6 +2119,55 @@ String docs = """
             replace(self.settings, hard_context_chars=self.settings.hard_context_chars + 1), fourth,
         )["token"])
 
+    def test_twelve_distinct_evidence_requests_keep_pin_without_round_approval(self) -> None:
+        from brain.core import save_session
+
+        paths = [f"src/main/java/demo/Fact{number}.java" for number in range(1, 13)]
+        for number, path in enumerate(paths, 1):
+            (self.root / "customer-api" / path).write_text(
+                f'class Fact{number} {{ String value() {{ return "fact-{number}-g1"; }} }}\n', encoding="utf-8",
+            )
+        generation = self.publish("sha-g1", "G1_ONLY")
+        start_session(self.settings, "LONG-EVIDENCE", "Read the exact facts needed for this decision.")
+        calls = []
+
+        def retrieve(settings, *args, **kwargs):
+            self.assertEqual(generation.identity, settings.atlas_generation.identity)
+            self.assertEqual(generation.component("semantic"), settings.atlas_generation.component("semantic"))
+            self.assertEqual(self.settings.max_backend_operations, settings.max_backend_operations)
+            bundle = retrieve_context(settings, *args, **kwargs)
+            calls.append(int(bundle.trace.get("physical_backend_operations") or 0))
+            self.assertLessEqual(calls[-1], settings.max_backend_operations)
+            return bundle
+
+        for number, path in enumerate(paths, 1):
+            state = session_state(self.settings, "LONG-EVIDENCE")
+            if number == 2:
+                for later_path in paths:
+                    source = self.root / "customer-api" / later_path
+                    source.write_text(source.read_text(encoding="utf-8").replace("-g1", "-g2"), encoding="utf-8")
+                self.publish("sha-g2", "G2_ONLY")
+            if number in (2, 5):
+                state["investigation_runtime"]["stop_reason"] = "coverage_satisfied" if number == 2 else "no_progress"
+                state["physical_operations_total"] = self.settings.max_backend_operations * 100
+                save_session(self.settings, "LONG-EVIDENCE", state)
+            request = json.dumps({"INVESTIGATION_REQUEST": {
+                "version": 5, "mode": "implementation_plan", "objective": f"Verify fact {number}",
+                "files": [{"repo": "customer-api", "path": path}],
+                "base_context_id": state.get("last_context_id"),
+            }})
+            with mock.patch("brain.core.retrieve_context", side_effect=retrieve):
+                content, _, _ = create_context(self.settings, "LONG-EVIDENCE", request)
+            self.assertIn(f"fact-{number}-g1", content)
+            self.assertNotIn(f"fact-{number}-g2", content)
+            final = session_state(self.settings, "LONG-EVIDENCE")
+            self.assertEqual(number, final["investigation_runtime"]["wave"])
+            self.assertEqual(generation.identity, final["atlas_generation_id"])
+            self.assertFalse(investigation_continuation(self.settings, final)["required"])
+            self.assertIsNone(final["investigation_runtime"]["automatic_max_waves"])
+        self.assertEqual(12, len(calls))
+        self.assertGreaterEqual(final["physical_operations_total"], self.settings.max_backend_operations * 100)
+
     def _paused_continuation_fixture(self):
         generation = self.publish("sha-g1", "G1_ONLY")
         start_session(self.settings, "CONTINUE", "Keep the existing investigation and evidence.")
@@ -2043,17 +2176,19 @@ String docs = """
         state = session_state(self.settings, "CONTINUE")
         state["investigation_runtime"]["wave"] = 4
         state["investigation_runtime"]["stop_reason"] = "default_wave_limit"
+        state["investigation_runtime"]["max_waves"] = 3
+        state["investigation_runtime"]["automatic_max_waves"] = 4
         # Emulate an old four-wave session with no new cumulative counter.
         state.pop("physical_operations_total", None)
         state["investigation_runtime"]["bounds"]["physical_operations_used"] = self.settings.max_backend_operations * 4
         path.write_text(json.dumps(state), encoding="utf-8")
         return generation, path, self.request("Additional CustomerController evidence", base="CTX-001", wave=5)
 
-    def test_legacy_continuation_reuses_pin_and_keeps_cumulative_budget_after_history_rolloff(self) -> None:
+    def test_legacy_paused_ticket_continues_without_approval_or_cumulative_quota(self) -> None:
         generation, path, request = self._paused_continuation_fixture()
         self.publish("sha-g2", "G2_ONLY")
         prior = session_state(self.settings, "CONTINUE")
-        approval = response_preview(request, self.settings, "CONTINUE")["continuation"]
+        self.assertFalse(response_preview(request, self.settings, "CONTINUE")["continuation"]["required"])
         operations = []
 
         def retrieve(settings, *args, **kwargs):
@@ -2066,8 +2201,7 @@ String docs = """
             return bundle
 
         with mock.patch("brain.core.retrieve_context", side_effect=retrieve):
-            content, _, _ = create_context(self.settings, "CONTINUE", request,
-                continue_investigation=True, continuation_token=approval["token"])
+            content, _, _ = create_context(self.settings, "CONTINUE", request)
         self.assertNotIn("G2_ONLY", content)
         state = session_state(self.settings, "CONTINUE")
         self.assertEqual(generation.identity, state["atlas_generation_id"])
@@ -2075,20 +2209,22 @@ String docs = """
         used = self.settings.max_backend_operations * 4 + operations[0]
         self.assertEqual(used, state["physical_operations_total"])
         self.assertEqual(used, state["investigation_runtime"]["bounds"]["physical_operations_used"])
-        self.assertEqual("single_user_approved_wave", state["investigation_runtime"]["bounds"]["budget_scope"])
-        # Bounded history may roll off; that must never refund prior work.
+        self.assertEqual("per_request", state["investigation_runtime"]["bounds"]["budget_scope"])
+        # Bounded history may roll off; cumulative telemetry must survive.
         state["request_history"] = []
         path.write_text(json.dumps(state), encoding="utf-8")
         self.assertEqual(used, investigation_continuation(self.settings, state)["physical_operations_used"])
         next_request = self.request("More G1 contract evidence", base=state["last_context_id"], wave=6)
+        state["investigation_runtime"]["stop_reason"] = "no_progress"
+        path.write_text(json.dumps(state), encoding="utf-8")
+        self.assertFalse(response_preview(next_request, self.settings, "CONTINUE")["continuation"]["required"])
         with mock.patch("brain.core.retrieve_context", side_effect=retrieve):
-            create_context(self.settings, "CONTINUE", next_request, continue_investigation=True)
+            create_context(self.settings, "CONTINUE", next_request)
         final = session_state(self.settings, "CONTINUE")
         self.assertEqual(used + operations[-1], final["physical_operations_total"])
         self.assertEqual(6, final["investigation_runtime"]["wave"])
-        self.assertEqual(used + self.settings.max_backend_operations,
-                         final["investigation_runtime"]["bounds"]["physical_operation_limit"])
-        self.assertTrue(investigation_continuation(self.settings, final)["required"])
+        self.assertIsNone(final["investigation_runtime"]["bounds"]["physical_operation_limit"])
+        self.assertFalse(investigation_continuation(self.settings, final)["required"])
 
     def test_continuation_cannot_bypass_duplicates_wrong_wave_or_identity_validation(self) -> None:
         _, path, request = self._paused_continuation_fixture()
@@ -2116,8 +2252,8 @@ String docs = """
         approval = investigation_continuation(self.settings, session_state(self.settings, "CONTINUE"))
         with mock.patch("brain.core.retrieve_context", return_value=ContextBundle(
             "Over budget", trace={"physical_backend_operations": self.settings.max_backend_operations + 1},
-        )), self.assertRaisesRegex(BrainError, "approved physical-operation budget"):
-            create_context(self.settings, "CONTINUE", request, continue_investigation=True)
+        )), self.assertRaisesRegex(BrainError, "per-request physical-operation budget"):
+            create_context(self.settings, "CONTINUE", request)
         self.assertEqual(before, path.read_bytes())
         with mock.patch("brain.investigation.build_ticket_runtime", side_effect=RuntimeError("runtime validation failed")), \
                 self.assertRaisesRegex(RuntimeError, "runtime validation failed"):
@@ -2165,7 +2301,7 @@ String docs = """
         state_path.write_text(json.dumps(tampered), encoding="utf-8")
         before_retry = state_path.read_bytes()
         with mock.patch("brain.core.retrieve_context", side_effect=lambda *a, **k: retry_bundle()), \
-                self.assertRaisesRegex(BrainError, "uncommitted context reservation"):
+                self.assertRaisesRegex(BrainError, "pending or failed continuation"):
             create_context(self.settings, "RETRY-COVERAGE", request)
         self.assertEqual(before_retry, state_path.read_bytes())
         self.assertEqual(before, artifact.read_bytes())
@@ -3006,17 +3142,25 @@ None.
         self.assertIn("INTAKE", kit["instructions"])
         self.assertIn("Program Slice Lite", kit["protocol"])
         prompt = (Path(__file__).parents[1] / "brain" / "prompt.md").read_text(encoding="utf-8")
-        self.assertIn("version: 5", prompt)
-        self.assertIn("mode: root_cause", prompt)
+        examples = re.findall(r"```(?:json|yaml)\s*\n(.*?)```", prompt, re.DOTALL)
+        self.assertTrue(examples, "The operating prompt must include a runnable request example")
+        requests = [parse_context_request(example) for example in examples]
+        self.assertTrue(any(request["version"] == 5 and request["mode"] == "root_cause" for request in requests))
         self.assertIn("New requests use version 5", prompt)
+        user_guide = (Path(__file__).parents[1] / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
+        for guidance in (prompt, kit["instructions"], kit["protocol"], user_guide):
+            self.assertIn("no fixed investigation round limit", guidance)
+            self.assertNotIn("three normal waves", guidance)
+            self.assertNotIn("justified fourth", guidance)
         self.assertNotIn("INVESTIGATION_REQUEST:\n  version: 4", prompt)
 
         generation = self.publish("sha-g1", "G1_ONLY")
         start_content, _ = start_session(self.settings, "PROMPT-V5", "Use the default operating protocol.")
-        copied = re.search(r"```yaml\n(INVESTIGATION_REQUEST:[\s\S]*?)\n```", start_content)
+        copied = next((example for example in re.findall(r"```(?:json|yaml)\s*\n(.*?)```", start_content, re.DOTALL)
+                       if "INVESTIGATION_REQUEST" in example), None)
         self.assertIsNotNone(copied)
-        self.assertEqual(5, parse_context_request(copied.group(1))["version"])
-        create_context(self.settings, "PROMPT-V5", copied.group(1))
+        self.assertEqual(5, parse_context_request(copied)["version"])
+        create_context(self.settings, "PROMPT-V5", copied)
         self.assertEqual(1, session_state(self.settings, "PROMPT-V5")["investigation_runtime"]["wave"])
         start_session(self.settings, "DUPLICATE", "Trace G1.")
         request = self.request("Trace CustomerController G1_ONLY", wave=1)
@@ -3190,6 +3334,311 @@ None.
         state = session_state(self.settings, "RECOVERY")
         self.assertEqual("base_mismatch", state["request_history"][-1]["retrieval"]["checkpoint_reason"])
         self.assertEqual("CTX-002", state["last_context_id"])
+
+    def test_failed_checkpoint_preserves_the_original_request_and_options_for_retry(self) -> None:
+        generation = self.publish("sha-checkpoint-retry", "RETRY_G1")
+        for include_diff in (False, True):
+            ticket = f"DURABLE-RETRY-{include_diff}"
+            start_session(self.settings, ticket, "Recover the original checkpoint")
+            request = self.request("Trace CustomerController RETRY_G1", wave=1)
+            with mock.patch("brain.investigation.build_ticket_runtime", side_effect=RuntimeError("late failure")):
+                with self.assertRaisesRegex(RuntimeError, "late failure"):
+                    create_context(self.settings, ticket, request, include_diff=include_diff)
+            state = session_state(self.settings, ticket)
+            self.assertEqual(0, state["requests"])
+            self.assertIn("request-001.yml", state["active_artifacts"])
+            from brain.core import checkpoint_retry_request
+
+            self.assertEqual((request, include_diff), checkpoint_retry_request(self.settings, ticket))
+            self.assertEqual(generation.identity, state["atlas_generation_id"])
+            original_id = state["progressive_checkpoint"]["context_id"]
+            text, option = checkpoint_retry_request(self.settings, ticket)
+            content, _, number = create_context(self.settings, ticket, text, include_diff=option)
+            retried = session_state(self.settings, ticket)
+            self.assertEqual(1, number)
+            self.assertEqual(original_id, retried["last_context_id"])
+            self.assertIn("RETRY_G1", content)
+            self.assertEqual("published", retried["progressive_checkpoint"]["continuation_status"])
+
+    def test_checkpoint_retry_rejects_tampered_or_unavailable_request_before_retrieval(self) -> None:
+        from brain.core import CheckpointRetryRequired, MAX_REQUEST_TEXT_BYTES, checkpoint_retry_request
+        from brain.ui import _Handler, _session_detail
+
+        self.publish("sha-retry-identity", "RETRY_IDENTITY")
+        ticket = "RETRY-IDENTITY"
+        start_session(self.settings, ticket, "Trace CustomerController")
+        request = self.request("Trace CustomerController RETRY_IDENTITY", wave=1)
+        with mock.patch("brain.investigation.build_ticket_runtime", side_effect=RuntimeError("late failure")), \
+                self.assertRaises(RuntimeError):
+            create_context(self.settings, ticket, request, include_diff=True)
+        original = session_state(self.settings, ticket)
+        directory = self.settings.runs_dir / ticket
+        artifact = directory / "request-001.yml"
+        session = directory / "session.json"
+        cases = (
+            "missing", "oversize", "invalid_utf8", "content", "non_v5", "directory", "symlink",
+            "metadata_missing", "artifact", "include_diff", "execution_signature", "generation",
+            "source_signature", "atlas_generation_id", "request_signature", "reservation", "number", "active",
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                state = json.loads(json.dumps(original))
+                checkpoint = state["progressive_checkpoint"]
+                binding = checkpoint["retry_request"]
+                artifact.write_text(request, encoding="utf-8")
+                if case == "missing":
+                    artifact.unlink()
+                elif case == "oversize":
+                    artifact.write_bytes(b"x" * (MAX_REQUEST_TEXT_BYTES + 1))
+                elif case == "invalid_utf8":
+                    artifact.write_bytes(b"\xff")
+                    binding["content_sha256"] = hashlib.sha256(b"\xff").hexdigest()
+                elif case in {"content", "non_v5"}:
+                    raw = request.replace("RETRY_IDENTITY", "WRONG_REQUEST") if case == "content" else '{"version":2}'
+                    artifact.write_text(raw, encoding="utf-8")
+                    binding["content_sha256"] = hashlib.sha256(raw.encode()).hexdigest()
+                elif case in {"directory", "symlink"}:
+                    artifact.unlink()
+                    if case == "directory":
+                        artifact.mkdir()
+                    else:
+                        try:
+                            artifact.symlink_to(directory / "ticket.md")
+                        except OSError:
+                            # Windows without symlink privilege still exercises
+                            # the missing-artifact fail-closed branch here.
+                            pass
+                elif case == "metadata_missing":
+                    checkpoint.pop("retry_request")
+                elif case == "artifact":
+                    binding["artifact"] = "../other/request-001.yml"
+                elif case == "include_diff":
+                    binding["include_diff"] = False
+                elif case in {"execution_signature", "source_signature", "atlas_generation_id"}:
+                    binding[case] = "wrong"
+                elif case == "generation":
+                    checkpoint["generation"] += 1
+                elif case == "request_signature":
+                    checkpoint[case] = "wrong"
+                elif case == "reservation":
+                    state["last_context_id"] = checkpoint["context_id"]
+                elif case == "number":
+                    state["requests"] += 1
+                elif case == "active":
+                    state["active_artifacts"].remove("request-001.yml")
+                session.write_text(json.dumps(state), encoding="utf-8")
+                try:
+                    # The public job must fail before any source/model work.
+                    with mock.patch("brain.core.retrieve_context", side_effect=AssertionError("must not execute")):
+                        with self.assertRaises(CheckpointRetryRequired) as raised:
+                            _Handler._retrieval_job(self.settings, {"ticket": ticket, "retry_checkpoint": True}, None)
+                        if case in {"artifact", "include_diff", "execution_signature", "generation", "source_signature",
+                                    "atlas_generation_id", "request_signature", "reservation", "number", "active"}:
+                            with self.assertRaises(BrainError):
+                                create_context(self.settings, ticket, request, include_diff=True)
+                    self.assertFalse(raised.exception.retry_available)
+                    self.assertEqual("restore_checkpoint_request", _session_detail(self.settings, ticket)["checkpoint_recovery"]["action"])
+                    self.assertEqual(state, session_state(self.settings, ticket))
+                finally:
+                    if artifact.is_symlink() or artifact.is_file():
+                        artifact.unlink()
+                    elif artifact.is_dir():
+                        artifact.rmdir()
+        session.write_text(json.dumps(original), encoding="utf-8")
+        artifact.write_text(request, encoding="utf-8")
+        self.assertEqual((request, True), checkpoint_retry_request(self.settings, ticket))
+        with mock.patch("brain.core.retrieve_context", side_effect=AssertionError("must not execute")), \
+                self.assertRaises(CheckpointRetryRequired):
+            create_context(self.settings, ticket, request, include_diff=False)
+        # The offered manual fallback must actually restore the request artifact.
+        artifact.unlink()
+        with mock.patch("brain.core.save_session", side_effect=OSError("repair publication failed")), \
+                mock.patch("brain.core.retrieve_context", side_effect=AssertionError("must not execute")), \
+                self.assertRaises(CheckpointRetryRequired):
+            create_context(self.settings, ticket, request + "\n", include_diff=True)
+        self.assertEqual(original, session_state(self.settings, ticket))
+        artifact.unlink()
+        with mock.patch("brain.core.retrieve_context", side_effect=RuntimeError("retry failed after repair")), self.assertRaises(RuntimeError):
+            create_context(self.settings, ticket, request, include_diff=True)
+        self.assertEqual((request, True), checkpoint_retry_request(self.settings, ticket))
+        create_context(self.settings, ticket, request, include_diff=True)
+        self.assertEqual(request, artifact.read_text(encoding="utf-8"))
+        self.assertEqual(1, session_state(self.settings, ticket)["requests"])
+
+    def test_checkpoint_and_handoff_corruption_fail_before_automatic_or_manual_retrieval(self) -> None:
+        from brain.core import CheckpointRetryRequired, checkpoint_retry_request
+        from brain.ui import _Handler
+
+        self.publish("sha-retry-proofs", "RETRY_PROOFS")
+        ticket = "RETRY-PROOFS"
+        start_session(self.settings, ticket, "Trace CustomerController")
+        request = self.request("Trace CustomerController RETRY_PROOFS", wave=1)
+        with mock.patch("brain.investigation.build_ticket_runtime", side_effect=RuntimeError("late failure")), \
+                self.assertRaises(RuntimeError):
+            create_context(self.settings, ticket, request)
+        state = session_state(self.settings, ticket)
+        directory = self.settings.runs_dir / ticket
+        checkpoint = state["progressive_checkpoint"]
+        for artifact in (directory / checkpoint["artifact"], Path(checkpoint["handoff_artifact"])):
+            raw = artifact.read_bytes()
+            replacement = artifact.with_name("replacement.md")
+            replacement.write_bytes(raw)
+            for damage in ("missing", "corrupt", "symlink"):
+                with self.subTest(artifact=artifact, damage=damage):
+                    artifact.unlink()
+                    if damage == "corrupt":
+                        artifact.write_bytes(b"wrong content")
+                    elif damage == "symlink":
+                        try:
+                            artifact.symlink_to(replacement)
+                        except OSError:
+                            pass
+                    try:
+                        with mock.patch("brain.core.retrieve_context", side_effect=AssertionError("must not retrieve")):
+                            with self.assertRaises(CheckpointRetryRequired):
+                                _Handler._retrieval_job(self.settings, {"ticket": ticket, "retry_checkpoint": True}, None)
+                            with self.assertRaises(CheckpointRetryRequired):
+                                create_context(self.settings, ticket, request)
+                            with self.assertRaises(CheckpointRetryRequired) as changed_plan:
+                                create_context(self.settings, ticket, self.request("A different request", wave=1))
+                            self.assertTrue(changed_plan.exception.checkpoint_problem)
+                        with mock.patch.object(_Handler, "_execute_retrieval", side_effect=RuntimeError("late UI failure")):
+                            with self.assertRaises(CheckpointRetryRequired) as late_error:
+                                _Handler._retrieval_job(self.settings, {"ticket": ticket, "text": request}, None)
+                            self.assertTrue(late_error.exception.checkpoint_problem)
+                        self.assertEqual(state, session_state(self.settings, ticket))
+                    finally:
+                        artifact.unlink(missing_ok=True)
+                        artifact.write_bytes(raw)
+        changed = json.loads(json.dumps(state))
+        changed["progressive_checkpoint"]["evidence_proofs"][0]["content_sha256"] = "f" * 64
+        (directory / "session.json").write_text(json.dumps(changed), encoding="utf-8")
+        with mock.patch("brain.core.retrieve_context", side_effect=AssertionError("must not retrieve")), self.assertRaises(CheckpointRetryRequired):
+            create_context(self.settings, ticket, request)
+        (directory / "session.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual((request, False), checkpoint_retry_request(self.settings, ticket))
+
+    def test_checkpoint_ui_retry_after_restart_uses_original_generation_and_options(self) -> None:
+        from brain.core import CheckpointRetryRequired
+        from brain.ui import _Handler, _session_detail
+
+        generation = self.publish("sha-retry-g1", "RETRY_G1")
+        ticket = "UI-RETRY"
+        from brain.core import deliver
+
+        started, _ = start_session(self.settings, ticket, "Trace CustomerController")
+        deliver(self.settings, ticket, started, "m365", copy=False)
+        request = self.request("Trace CustomerController RETRY_G1", wave=1)
+        with mock.patch("brain.investigation.build_ticket_runtime", side_effect=RuntimeError("late failure")), \
+                self.assertRaises(CheckpointRetryRequired) as raised:
+            _Handler._retrieval_job(self.settings, {"ticket": ticket, "text": request, "include_diff": True}, None)
+        self.assertTrue(raised.exception.retry_available)
+        before = session_state(self.settings, ticket)
+        checkpoint = before["progressive_checkpoint"]
+        original_bytes = (self.settings.runs_dir / ticket / checkpoint["artifact"]).read_bytes()
+        self.publish("sha-retry-g2", "RETRY_G2")
+        restarted = load_settings(self.settings.config_path)
+        detail = _session_detail(restarted, ticket)
+        self.assertEqual("retry_checkpoint", detail["checkpoint_recovery"]["action"])
+        self.assertNotIn(request, json.dumps(detail))
+        with mock.patch("brain.ui.create_context", wraps=create_context) as executed:
+            result = _Handler._retrieval_job(restarted, {
+                "ticket": ticket, "retry_checkpoint": True,
+                "text": "ignored attacker override", "include_diff": False, "artifact": "../other.yml", "target": "claude",
+            }, None)
+        self.assertEqual(request, executed.call_args.args[2])
+        self.assertIs(True, executed.call_args.args[3])
+        self.assertEqual(1, result["request"])
+        self.assertIn("RETRY_G1", result["delivery"]["content"])
+        self.assertNotIn("RETRY_G2", result["delivery"]["content"])
+        self.assertEqual("m365", result["delivery"]["target"])
+        final = session_state(restarted, ticket)
+        self.assertEqual(checkpoint["context_id"], final["last_context_id"])
+        self.assertEqual(generation.identity, final["atlas_generation_id"])
+        self.assertIsNone(result["session"]["checkpoint_recovery"])
+        self.assertEqual(original_bytes, (self.settings.runs_dir / ticket / checkpoint["artifact"]).read_bytes())
+        with mock.patch("brain.core.retrieve_context", side_effect=AssertionError("must not repeat")), \
+                self.assertRaises(CheckpointRetryRequired):
+            _Handler._retrieval_job(restarted, {"ticket": ticket, "retry_checkpoint": True}, None)
+
+    def test_checkpoint_retry_holds_the_ticket_lock_from_validation_through_execution(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from brain.core import checkpoint_retry_request
+        from brain.locks import TicketOperationBusy
+        from brain.ui import _Handler
+
+        self.publish("sha-locked-retry", "LOCKED_RETRY")
+        ticket = "LOCKED-RETRY"
+        start_session(self.settings, ticket, "Trace CustomerController")
+        request = self.request("Trace CustomerController LOCKED_RETRY", wave=1)
+        with mock.patch("brain.investigation.build_ticket_runtime", side_effect=RuntimeError("late failure")), \
+                self.assertRaises(RuntimeError):
+            create_context(self.settings, ticket, request)
+        validated, release = Event(), Event()
+        def hold_saved_request(settings, value):
+            result = checkpoint_retry_request(settings, value)
+            validated.set()
+            if not release.wait(10):
+                raise AssertionError("retry lock test did not release")
+            return result
+
+        body = {"ticket": ticket, "retry_checkpoint": True}
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with mock.patch("brain.ui.checkpoint_retry_request", side_effect=hold_saved_request):
+                job = pool.submit(_Handler._retrieval_job, self.settings, body, None)
+                try:
+                    self.assertTrue(validated.wait(10))
+                    with self.assertRaises(TicketOperationBusy):
+                        _Handler._retrieval_job(self.settings, body, None)
+                finally:
+                    release.set()
+                self.assertEqual(1, job.result(timeout=30)["request"])
+        self.assertEqual(1, session_state(self.settings, ticket)["requests"])
+
+    def test_checkpoint_request_survives_late_failure_but_not_unpublished_checkpoint(self) -> None:
+        from brain import core as core_module
+        from brain.core import ContextDeliveryError, checkpoint_retry_request
+
+        self.publish("sha-retry-lifecycle", "RETRY_LIFECYCLE")
+        request = self.request("Trace CustomerController RETRY_LIFECYCLE", wave=1)
+        for phase in ("first_useful_checkpoint", "metric", "handoff", "final_notification"):
+            with self.subTest(phase=phase):
+                ticket = "RETRY-" + phase
+                start_session(self.settings, ticket, "Trace CustomerController")
+                def progress(event: dict) -> None:
+                    if event.get("phase") == phase or (phase == "final_notification" and event.get("phase") == "continuation_published"):
+                        raise RuntimeError("notification failed")
+
+                target = "brain.metrics.record_metric" if phase == "metric" else "brain.core._atomic_generated_text_write"
+                original = core_module._atomic_generated_text_write
+                def write_handoff(*args, **kwargs):
+                    if phase == "handoff":
+                        raise RuntimeError("handoff failed")
+                    return original(*args, **kwargs)
+
+                with mock.patch(target, side_effect=RuntimeError("metric failed") if phase == "metric" else write_handoff):
+                    with self.assertRaises(ContextDeliveryError if phase == "final_notification" else RuntimeError):
+                        create_context(self.settings, ticket, request, progress=progress)
+                state = session_state(self.settings, ticket)
+                artifact = self.settings.runs_dir / ticket / "request-001.yml"
+                if phase == "handoff":
+                    self.assertFalse(state.get("progressive_checkpoint"))
+                    self.assertFalse(artifact.exists())
+                elif phase == "final_notification":
+                    self.assertEqual(1, state["requests"])
+                    self.assertEqual("published", state["progressive_checkpoint"]["continuation_status"])
+                    self.assertTrue((artifact.parent / "context-001.md").is_file())
+                    self.assertTrue(artifact.is_file())
+                else:
+                    self.assertEqual((request, False), checkpoint_retry_request(self.settings, ticket))
+                    before = (artifact.parent / "session.json").read_bytes()
+                    with mock.patch("brain.core.retrieve_context", side_effect=RuntimeError("early retry failed")), self.assertRaises(RuntimeError):
+                        create_context(self.settings, ticket, request)
+                    self.assertEqual(before, (artifact.parent / "session.json").read_bytes())
+                    self.assertEqual((request, False), checkpoint_retry_request(self.settings, ticket))
+                    create_context(self.settings, ticket, request)
+                    self.assertEqual(1, session_state(self.settings, ticket)["requests"])
 
     def test_completion_events_follow_authoritative_session_publication(self) -> None:
         from brain import core as core_module

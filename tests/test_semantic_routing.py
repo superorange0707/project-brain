@@ -163,6 +163,33 @@ class SemanticRoutingTest(unittest.TestCase):
         self.assertEqual("degraded", status["status"])
         self.assertIn("semantic_repo_routing_incomplete", trace.fallback_reasons)
 
+    def test_native_semantic_search_preserves_source_hydration_headroom(self):
+        self.workspace()
+        with closing(connect(self.settings)) as connection:
+            connection.execute("DELETE FROM embedding_cache")  # Cold routing in this temporary fixture.
+            connection.commit()
+        for iteration, budget in enumerate((0, 1, 2, 3, 30, 30)):
+            with self.subTest(budget=budget, iteration=iteration):
+                trace = RetrievalTrace(max_physical_backend_operations=budget)
+                protected = min(2, max(0, budget - 1))
+                trace._set_backend_headroom(protected)
+                status = {}
+                rows = search_semantic(self.pinned, self.question, generation=self.generation,
+                                       repo_limit=2, trace=trace, serving_status=status)
+                used = trace.physical_backend_operations
+                self.assertLessEqual(used, budget - protected)
+                self.assertEqual(protected, trace._backend_headroom)
+                self.assertEqual(bool(budget), bool(rows))
+                if budget < 30:
+                    self.assertEqual('degraded', status['status'])
+                if iteration == 4:
+                    self.assertIn('semantic-repo-recovery', trace.backend_ms)
+                if iteration == 5:
+                    self.assertNotIn('semantic-repo-recovery', trace.backend_ms)
+                trace._set_backend_headroom(0)
+                self.assertEqual(used, trace.physical_backend_operations)
+                self.assertGreaterEqual(trace.physical_budget_remaining, protected)
+
     def test_old_generation_routes_old_roots_and_never_substitutes_new_shards(self):
         self.workspace()
         old_state = json.loads((self.settings.state_dir / "semantic-index.json").read_text())

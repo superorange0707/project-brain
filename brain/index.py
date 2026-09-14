@@ -1075,6 +1075,91 @@ def query_index(
             connection.close()
 
 
+def _java_method_reference_prefix(content: str, end: int) -> bool:
+    """Recognize ::[type arguments] before a name; never resolve receiver types."""
+    prefix = content[max(0, end - 512):end].rstrip()
+    if prefix.endswith("::"):
+        return True
+    if not prefix.endswith(">"):
+        return False
+    depth = 0
+    for index in range(len(prefix) - 1, -1, -1):
+        char = prefix[index]
+        if char == ">":
+            depth += 1
+        elif char == "<":
+            depth -= 1
+            if depth == 0:
+                return bool(prefix[index + 1:-1].strip()) and prefix[:index].rstrip().endswith("::")
+        elif not (char.isalnum() or char.isspace() or char in "_$.,?[]&"):
+            return False
+    return False
+
+
+def _java_call_reference_lines(content: str, name: str, *, deadline: float | None = None) -> Iterator[tuple[int, str]]:
+    """Find source call sites, not dispatch targets; ignore comments/literals."""
+    from .core import _symbol_declaration
+    from .investigation import _mask_java_comments
+
+    lines = content.splitlines()
+    masked = _mask_java_comments("\n".join(lines), strings=True)
+    declaration = _symbol_declaration(name, path="source.java")
+    pattern = rf"(?<![\w$@]){re.escape(name)}(?![\w$])"
+    invocation = re.compile(r"\s*\(")
+    previous = 0
+    number = 1
+    emitted_line = 0
+    for match in re.finditer(pattern, masked):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        call = invocation.match(masked, match.end())
+        reference = _java_method_reference_prefix(masked, match.start()) if call is None else False
+        if call is None and not reference:
+            continue
+        number += masked.count("\n", previous, match.start())
+        previous = match.start()
+        if number == emitted_line:
+            continue
+        # This is a bounded candidate filter, not Java type resolution. Check
+        # this occurrence only: a declaration and real call may share a line.
+        prefix = masked[max(0, match.start() - 512):match.start()].rstrip()
+        end = call.end() if call is not None else match.end()
+        context_start = max(0, end - 512)
+        context = ("(" if context_start else "") + masked[context_start:end]
+        if not reference and not prefix.endswith(".") and any(
+            found.end() == len(context) for found in declaration.finditer(context)
+        ):
+            continue
+        emitted_line = number
+        yield number, lines[number - 1]
+
+
+def _java_declaration_lines(content: str, name: str, *, deadline: float | None = None) -> Iterator[tuple[int, str]]:
+    """Locate declarations in masked source, never signature examples in literals."""
+    from .core import _symbol_declaration
+    from .investigation import _mask_java_comments
+
+    lines = content.splitlines()
+    masked = _mask_java_comments("\n".join(lines), strings=True)
+    declaration = _symbol_declaration(name, path="source.java")
+    previous, number, emitted_line = 0, 1, 0
+    for match in re.finditer(rf"(?<![\w$]){re.escape(name)}(?![\w$])", masked):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        number += masked.count("\n", previous, match.start())
+        previous = match.start()
+        if number == emitted_line:
+            continue
+        start = max(0, match.start() - 512)
+        # A cropped prefix is not an actual declaration/line boundary.
+        context = ("(" if start else "") + masked[start:match.end() + 512]
+        name_offset = match.start() - start + bool(start)
+        if any(name_offset in (found.start("class_name"), found.start("method_name"))
+               for found in declaration.finditer(context)):
+            emitted_line = number
+            yield number, lines[number - 1]
+
+
 def query_generation_indexes(
     settings: Settings,
     generation: object,
@@ -1088,8 +1173,13 @@ def query_generation_indexes(
     max_seconds: float,
     stats: dict[str, object] | None = None,
     test_only: bool = False,
+    java_calls_only: bool = False,
+    java_declarations_only: bool = False,
+    collect_java_declarations: bool = False,
+    collect_java_call_references: bool = False,
+    python_sources: dict[tuple[str, str], str] | None = None,
 ) -> dict[str, list[tuple[str, int, str]]] | None:
-    """Query one registered pinned lexical generation within explicit hard budgets."""
+    """Query one pinned lexical generation; optional Python buffers obey file/byte budgets."""
     if stats is not None:
         stats.clear()
         stats.update({
@@ -1099,6 +1189,10 @@ def query_generation_indexes(
             "budget_exhausted": False,
             "reason": None,
         })
+        if collect_java_declarations:
+            stats.update({"java_declarations": [], "java_declarations_complete": True})
+        if collect_java_call_references:
+            stats.update({"java_call_references": [], "java_call_references_complete": True})
 
     def exhausted(reason: str) -> None:
         if stats is not None:
@@ -1115,6 +1209,13 @@ def query_generation_indexes(
         or max_hits < 1
         or max_bytes < 1
         or max_seconds <= 0
+        or (java_calls_only and java_declarations_only)
+        or (python_sources is not None and (test_only or java_calls_only or java_declarations_only
+                                            or collect_java_declarations or collect_java_call_references))
+        or ((collect_java_declarations or collect_java_call_references)
+            and (stats is None or java_calls_only or java_declarations_only))
+        or ((java_calls_only or java_declarations_only or collect_java_declarations or collect_java_call_references)
+            and not re.fullmatch(r"[A-Za-z_$][\w$]{0,499}", query))
         or not _database(settings).is_file()
     ):
         return None
@@ -1147,6 +1248,10 @@ def query_generation_indexes(
         if test_only:
             connection.create_function("brain_is_test_path", 1, is_test_path, deterministic=True)
             path_clause = "AND brain_is_test_path(f.path) "
+        if java_calls_only or java_declarations_only:
+            path_clause += "AND lower(f.path) GLOB '*.java' "
+        if python_sources is not None:
+            path_clause += "AND lower(f.path) GLOB '*.py' "
         requested_values = ",".join("(?,?,?)" for _ in pairs)
         requested_parameters = [
             value for ordinal, (name, snapshot) in enumerate(pairs)
@@ -1171,8 +1276,28 @@ def query_generation_indexes(
 
         # Fetch only bounded metadata first. Per-repository limits preserve
         # fair coverage without making SQLite sort/materialize source blobs.
+        def metadata_rows(name: str, snapshot: str, limit: int, offset: int = 0) -> list[tuple[Any, ...]]:
+            if len(query) >= 3:
+                sql = (
+                    "SELECT f.path,b.blob,b.size FROM blob_fts "
+                    "JOIN blobs b ON b.blob=blob_fts.blob "
+                    "JOIN file_membership f ON f.blob=b.blob "
+                    "WHERE blob_fts MATCH ? AND f.repo=? AND f.snapshot_sha=? "
+                )
+                parameters = (_quoted(query), name, snapshot)
+            else:
+                sql = (
+                    "SELECT f.path,b.blob,b.size FROM blobs b "
+                    "JOIN file_membership f ON f.blob=b.blob "
+                    "WHERE f.repo=? AND f.snapshot_sha=? AND instr(b.content,?)>0 "
+                )
+                parameters = (name, snapshot, query)
+            return connection.execute(sql + path_clause + "ORDER BY f.path,b.blob LIMIT ? OFFSET ?",
+                                      (*parameters, limit, offset)).fetchall()
+
         base, remainder = divmod(max_candidate_files, len(pairs))
         candidates_by_repo: list[list[tuple[int, str, str, str, int]]] = []
+        overflow_repos: list[int] = []
         for ordinal, (name, snapshot) in enumerate(pairs):
             if time.monotonic() >= deadline:
                 exhausted("time")
@@ -1183,32 +1308,17 @@ def query_generation_indexes(
                 candidates_by_repo.append([])
                 continue
             try:
-                if len(query) >= 3:
-                    rows = connection.execute(
-                        "SELECT f.path,b.blob,b.size FROM blob_fts "
-                        "JOIN blobs b ON b.blob=blob_fts.blob "
-                        "JOIN file_membership f ON f.blob=b.blob "
-                        "WHERE blob_fts MATCH ? AND f.repo=? AND f.snapshot_sha=? "
-                        + path_clause +
-                        "ORDER BY f.path,b.blob LIMIT ?",
-                        (_quoted(query), name, snapshot, repo_limit + 1),
-                    ).fetchall()
-                else:
-                    rows = connection.execute(
-                        "SELECT f.path,b.blob,b.size FROM blobs b "
-                        "JOIN file_membership f ON f.blob=b.blob "
-                        "WHERE f.repo=? AND f.snapshot_sha=? AND instr(b.content,?)>0 "
-                        + path_clause +
-                        "ORDER BY f.path,b.blob LIMIT ?",
-                        (name, snapshot, query, repo_limit + 1),
-                    ).fetchall()
+                rows = metadata_rows(name, snapshot, repo_limit + 1)
             except sqlite3.OperationalError as error:
                 if "interrupted" in str(error).lower() and time.monotonic() >= deadline:
                     exhausted("time")
                     break
                 raise
             if len(rows) > repo_limit:
-                exhausted("candidate_files")
+                if java_calls_only or java_declarations_only:
+                    overflow_repos.append(ordinal)
+                else:
+                    exhausted("candidate_files")
             repo_candidates: list[tuple[int, str, str, str, int]] = []
             for path, blob, size in rows[:repo_limit]:
                 try:
@@ -1219,6 +1329,39 @@ def query_generation_indexes(
                     return None
                 repo_candidates.append((ordinal, name, str(path), str(blob), declared_size))
             candidates_by_repo.append(repo_candidates)
+
+        # Reuse spare fair-share capacity instead of missing a caller behind
+        # declarations in one busy repo. One bounded metadata pass; source byte
+        # and hit limits still apply after the same round-robin interleave.
+        spare = max_candidate_files - sum(len(rows) for rows in candidates_by_repo)
+        for position, ordinal in enumerate(overflow_repos):
+            if time.monotonic() >= deadline:
+                exhausted("time")
+                break
+            if spare <= 0:
+                exhausted("candidate_files")
+                break
+            allowance = (spare + len(overflow_repos) - position - 1) // (len(overflow_repos) - position)
+            name, snapshot = pairs[ordinal]
+            repo_candidates = candidates_by_repo[ordinal]
+            try:
+                rows = metadata_rows(name, snapshot, allowance + 1, len(repo_candidates))
+            except sqlite3.OperationalError as error:
+                if "interrupted" in str(error).lower() and time.monotonic() >= deadline:
+                    exhausted("time")
+                    break
+                raise
+            if len(rows) > allowance:
+                exhausted("candidate_files")
+            for path, blob, size in rows[:allowance]:
+                try:
+                    declared_size = int(size)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if declared_size < 0 or declared_size > 3_000_000:
+                    return None
+                repo_candidates.append((ordinal, name, str(path), str(blob), declared_size))
+                spare -= 1
 
         # Interleave routed repositories before applying the byte budget so a
         # busy early repository cannot consume every retained candidate.
@@ -1245,6 +1388,8 @@ def query_generation_indexes(
             stats["candidate_bytes"] = retained_bytes
 
         hits: dict[str, list[tuple[str, int, str]]] = {name: [] for name in names}
+        declaration_counts = {name: 0 for name in names}
+        reference_counts = {name: 0 for name in names}
         total_hits = 0
         # Keep VALUES below SQLite's conservative cross-platform parameter
         # ceiling while fetching content only for the retained prefix.
@@ -1268,17 +1413,51 @@ def query_generation_indexes(
                         break
                     if not _blob_identity_valid(blob, content, size):
                         return None
+                    if python_sources is not None:
+                        # Caller discovery needs the whole validated import/call
+                        # scope, not one hit per repeated occurrence of a name.
+                        python_sources[(str(repo_name), str(file_path))] = content
+                        continue
                     repo_hits = hits[str(repo_name)]
+                    if collect_java_declarations and str(file_path).lower().endswith(".java"):
+                        # Reuse this already-validated blob for symbol planning.
+                        # Only complete scans may seed a request-local cache;
+                        # raw lexical output and its existing limits stay intact.
+                        declarations = stats["java_declarations"]
+                        for number, line in _java_declaration_lines(content, query, deadline=deadline):
+                            if len(declarations) >= max_hits or declaration_counts[str(repo_name)] >= max_results:
+                                stats["java_declarations_complete"] = False
+                                break
+                            declarations.append((str(repo_name), str(file_path), number, line))
+                            declaration_counts[str(repo_name)] += 1
+                    if collect_java_call_references and str(file_path).lower().endswith(".java"):
+                        references = stats["java_call_references"]
+                        for number, line in _java_call_reference_lines(content, query, deadline=deadline):
+                            if len(references) >= max_hits or reference_counts[str(repo_name)] >= max_results:
+                                stats["java_call_references_complete"] = False
+                                break
+                            references.append((str(repo_name), str(file_path), number, line))
+                            reference_counts[str(repo_name)] += 1
                     if len(repo_hits) >= max_results:
                         continue
-                    for number, line in enumerate(content.splitlines(), 1):
-                        if query in line:
+                    source_lines = (
+                        _java_call_reference_lines(content, query, deadline=deadline) if java_calls_only else
+                        _java_declaration_lines(content, query, deadline=deadline) if java_declarations_only else
+                        enumerate(content.splitlines(), 1)
+                    )
+                    for number, line in source_lines:
+                        if time.monotonic() >= deadline:
+                            exhausted("time")
+                            break
+                        if java_calls_only or java_declarations_only or query in line:
                             repo_hits.append((str(file_path), number, line))
                             total_hits += 1
                             if total_hits >= max_hits:
                                 exhausted("hits")
                                 break
                             if len(repo_hits) >= max_results:
+                                if java_calls_only or java_declarations_only:
+                                    exhausted("repository_hits")
                                 break
                     if total_hits >= max_hits:
                         break

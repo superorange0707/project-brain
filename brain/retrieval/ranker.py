@@ -39,6 +39,11 @@ def fuse_and_rank(hits: list[T]) -> list[T]:
     fused: list[T] = []
     for key, values in groups.items():
         primary = copy(max(values, key=lambda item: (item.score, item.kind, item.found_by)))
+        # A high-scoring navigation card must not erase a same-location exact
+        # definition/file request's selection priority.
+        primary.kind = ", ".join(sorted({
+            kind.strip() for item in values for kind in item.kind.split(",") if kind.strip()
+        }))
         source_hits = [item for item in values if item.text and _SOURCE_CHANNELS.intersection(item.found_by)]
         if source_hits:
             # Preserve the observed line for reranking instead of replacing it

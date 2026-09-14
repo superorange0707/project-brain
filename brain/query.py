@@ -120,10 +120,14 @@ def _candidate_regions(settings: Settings, hits: list[SearchHit]) -> list[Search
         current: SearchHit | None = None
         first_line = 0
         for hit in sorted(file_hits, key=lambda item: item.line):
-            anchor = hit if current is None or hit.score > current.score else current
+            requested = "requested symbol definition" in hit.kind
+            current_requested = current is not None and "requested symbol definition" in current.kind
+            anchor = hit if current is None or (not current_requested and (requested or hit.score > current.score)) else current
             # Match read_source's real window, including when a stronger later
             # hit moves the anchor. Never merge away a still-unread source match.
-            if current is None or hit.line - anchor.line > radius or anchor.line - first_line > radius:
+            # An explicit definition needs its own window, not just a header
+            # at the edge of another method's window (legacy v2/v3 included).
+            if current is None or (requested and current_requested) or hit.line - anchor.line > radius or anchor.line - first_line > radius:
                 current = SearchHit(
                     hit.repo, hit.path, hit.line, hit.text, hit.kind, hit.score, list(hit.found_by)
                 )
@@ -132,8 +136,9 @@ def _candidate_regions(settings: Settings, hits: list[SearchHit]) -> list[Search
                 region_matches.append([hit])
                 continue
             region_matches[-1].append(hit)
-            if hit.score > current.score:
-                current.line, current.text, current.score = hit.line, hit.text, hit.score
+            if anchor is hit:
+                current.line, current.text = hit.line, hit.text
+            current.score = max(current.score, hit.score)
             current.found_by = sorted(set(current.found_by + hit.found_by))
             kinds = list(dict.fromkeys(part.strip() for part in (current.kind + ", " + hit.kind).split(",")))
             current.kind = ", ".join(kinds)
@@ -164,16 +169,21 @@ def _candidate_regions(settings: Settings, hits: list[SearchHit]) -> list[Search
     return sorted(regions, key=lambda item: (-item.score, item.repo, item.path, item.line))
 
 
+def _candidate_priority(hit: SearchHit) -> int:
+    if 'requested anchor match' in hit.kind:
+        return -2  # Keep the observed failure before its derived neighbours.
+    if "generation-validated qualified symbol" in hit.found_by:
+        return -1
+    kind = hit.kind.lower()
+    if any(value in kind for value in ("definition", "verified path", "requested file")):
+        return 0
+    return 1 if "requested" in kind else 2
+
+
 def prune_candidates(settings: Settings, hits: list[SearchHit], limit: int) -> tuple[list[SearchHit], list[SearchHit]]:
     """Bound the reranker pool while retaining direct/path/definition evidence."""
-    ranked = _candidate_regions(settings, hits)
-    protected = [
-        item for item in ranked
-        if any(value in item.kind.lower() for value in ("requested", "verified path", "definition"))
-    ]
-    protected_keys = {(item.repo, item.path, item.line) for item in protected}
-    ordinary = [item for item in ranked if (item.repo, item.path, item.line) not in protected_keys]
-    kept = (protected + ordinary)[: max(1, limit)]
+    ranked = sorted(_candidate_regions(settings, hits), key=_candidate_priority)
+    kept = ranked[: max(1, limit)]
     kept_keys = {(item.repo, item.path, item.line) for item in kept}
     return kept, [item for item in ranked if (item.repo, item.path, item.line) not in kept_keys]
 
@@ -184,13 +194,13 @@ def select_candidates(
     *,
     already_fused: bool = False,
 ) -> tuple[list[SearchHit], list[SearchHit]]:
-    """Merge nearby hits, then enforce global/file/repository hydration diversity."""
+    """Merge hits; bound global hydration and apply diversity to discovery only."""
     # Keep the protection established before reranking through hydration too;
     # an optional learned/co-occurrence bonus must not evict requested source.
     ranked = sorted(
         hits if already_fused else _candidate_regions(settings, hits),
         key=lambda item: (
-            not any(value in item.kind.lower() for value in ("requested", "verified path", "definition")),
+            _candidate_priority(item),
             -item.score, item.repo, item.path, item.line,
         ),
     )
@@ -200,14 +210,18 @@ def select_candidates(
     file_counts: dict[tuple[str, str], int] = {}
     for hit in considered:
         file_key = hit.repo, hit.path
+        explicit_symbol = "generation-validated qualified symbol" in hit.found_by
         if (
             len(selected) >= settings.hydrate_limit
-            or repo_counts.get(hit.repo, 0) >= settings.max_regions_per_repo
-            or file_counts.get(file_key, 0) >= settings.max_regions_per_file
+            # Discovery diversity must not discard explicitly named source.
+            # Global candidate, hydration and context bounds still apply.
+            or (not explicit_symbol and repo_counts.get(hit.repo, 0) >= settings.max_regions_per_repo)
+            or (not explicit_symbol and file_counts.get(file_key, 0) >= settings.max_regions_per_file)
         ):
             omitted.append(hit)
             continue
         selected.append(hit)
-        repo_counts[hit.repo] = repo_counts.get(hit.repo, 0) + 1
-        file_counts[file_key] = file_counts.get(file_key, 0) + 1
+        if not explicit_symbol:
+            repo_counts[hit.repo] = repo_counts.get(hit.repo, 0) + 1
+            file_counts[file_key] = file_counts.get(file_key, 0) + 1
     return selected, sorted(omitted, key=lambda item: (-item.score, item.repo, item.path, item.line))

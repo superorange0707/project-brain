@@ -83,8 +83,9 @@
     .bad { color: var(--danger); }
     .card h2 { margin: 0 0 6px; font-size: 18px; }
     .help { margin: 0 0 18px; color: var(--muted); font-size: 14px; line-height: 1.6; }
-    .row { display: flex; gap: 12px; align-items: center; }
-    .row > .grow { flex: 1; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    .row > .grow { flex: 1 1 220px; min-width: 0; }
+    .form-actions { align-items: end; }
     label { display: block; color: var(--muted); font-size: 14px; margin: 0 0 7px; font-weight: 650; }
     input, textarea, select {
       width: 100%; color: var(--text); background: var(--inset); border: 1px solid var(--line);
@@ -105,7 +106,7 @@
     .button.danger { color: #ffd4d7; border-color: rgba(255,127,135,.55); background: rgba(255,127,135,.08); }
     .button:disabled { opacity: .45; cursor: not-allowed; transform: none; }
     .check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
-    .check input { width: auto; accent-color: var(--accent); }
+    .check input { width: auto; flex-shrink: 0; accent-color: var(--accent); }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 12px 9px; text-align: left; border-bottom: 1px solid var(--line); font-size: 14px; }
     th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
@@ -128,14 +129,15 @@
     .progress-track { height: 8px; margin: 12px 0 10px; overflow: hidden; border-radius: 999px; background: #06100d; }
     .progress-fill { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s ease; }
     .progress-counts { display: flex; flex-wrap: wrap; gap: 6px 15px; color: var(--muted); font-size: 12px; line-height: 1.55; }
-    .progress-counts span { white-space: nowrap; }
+    .progress-counts span { overflow-wrap: anywhere; }
     pre.output {
       margin: 14px 0 0; padding: 16px; max-height: 520px; overflow: auto; white-space: pre-wrap;
       background: var(--inset); border: 1px solid var(--line); border-radius: 16px;
       color: var(--text); font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
-    .deliverybar { display: none; justify-content: space-between; align-items: center; margin-top: 12px; gap: 10px; }
+    .deliverybar { display: none; flex-wrap: wrap; justify-content: space-between; align-items: center; margin-top: 12px; gap: 10px; }
     .deliverybar.visible { display: flex; }
+    .deliverybar [data-part] { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; text-align: center; }
     .artifacts { display: grid; gap: 8px; }
     .artifact {
       display: flex; justify-content: space-between; align-items: center; gap: 12px;
@@ -144,6 +146,7 @@
     }
     .artifact small { color: var(--muted); }
     .empty { color: var(--muted); padding: 18px 0; text-align: center; }
+    .error, .success { overflow-wrap: anywhere; }
     .error {
       padding: 13px; color: #ffd4d7; background: rgba(255,127,135,.08);
       border: 1px solid rgba(255,127,135,.35); border-radius: 10px; margin-top: 12px; white-space: pre-wrap;
@@ -193,7 +196,7 @@
     @media (prefers-reduced-transparency: reduce) { :root { --glass: var(--panel); } .card, aside { backdrop-filter: none; -webkit-backdrop-filter: none; } }
     @media (forced-colors: active) { .card, .button, .nav, .workspace-bar { border: 1px solid CanvasText; } }
     @media (max-width: 900px) {
-      .shell { grid-template-columns: 1fr; }
+      .shell { grid-template-columns: minmax(0,1fr); }
       aside { position: static; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
       .brand { margin-bottom: 16px; }
       nav { display: flex; overflow-x: auto; }
@@ -206,6 +209,9 @@
       .topbar { display: block; }
       .top-actions { margin-top: 14px; }
       .row { align-items: stretch; flex-direction: column; }
+      .row > .grow { flex: initial; }
+      .deliverybar { align-items: stretch; flex-direction: column; }
+      .deliverybar [data-part] { flex: initial; }
       .action { grid-template-columns: 1fr; gap: 6px; }
     }
   </style>
@@ -266,7 +272,7 @@
           <article class="card wide" id="overview-investigations">
             <div class="section-heading"><div><h2>Investigations</h2><p class="help">One ticket, one folder, one pinned evidence history.</p></div><button class="button" data-go="request">Continue with AI →</button></div>
             <div id="investigation-board" class="artifacts" style="margin-bottom:14px"><div class="empty">No investigations yet.</div></div>
-            <div class="row"><div class="grow"><select id="session-select"><option value="">No investigations yet</option></select></div><button class="button" id="open-session">Open</button><button class="button danger" id="delete-session" disabled>Delete history</button></div>
+            <div class="row form-actions"><div class="grow"><label for="session-select">Investigation history</label><select id="session-select"><option value="">No investigations yet</option></select></div><button class="button" id="open-session">Open</button><button class="button danger" id="delete-session" disabled>Delete history</button></div>
             <div id="artifact-list" class="artifacts" style="margin-top:14px"></div>
             <div id="ticket-location" class="folder-path" style="margin-top:14px"></div>
           </article>
@@ -297,7 +303,7 @@
           </article>
           <article class="card two-thirds">
             <h2>Edition</h2><p class="help">Choose the verified local retrieval capability. Selecting Semantic or Precision does not claim it is active until the current snapshots have a matching Semantic generation.</p>
-            <div class="row"><div class="grow"><select id="edition-select"><option value="core">Core</option><option value="semantic">Semantic</option><option value="precision">Precision</option></select></div><label class="check"><input type="checkbox" id="edition-refresh"> Switch and Refresh</label><button class="button primary" id="set-edition">Apply edition</button></div>
+            <div class="row form-actions"><div class="grow"><label for="edition-select">Brain edition</label><select id="edition-select"><option value="core">Core</option><option value="semantic">Semantic</option><option value="precision">Precision</option></select></div><label class="check"><input type="checkbox" id="edition-refresh"> Switch and Refresh</label><button class="button primary" id="set-edition">Apply edition</button></div>
             <div id="edition-message"></div>
           </article>
           <article class="card one-third">
@@ -350,10 +356,12 @@
             <div class="field"><label for="ticket-id">Ticket identifier</label><input id="ticket-id" placeholder="ABC-1234" autocomplete="off"></div>
             <div class="field"><label for="ticket-text">Ticket description, acceptance criteria, logs and constraints</label><textarea class="tall" id="ticket-text" placeholder="# Problem&#10;&#10;Describe observed and expected behaviour…"></textarea></div>
             <div class="field"><label for="ticket-branches">Feature branches (optional, one REPO=BRANCH per line)</label><textarea id="ticket-branches" placeholder="payment-service=feature/ABC-1234"></textarea></div>
-            <div class="row">
-              <label class="check grow"><input type="checkbox" id="ticket-sync"> Check latest code & Refresh before start</label>
+            <div class="field">
+              <label class="check"><input type="checkbox" id="ticket-sync"> Check latest code & Refresh before start</label>
               <label class="check"><input type="checkbox" id="ticket-degraded"> Continue degraded if Semantic alignment fails</label>
-              <select id="ticket-target" style="width:auto"><option value="claude">Clipboard chat</option><option value="m365">M365 file context</option></select>
+            </div>
+            <div class="row form-actions">
+              <div class="grow"><label for="ticket-target">Context destination</label><select id="ticket-target"><option value="claude">Clipboard chat</option><option value="m365">M365 file context</option></select></div>
               <button class="button primary" id="start-ticket">Start investigation</button>
             </div>
           </article>
@@ -383,9 +391,11 @@
             <div class="row">
               <label class="check grow"><input type="checkbox" id="request-diff"> Include tracked working-tree diffs</label>
               <button class="button" id="preview-request">Classify reply</button>
+              <button class="button secondary" id="text-request">Create request from text</button>
               <button class="button primary" id="run-request" disabled>Run retrieval</button>
             </div>
             <div id="request-message"></div>
+            <p class="help">Copilot returned plain text? Edit it to the repository question you need answered, then choose Create request from text. Review the generated request before running it.</p>
             <details class="field"><summary>Continue in a fresh AI conversation</summary>
               <p class="help">Keep this ticket, its pinned generation and evidence IDs. Export a bounded handover instead of pasting the whole history. Brain cannot see decisions or answers left only in your old chat.</p>
               <label for="resume-notes">Optional handover notes from the old conversation</label>
@@ -396,7 +406,7 @@
           <article class="card one-third">
             <span class="eyebrow">Retrieval plan</span>
             <div class="metric" id="operation-count">0</div>
-            <p class="help" id="request-objective">Brain only acts when the AI requests local repository evidence.</p>
+            <p class="help" id="request-objective">Review the repository request here before running retrieval.</p>
             <div class="plan" id="request-plan"></div>
           </article>
           <article class="card wide">
@@ -445,7 +455,7 @@
         <div class="grid">
           <article class="card two-thirds">
             <h2>Microsoft 365 Copilot Agent kit</h2>
-            <p class="help">Generate permanent Instructions and stable project knowledge for a dedicated M365 Agent. Do this once, then start each ticket with Brain's current handoff file.</p>
+            <p class="help">Generate Instructions and project knowledge for your M365 Agent. After upgrading Brain, regenerate the kit and replace the Agent's Instructions. Start each ticket with Brain's current handoff file.</p>
             <button class="button primary" id="generate-agent-kit">Generate setup kit</button>
             <div id="agent-paths" class="success" style="display:none"></div>
           </article>
@@ -465,7 +475,7 @@
         <div class="grid">
           <article class="card two-thirds">
             <h2>Performance and autotune</h2><p class="help">Public/synthetic measurements only. Tuning stays local and is consumed by the shared runtime; it does not upload code or model inputs.</p>
-            <div class="row"><div class="grow"><select id="performance-pack"><option value="">Select an installed verified pack</option></select></div><button class="button" id="benchmark-pack">Benchmark</button><button class="button secondary" id="autotune-pack">Autotune</button></div>
+            <div class="row form-actions"><div class="grow"><label for="performance-pack">Benchmark model pack</label><select id="performance-pack"><option value="">Select an installed verified pack</option></select></div><button class="button" id="benchmark-pack">Benchmark</button><button class="button secondary" id="autotune-pack">Autotune</button></div>
             <pre class="output" id="performance-output">Select a verified local model pack.</pre>
           </article>
           <article class="card one-third">
@@ -485,7 +495,7 @@
   <script>
     "use strict";
     var token = new URLSearchParams(location.search).get("token") || "";
-    var state = { status: null, preview: null, ticket: "", deliveries: {}, refreshJobId: null };
+    var state = { status: null, preview: null, ticket: "", deliveries: {}, refreshJobId: null, requestRevision: 0, retrieving: false, watchedJobs: new Map() };
     var titles = { overview: "Your workspace", brain: "Health & recovery", models: "Local model packs", ticket: "New investigation", request: "Continue with AI", review: "Review implementation", agent: "M365 Agent setup", advanced: "Advanced operations" };
     var theme = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
     try { theme = localStorage.getItem("brain-appearance") || theme; } catch (error) { /* storage is optional */ }
@@ -509,17 +519,21 @@
       options = options || {};
       options.headers = Object.assign({}, options.headers || {}, {"X-Brain-Token": token});
       if (options.body) options.headers["Content-Type"] = "application/json";
+      if (!options.method && typeof AbortSignal !== "undefined" && AbortSignal.timeout) options.signal = AbortSignal.timeout(15000);
       var response;
       var payload;
       try {
         response = await fetch(path, options);
         payload = await response.json();
       } catch (cause) {
-        throw new Error("Cannot reach the local Brain UI. The operation may still be running. Recheck status before retrying; closing a tab does not stop a job. If the server stopped, run brain ui again.");
+        var connectionError = new Error("Cannot reach the local Brain UI. The operation may still be running. Recheck status before retrying; closing a tab does not stop a job. If the server stopped, run brain ui again.");
+        connectionError.retryable = !response || response.ok || response.status >= 500;
+        throw connectionError;
       }
       if (!response.ok || !payload.ok) {
         var error = new Error(payload.error || "Local request failed");
         error.recovery = payload.recovery || null;
+        error.retryable = response.status >= 500;
         throw error;
       }
       return payload.data;
@@ -570,7 +584,7 @@
     }
     function renderRecovery(recovery, message) {
       document.getElementById("retry-atlas-refresh").hidden = !(recovery && recovery.action === "retry_refresh");
-      var target = document.getElementById(recovery && recovery.action === "continue_investigation" ? "request-message" : recovery && recovery.action === "safe_gc" ? "storage-recovery-message" : "recovery-message");
+      var target = document.getElementById(recovery && ["continue_investigation", "open_saved_context", "retry_checkpoint", "restore_checkpoint_request"].includes(recovery.action) ? "request-message" : recovery && recovery.action === "safe_gc" ? "storage-recovery-message" : "recovery-message");
       if (!target) return;
       if (!recovery) {
         if (message) target.innerHTML = '<div class="error">' + esc(message) + '</div>';
@@ -673,19 +687,30 @@
     function pause(milliseconds) { return new Promise(function (resolve) { setTimeout(resolve, milliseconds); }); }
     async function waitForJob(job, onProgress) {
       var current = job;
-      while (current.status === "pending" || current.status === "running") {
+      var failures = 0;
+      state.watchedJobs.set(job.id, job);
+      try {
+        while (current.status === "pending" || current.status === "running") {
+          setJob(current);
+          if (failures) document.getElementById("activity-summary").textContent = "Reconnecting to the running operation… If Brain stopped, run brain ui again.";
+          if (onProgress) await onProgress(current);
+          await pause(failures ? Math.min(5000, 350 * Math.pow(2, Math.min(failures, 4))) : 350);
+          try {
+            current = await api("/api/job?id=" + encodeURIComponent(current.id));
+            failures = 0;
+          } catch (error) {
+            if (!error.retryable) throw error;
+            failures += 1;
+          }
+        }
         setJob(current);
-        if (onProgress) await onProgress(current);
-        await pause(350);
-        current = await api("/api/job?id=" + encodeURIComponent(current.id));
-      }
-      setJob(current);
-      if (current.status !== "succeeded") {
-        var error = new Error(current.error || "Local operation failed");
-        error.recovery = current.recovery || null;
-        throw error;
-      }
-      return current.result || {};
+        if (current.status !== "succeeded") {
+          var error = new Error(current.error || "Local operation failed");
+          error.recovery = current.recovery || null;
+          throw error;
+        }
+        return current.result || {};
+      } finally { state.watchedJobs.delete(job.id); }
     }
     function resumeActiveRefresh(data) {
       var job = (data.jobs || []).find(function (item) {
@@ -707,6 +732,23 @@
         state.refreshJobId = null;
         buttons.forEach(function (button) { busy(button, false); });
         loadStatus().catch(report);
+      });
+    }
+    function resumeActiveJobs(data) {
+      (data.jobs || []).forEach(function (job) {
+        if (job.name === "refresh" || !["pending", "running"].includes(job.status) || state.watchedJobs.has(job.id)) return;
+        if (job.name === "retrieval" && !state.ticket) selectTicket(job.ticket);
+        waitForJob(job).then(async function (result) {
+          if (job.name === "retrieval") await finishRetrieval(result, job.ticket);
+          else {
+            if (job.name === "storage-recovery") renderGcResult(result);
+            showToast(job.name.replaceAll("-", " ") + " completed");
+          }
+        }).catch(report).finally(function () {
+          document.getElementById("run-request").disabled = !canRunRequest();
+          loadStatus().catch(report);
+        });
+        document.getElementById("run-request").disabled = !canRunRequest();
       });
     }
     async function runModelJob(action, pack, button) {
@@ -766,7 +808,7 @@
       renderStorage(data.retrieval && data.retrieval.storage);
       renderModels(brain.models || {official:[],installed:[]});
       var rows = data.repositories.map(function (repo) {
-        var healthy = repo.status === "current" && repo.indexed;
+        var healthy = ["current", "non-git", "non-git-snapshot"].includes(repo.status) && repo.indexed;
         var indexLabel = !repo.indexed ? '<span class="warn">Stale</span>' : (repo.structural ? '<span class="good">Structural</span>' : '<span>Lexical</span>');
         return "<tr><td><strong>" + esc(repo.name) + "</strong></td><td>" + esc(repo.path) + "</td><td><code>" + esc(repo.ref || "working tree") + "</code><br><span class=\"pill " + (healthy ? "current" : "problem") + "\">" + esc(repo.status) + "</span></td><td><code>" + esc(repo.sha || "unknown") + "</code></td><td>" + indexLabel + "</td></tr>";
       }).join("");
@@ -799,6 +841,8 @@
         }
       });
       document.getElementById("delete-session").disabled = !document.getElementById("session-select").value;
+      resumeActiveRefresh(data);
+      resumeActiveJobs(data);
       return data;
     }
     function renderBrain(brain) {
@@ -897,7 +941,7 @@
       target.innerHTML = [
         ["Pinned generation", cockpit.generation],
         ["Completed wave", String(cockpit.wave)],
-        ["Continuation", "More evidence can be requested on this ticket; each approved continuation runs one bounded wave."],
+        ["Continuation", "No fixed round limit; each new evidence request has its own bounded resource budget."],
         ["Anchors", anchors.length],
         ["Execution / integration steps", String(execution.length) + " / " + String(integration.length)],
         ["Hypotheses / blockers", String(hypotheses.length) + " / " + String(frontier.length)],
@@ -923,6 +967,12 @@
     function selectTicket(ticket) {
       if (state.ticket !== ticket) {
         state.ticket = ticket;
+        if (state.contextRecovery) {
+          state.contextRecovery = null;
+          document.getElementById("global-error").hidden = true;
+          document.getElementById("error-recovery").dataset.go = "brain";
+          document.getElementById("error-recovery").textContent = "Health & recovery";
+        }
         document.getElementById("request-target").value = "";
         document.getElementById("resume-notes").value = "";
         document.getElementById("checkpoint-continuation").hidden = true;
@@ -963,13 +1013,44 @@
       document.getElementById("global-error-message").textContent = error.message || String(error);
       document.getElementById("global-error").hidden = false;
       var paused = error.recovery && error.recovery.action === "continue_investigation";
-      document.getElementById("error-recovery").dataset.go = paused ? "request" : "brain";
-      document.getElementById("error-recovery").textContent = paused ? "Continue with AI" : "Health & recovery";
+      state.contextRecovery = error.recovery && ["open_saved_context", "retry_checkpoint", "restore_checkpoint_request"].includes(error.recovery.action) ? error.recovery : null;
+      document.getElementById("error-recovery").dataset.go = paused || state.contextRecovery ? "request" : "brain";
+      document.getElementById("error-recovery").textContent = state.contextRecovery ? state.contextRecovery.action_label || "Open saved evidence" : paused ? "Continue with AI" : "Health & recovery";
       if (error.recovery) {
-        setView(paused ? "request" : "brain");
+        setView(paused || state.contextRecovery ? "request" : "brain");
         renderRecovery(error.recovery, error.message || String(error));
       }
     }
+
+    document.getElementById("error-recovery").addEventListener("click", async function () {
+      var recovery = state.contextRecovery;
+      if (!recovery) return;
+      var button = document.getElementById("error-recovery");
+      busy(button, true, "Recovering…");
+      try {
+        selectTicket(recovery.ticket);
+        if (recovery.action === "restore_checkpoint_request") {
+          renderRecovery(recovery);
+          return;
+        }
+        if (recovery.action === "retry_checkpoint") {
+          if (await runRetrieval({ticket:recovery.ticket, retry_checkpoint:true})) {
+            state.preview = null;
+            document.getElementById("run-request").disabled = true;
+          }
+          return;
+        }
+        var data = await api("/api/artifact?ticket=" + encodeURIComponent(recovery.ticket) + "&name=" + encodeURIComponent(recovery.artifact));
+        if (state.ticket !== recovery.ticket) return;
+        setDelivery({current:1,total:1,content:data.content,path:data.name}, "view-request");
+        state.contextRecovery = null;
+        document.getElementById("global-error").hidden = true;
+        showToast("Saved evidence opened — copy it to your AI. No retrieval was repeated.");
+      } catch (error) { report(error); } finally {
+        busy(button, false);
+        if (state.contextRecovery) button.textContent = state.contextRecovery.action_label || "Open saved evidence";
+      }
+    });
 
     document.getElementById("refresh-button").addEventListener("click", async function () {
       busy(this, true, "Checking…");
@@ -1020,6 +1101,12 @@
     });
 
     document.getElementById("start-ticket").addEventListener("click", async function () {
+      var identifier = document.getElementById("ticket-id");
+      if (!identifier.value.trim()) {
+        identifier.focus();
+        showToast("Enter a ticket identifier before starting an investigation.");
+        return;
+      }
       var button = this; busy(button, true, "Preparing…");
       try {
         var body = {
@@ -1039,13 +1126,16 @@
       } catch (error) { report(error); } finally { busy(button, false); }
     });
 
+    function canRunRequest() {
+      var plan = state.preview;
+      return !!(plan && plan.valid && plan.kind !== "conversation" && !plan.duplicate_of && !state.retrieving &&
+        !Array.from(state.watchedJobs.values()).some(function (job) { return job.name === "retrieval" && job.ticket === state.ticket; }));
+    }
     function renderPreview(plan) {
       state.preview = plan.valid ? plan : null;
       var run = document.getElementById("run-request");
-      var actionable = plan.valid && plan.kind !== "conversation" && !plan.duplicate_of;
-      run.disabled = !actionable;
-      var continuation = plan.continuation || {};
-      run.textContent = plan.kind === "final_solution" ? "Archive final plan" : continuation.required ? "Continue gathering evidence" : "Run retrieval";
+      run.disabled = !canRunRequest();
+      run.textContent = plan.kind === "final_solution" ? "Archive final plan" : "Run retrieval";
       run.dataset.label = run.textContent;
       document.getElementById("operation-count").textContent = plan.valid ? plan.operation_count : "!";
       document.getElementById("request-objective").textContent = plan.valid ? (plan.objective || plan.label) : plan.error;
@@ -1057,15 +1147,11 @@
         return;
       }
       if (plan.kind === "conversation") {
-        message.innerHTML = '<div class="success"><strong>Reply directly in the AI chat.</strong><br>' + esc(plan.message) + '</div>';
+        message.innerHTML = '<div class="success"><strong>No executable request in this reply.</strong><br>If this is a repository question, choose Create request from text and review it here. For business or runtime questions, reply directly in the AI chat.</div>';
       } else if (plan.kind === "final_solution") {
         message.innerHTML = '<div class="success"><strong>Ready to implement.</strong><br>' + esc(plan.message) + '</div>';
       } else if (plan.duplicate_of) {
         message.innerHTML = '<div class="error">This retrieval already ran as request ' + String(plan.duplicate_of).padStart(3, "0") + '. Clear the old reply and paste only the AI’s latest complete response. If the AI asked you a human question, answer it directly in that chat; Brain should not create another request.</div>';
-      } else if (continuation.required) {
-        message.innerHTML = '<div class="success"><strong>More evidence can be gathered on this ticket.</strong><br>' + esc(continuation.reason) +
-          ' Review this request, then approve wave ' + esc(continuation.next_wave) + ' on pinned generation ' + esc(continuation.generation) +
-          '. This permits one bounded wave, not an automatic loop. Existing evidence is retained; no refresh or reset is needed.</div>';
       } else {
         message.innerHTML = '<div class="success">Valid repository request. Review exactly what Brain will retrieve, then run it.</div>';
       }
@@ -1084,32 +1170,39 @@
       }
       catch (error) { report(error); } finally { busy(button, false); }
     });
-    document.getElementById("request-text").addEventListener("input", function () { state.preview = null; document.getElementById("run-request").disabled = true; });
+    document.getElementById("request-text").addEventListener("input", function () { state.requestRevision += 1; state.preview = null; document.getElementById("run-request").disabled = true; });
+    document.getElementById("text-request").addEventListener("click", async function () {
+      var button = this;
+      var ticket = document.getElementById("request-ticket").value;
+      var text = document.getElementById("request-text").value;
+      if (!ticket || !text.trim()) { showToast("Select a ticket and enter the repository question first."); return; }
+      busy(button, true, "Preparing request…");
+      try {
+        var detail = await api("/api/session?ticket=" + encodeURIComponent(ticket));
+        var request = {version:detail.atlas_generation ? 5 : 3, objective:text.trim()};
+        if (request.version === 5) {
+          request.mode = "root_cause";
+          if (detail.context_id) request.base_context_id = detail.context_id;
+        }
+        var envelope = {};
+        envelope[request.version === 5 ? "INVESTIGATION_REQUEST" : "CONTEXT_REQUEST"] = request;
+        var encoded = JSON.stringify(envelope, null, 2);
+        var preview = await api("/api/preview", {method:"POST",body:JSON.stringify({ticket:ticket,text:encoded})});
+        if (document.getElementById("request-ticket").value !== ticket || document.getElementById("request-text").value !== text) return;
+        if (preview.valid) {
+          document.getElementById("request-text").value = encoded;
+          state.requestRevision += 1;
+        }
+        renderPreview(preview);
+      } catch (error) { report(error); } finally { busy(button, false); }
+    });
     document.getElementById("auto-refresh-mode").addEventListener("change", async function () {
       try {
         await api("/api/auto-refresh", {method:"POST",body:JSON.stringify({mode:this.value})});
         await loadStatus();
       } catch (error) { report(error); }
     });
-    document.getElementById("run-request").addEventListener("click", async function () {
-      if (!state.preview) return;
-      var continuation = state.preview.continuation || {};
-      var approveContinuation = state.preview.kind === "context_request" && continuation.required === true;
-      if (approveContinuation && !window.confirm("Continue gathering evidence for " + document.getElementById("request-ticket").value +
-          "? Approve wave " + continuation.next_wave + " on pinned generation " + continuation.generation +
-          ", up to " + continuation.physical_operations_per_wave + " backend operations and " + continuation.context_bytes_per_wave +
-          " context bytes. Existing evidence stays intact. This does not approve another wave or a refresh.")) return;
-      var button = this; busy(button, true, state.preview.kind === "final_solution" ? "Archiving…" : "Retrieving…");
-      var completed = false;
-      try {
-        var body = {
-          ticket: document.getElementById("request-ticket").value,
-          text: document.getElementById("request-text").value,
-          include_diff: document.getElementById("request-diff").checked,
-          continue_investigation: approveContinuation,
-          continuation_token: approveContinuation ? continuation.token : null,
-          target: document.getElementById("request-target").value
-        };
+    async function runRetrieval(body) {
         state.checkpointContinuation = null;
         document.getElementById("checkpoint-continuation").hidden = true;
         var job = await api("/api/retrieval", {method:"POST",body:JSON.stringify(body)});
@@ -1117,29 +1210,61 @@
         var data = await waitForJob(job, async function (current) {
           var checkpoint = current.progress && current.progress.checkpoint_artifact || "";
           if (!checkpoint || checkpoint === shownCheckpoint || state.ticket !== body.ticket) return;
-          shownCheckpoint = checkpoint;
-          var early = await api("/api/artifact?ticket=" + encodeURIComponent(body.ticket) + "&name=" + encodeURIComponent(checkpoint));
+          var early;
+          try {
+            early = await api("/api/artifact?ticket=" + encodeURIComponent(body.ticket) + "&name=" + encodeURIComponent(checkpoint));
+          } catch (error) {
+            // An optional early delivery must not detach the running job.
+            return;
+          }
           if (state.ticket !== body.ticket) return;
+          shownCheckpoint = checkpoint;
           setDelivery({current:1,total:1,content:early.content,path:checkpoint}, "view-request");
           showToast("First useful checkpoint ready — you can copy it while the investigation continues");
         });
-        if (state.ticket !== body.ticket) {
+        return finishRetrieval(data, body.ticket);
+    }
+    async function finishRetrieval(data, ticket) {
+        if (state.ticket !== ticket) {
           await loadStatus();
-          showToast(body.ticket + " completed. Open its history to retrieve the result.");
-          return;
+          showToast(ticket + " completed. Open its history to retrieve the result.");
+          return false;
         }
         if (data.delivery) setDelivery(data.delivery, "view-request");
         if (data.progressive_delivery && data.progressive_delivery.continuation_artifact) {
-          state.checkpointContinuation = {ticket:body.ticket, name:data.progressive_delivery.continuation_artifact};
+          state.checkpointContinuation = {ticket:ticket, name:data.progressive_delivery.continuation_artifact};
           document.getElementById("checkpoint-continuation").hidden = false;
         }
         if (data.session) { renderRetrieval(data.session.retrieval); renderCockpit(data.session.cockpit); }
         await loadStatus();
-        completed = true;
+        if (state.ticket !== ticket) {
+          showToast(ticket + " completed. Open its history to retrieve the result.");
+          return false;
+        }
+        state.contextRecovery = null;
+        document.getElementById("global-error").hidden = true;
+        document.getElementById("request-message").textContent = "";
         showToast(data.kind === "final_solution" ? "Final plan archived — ready to implement" : "Evidence ready — return it to the same AI chat");
+        return true;
+    }
+    document.getElementById("run-request").addEventListener("click", async function () {
+      if (!canRunRequest()) return;
+      var ticket = document.getElementById("request-ticket").value;
+      var revision = state.requestRevision;
+      state.retrieving = true;
+      var button = this; busy(button, true, state.preview.kind === "final_solution" ? "Archiving…" : "Retrieving…");
+      var completed = false;
+      try {
+        completed = await runRetrieval({
+          ticket: ticket,
+          text: document.getElementById("request-text").value,
+          include_diff: document.getElementById("request-diff").checked,
+          target: document.getElementById("request-target").value
+        });
       } catch (error) { report(error); } finally {
+        state.retrieving = false;
         busy(button, false);
-        if (completed) {
+        if (completed && state.ticket === ticket && state.requestRevision === revision) {
           document.getElementById("request-text").value = "";
           state.preview = null;
           button.disabled = true;
@@ -1147,6 +1272,7 @@
           document.getElementById("request-objective").textContent = "Paste the AI’s next complete reply.";
           document.getElementById("request-plan").innerHTML = "";
         }
+        button.disabled = !canRunRequest();
       }
     });
 
@@ -1205,6 +1331,7 @@
       document.getElementById("ticket-location").textContent = "Ticket files: " + detail.session_path + " · AI handoff folder: " + detail.handoff_path;
       renderRetrieval(detail.retrieval);
       renderCockpit(detail.cockpit);
+      if (detail.checkpoint_recovery) report({message:detail.checkpoint_recovery.message, recovery:detail.checkpoint_recovery});
       setDelivery({current:0,total:0,content:"Select a request or context artifact from the history above."}, "view-overview");
       var list = document.getElementById("artifact-list");
       list.innerHTML = detail.artifacts.map(function (artifact) {
@@ -1286,7 +1413,6 @@
       document.getElementById("project-name").textContent = "Missing local session token. Reopen the URL printed by brain ui.";
     } else {
       loadStatus().then(function (data) {
-        resumeActiveRefresh(data);
         if (state.ticket) openSession().catch(report);
       }).catch(report);
     }

@@ -2,6 +2,28 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.26] - 2026-09-14
+
+- Accept complete AI replies containing bounded JSON/YAML request documents,
+  including surrounding explanation, code fences and BOMs. Prepare a validated
+  request from plain text when Copilot omits the structured request.
+- Continue investigations without a lifetime round limit or an extra approval
+  flag, preserving per-request budgets, duplicate checks and ticket generation
+  pins. Recover saved requests and evidence after interrupted delivery.
+- Reconnect to running UI jobs after polling failures or page reloads, preserve
+  drafts edited during retrieval, and prevent duplicate submission. Retry failed
+  automatic refresh with backoff measured from the actual failure.
+- Improve exact method-body delivery, explicit symbol and relationship requests,
+  Python import-aware navigation, and HTTP/configuration/event source navigation.
+  Reuse bounded parsing, anchor resolution and source reads while preserving
+  incomplete-result reporting, ambiguity and generation isolation.
+- Fix narrow-screen layouts, long paths/results, form labels and readiness
+  reporting for indexed non-Git snapshots.
+- Regenerate the M365 Agent Kit after upgrading to update existing instructions.
+  Refresh Brain to build updated relationship projections for new investigations;
+  old tickets retain their original generations and unchanged Semantic cards can
+  reuse their embeddings. No model reinstall or workspace reset is required.
+
 ## [1.0.25] - 2026-09-13
 
 - Retrieve actual test source for protocol-v5 `test_surface` and explicit test

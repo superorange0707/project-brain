@@ -974,7 +974,7 @@ def collect_generation_components(
 
     relationships_path = settings.state_dir / "relationships.json"
     relationships = _load_json(settings, relationships_path)
-    from .relations import MAX_RELATIONSHIP_ARTIFACT_BYTES, valid_relationship_payload
+    from .relations import MAX_RELATIONSHIP_ARTIFACT_BYTES, RELATIONSHIP_EXTRACTOR_VERSION, valid_relationship_payload
 
     try:
         relationships_file_ready = (
@@ -984,7 +984,9 @@ def collect_generation_components(
         )
     except OSError:
         relationships_file_ready = False
-    relationships_ready = relationships_file_ready and valid_relationship_payload(relationships, snapshots)
+    relationships_ready = relationships_file_ready and valid_relationship_payload(
+        relationships, snapshots, expected_extractor_version=RELATIONSHIP_EXTRACTOR_VERSION,
+    )
     components["relationships"] = {
         "schema_version": str(relationships.get("version") or 1),
         "status": "ready" if relationships_ready else "unavailable",

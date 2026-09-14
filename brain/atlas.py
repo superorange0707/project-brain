@@ -48,6 +48,12 @@ MAX_CHANGE_ROUTING_TERMS = 64
 MAX_ROUTING_QUERY_TERMS = 64
 MAX_ROUTING_EXPLICIT_REPOS = 128
 MAX_ROUTING_CARD_CANDIDATES = 2_000
+_EXACT_SOURCE_FRAMING = frozenset({
+    "a", "an", "of", "and", "the", "read", "show", "inspect", "trace", "get", "fetch", "open", "retrieve",
+    "full", "complete", "exact", "source", "code", "implementation", "implementations",
+    "method", "methods", "function", "functions", "body", "bodies", "again", "for",
+    ".", ",", ":", ";", "'", '"', "`", "(", ")",
+})
 MAX_CHANGE_COMMITS_PER_REPO = 100
 MAX_CHANGE_PATHS_PER_COMMIT = 500
 MAX_CHANGE_ROWS_PER_REPO = 5_000
@@ -458,6 +464,15 @@ def _edge(
 
 
 def _file_intelligence(repo: str, path: str, blob: str, content: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    from .investigation import source_verification_scope
+
+    # The hierarchy and Spring extractor consume the same masked source views.
+    # Reuse the bounded pure-transform scope, then release it after this file.
+    with source_verification_scope():
+        return _parse_file_intelligence(repo, path, blob, content)
+
+
+def _parse_file_intelligence(repo: str, path: str, blob: str, content: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     from .investigation import MAX_REFRESH_FILE_BYTES, _java_file_intelligence, _mask_java_comments
 
     encoded = content.encode("utf-8")
@@ -1064,9 +1079,9 @@ def _integration_edges(
         ))
     except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
         return []
-    from .relations import valid_relationship_payload
+    from .relations import RELATIONSHIP_EXTRACTOR_VERSION, valid_relationship_payload
 
-    if not valid_relationship_payload(state, snapshots):
+    if not valid_relationship_payload(state, snapshots, expected_extractor_version=RELATIONSHIP_EXTRACTOR_VERSION):
         return []
     by_path: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for entity in entities:
@@ -1289,6 +1304,7 @@ def _valid_generation_edges(
 def symbol_call_edges(
     settings: Settings, generation: AtlasGenerationRef | None,
     locations: Iterable[tuple[str, str, int]], name: str,
+    *, python_sources: dict[tuple[str, str], str] | None = None, load_python_sources: Any = None,
 ) -> dict[str, Any] | None:
     """Read bounded direct callees from the existing pinned, validated graph."""
     if generation is None or any(
@@ -1345,7 +1361,27 @@ def symbol_call_edges(
             per_source[source] = per_source.get(source, 0) + 1
             if per_source[source] <= 16:
                 bounded_edges.append(edge)
-        return {"edges": bounded_edges, "targets": targets, "truncated": len(bounded_edges) < len(edges)}
+        from .investigation import _python_bound_targets, _python_incoming_rows
+        python_edges = {item['edge_id']: item for item in bounded_edges if item['path'].lower().endswith('.py')}
+        sources = dict(python_sources or {})
+        if python_edges and load_python_sources is not None:
+            sources.update(load_python_sources(list(dict.fromkeys((item['repo'], item['path'])
+                                                                  for item in python_edges.values()))) or {})
+        python_targets = _python_bound_targets(connection, generation, python_edges, entities, sources,
+                                                load_python_sources) if python_edges else {}
+        callers, incomplete = {}, False
+        if sources and any(item['path'].lower().endswith('.py') for item in entities.values()):
+            rows, incomplete = _python_incoming_rows(connection, generation, list(entities), sources, deadline)
+            incoming = _valid_generation_edges(connection, generation.generation, (str(row[0]) for row in rows))
+            if {str(row[0]) for row in rows} != set(incoming):
+                return None
+            owners = _valid_generation_entities(connection, generation.generation,
+                                                (item['source_id'] for item in incoming.values()))
+            bound = _python_bound_targets(connection, generation, incoming, owners, sources, load_python_sources)
+            callers = {edge['source_id']: owners[edge['source_id']] for key, edge in incoming.items()
+                       if key in bound and bound[key]['entity_id'] in entities}
+        return {"edges": bounded_edges, "targets": targets, "python_targets": python_targets,
+                "callers": list(callers.values()), "truncated": len(bounded_edges) < len(edges) or incomplete}
     except (sqlite3.Error, OSError):
         return None
     finally:
@@ -1423,6 +1459,13 @@ def _reused_generation_intelligence(
         "path": row[5], "line_start": row[6], "line_end": row[7], "blob_sha": row[8], "extractor": row[9],
         "extractor_version": row[10], "confidence": row[11], "metadata": _json_object(row[12]),
         }
+        # Relationship projections are rebuilt below from this refresh's sealed
+        # artifact. Retaining these parent edges would resurrect deleted links.
+        # Match provenance, not edge type: source parsers also emit endpoint edges.
+        if set(item["metadata"]) in (
+            {"key", "target_repo"}, {"key", "source_repo"}, {"key", "caller_repo"},
+        ):
+            continue
         buckets((str(row[4]), str(row[5]), str(row[8])))[2].append(item)
     return reused
 
@@ -1967,6 +2010,7 @@ def _valid_cached_route(connection: sqlite3.Connection, generation: int, value: 
             or str(item.get("repo")) != str(target["repo"])
             or str(item.get("path")) != str(target["path"])
             or not graph_values_match
+            or row['edge_type'] == 'CALLS' and PurePosixPath(row['path']).suffix.lower() == '.py'
         ):
             return False, operations
     return True, operations
@@ -2087,18 +2131,42 @@ def route(
     except OSError:
         edition = "core"
     from .investigation import _qualified_symbol_queries, resolve_runtime_anchors
-
     qualified_queries = _qualified_symbol_queries(request.get("anchors") or [])
-    focused_symbols = bool(qualified_queries) and all(
-        str(item.get("query") or "") in qualified_queries for item in request.get("searches") or []
-    ) and not any(request.get(key) for key in ("paths", "symbols", "history", "resolve", "runtime_facts", "hypotheses")) and all(
-        isinstance(item, dict) and item.get("kind") == "symbol" and item.get("value") in qualified_queries
-        for item in request.get("anchors") or []
-    )
     resolved = resolve_runtime_anchors(
         settings, generation, [{"kind": "symbol", "value": value} for value in qualified_queries],
         use_cache="generation_cache" not in ablation,
     ) if qualified_queries and "anchors" not in ablation else {}
+    # An opaque entity ID and its generation-validated name denote the same
+    # source. Strip only whole identity aliases, never split identifier words:
+    # e.g. read _retry_timeout is framing; investigate timeout is discovery.
+    aliases = {
+        alias for item in resolved.get("candidates") or []
+        if resolved.get("status") == "ready" and item.get("method") == "entity_name"
+        and item.get("entity_id") in qualified_queries
+        for alias in (str(item["value"]), str(item["value"]).rsplit(":", 1)[-1]) if alias
+    }
+    framed_objective = objective
+    if aliases:
+        framed_objective = re.sub(
+            r"(?<![\w$])(?:" + "|".join(re.escape(value) for value in sorted(aliases, key=lambda value: (-len(value), value)))
+            + r")(?![\w$])", "", objective, flags=re.I,
+        )
+    from .retrieval.planner import objective_terms
+    identity_searches = set(qualified_queries) | aliases | {
+        term for alias in aliases for term in objective_terms(alias, limit=8, allow_prose=False)
+    }
+    qualified_parts = set(re.findall(r"\w+|[^\w\s]", " ".join(qualified_queries).casefold()))
+    objective_discovery = bool(set(re.findall(r"\w+|[^\w\s]", framed_objective.casefold())) - qualified_parts - _EXACT_SOURCE_FRAMING)
+    # A qualified anchor removes incidental prose *lexical* work, not the
+    # objective's card/Semantic discovery. Only wholly source-read framing can
+    # enable the shortcut; short, numeric and Unicode business clues must survive
+    # even when the indexed routing tokenizer cannot represent those terms.
+    focused_symbols = bool(qualified_queries) and not objective_discovery and all(
+        str(item.get("query") or "") in identity_searches for item in request.get("searches") or []
+    ) and not any(request.get(key) for key in ("paths", "symbols", "history", "resolve", "runtime_facts", "hypotheses")) and all(
+        isinstance(item, dict) and item.get("kind") == "symbol" and item.get("value") in qualified_queries
+        for item in request.get("anchors") or []
+    )
     qualified_ids = [str(item["entity_id"]) for item in resolved.get("candidates") or [] if item.get("entity_id")]
     connection = connect(settings)
     now = datetime.now(UTC).isoformat()
@@ -2397,6 +2465,10 @@ def route(
                 source = valid_graph_entities.get(str(source_id))
                 target = valid_graph_entities.get(str(target_id))
                 if edge is None or source is None or target is None:
+                    continue
+                if edge['edge_type'] == 'CALLS' and PurePosixPath(edge['path']).suffix.lower() == '.py':
+                    # Metadata-only routing cannot prove Python lexical binding.
+                    # Explicit flow lookup verifies it from pinned source first.
                     continue
                 if (
                     str(edge_type) != str(edge["edge_type"]) or float(confidence) != float(edge["confidence"])

@@ -26,10 +26,13 @@ from .platforms import atomic_managed_text_write, read_managed_text
 from .agent import archive_final_solution, create_m365_agent_kit, response_preview
 from .core import (
     BrainError,
+    ContextDeliveryError,
+    CheckpointRetryRequired,
     InvestigationContinuationRequired,
     MAX_START_TICKET_BYTES,
     Settings,
     create_context,
+    checkpoint_retry_request,
     create_feedback,
     deliver,
     delivery_target,
@@ -47,7 +50,7 @@ from .core import (
     start_session,
 )
 from .experience import load_experience_index
-from .locks import WorkspaceOperationBusy, ticket_exclusive
+from .locks import WorkspaceOperationBusy, retrieval_session, ticket_exclusive
 from .ops import StateCapacityError, progress_event
 from .atlas import AtlasCapacityError
 
@@ -89,14 +92,29 @@ def _continuation_options(body: dict[str, Any]) -> dict[str, Any]:
 
 def _recovery(error: Exception) -> dict[str, str] | None:
     """Offer existing safe operations, never infer a destructive reset."""
+    if isinstance(error, ContextDeliveryError):
+        return {
+            "code": "context_delivery_failed", "title": "Evidence saved — AI delivery failed",
+            "message": str(error), "action": "open_saved_context", "action_label": "Open saved evidence",
+            "ticket": error.ticket, "artifact": error.artifact,
+        }
+    if isinstance(error, CheckpointRetryRequired):
+        return {
+            "code": "checkpoint_artifact_unavailable" if error.checkpoint_problem else "checkpoint_continuation_failed",
+            "title": "Early checkpoint preserved",
+            "message": str(error), "ticket": error.ticket,
+            "action": "retry_checkpoint" if error.retry_available else "restore_checkpoint_request",
+            "action_label": ("Review checkpoint recovery" if error.checkpoint_problem
+                             else "Retry saved request" if error.retry_available else "Paste original request"),
+        }
     if isinstance(error, StateCapacityError):
         return error.recovery()
     if isinstance(error, AtlasCapacityError):
         return error.recovery()
     if isinstance(error, InvestigationContinuationRequired):
         return {
-            "code": "investigation_paused", "title": "Investigation paused — more evidence is allowed",
-            "message": "Your evidence and original generation are preserved. In Continue with AI, classify the new focused request, then choose Continue gathering evidence to approve one bounded wave. Do not refresh, reset or create another ticket.",
+            "code": "investigation_paused", "title": "Request sequence needs updating",
+            "message": "Your evidence and original generation are preserved. In Continue with AI, classify the latest focused request again and use its next wave number, or omit wave. No extra round approval, refresh, reset or new ticket is needed.",
             "action": "continue_investigation", "action_label": "Continue with AI",
         }
     if isinstance(error, PermissionError):
@@ -232,9 +250,9 @@ def project_status(
         fresh_index = bool(sha and indexed_sha == sha)
         graph_sha = str((graphs.get(repo.name) or {}).get("sha") or "") if isinstance(graphs, dict) else ""
         structural = settings.graph_enabled and bool(graph_sha and graph_sha == (repo.source_sha or "working-tree"))
-        if status in {"current", "non-git"} and (fresh_index or status == "non-git"):
+        if status in {"current", "non-git", "non-git-snapshot"} and (fresh_index or status == "non-git"):
             current += 1
-        if source.get("warning") or status in {"fetch-failed", "working-tree-fallback"} or not fresh_index:
+        if (source.get("warning") and status != "non-git-snapshot") or status in {"fetch-failed", "working-tree-fallback"} or not fresh_index:
             warnings += 1
         repositories.append({
             "name": repo.name,
@@ -317,6 +335,17 @@ def _delivery(settings: Settings, ticket: str, part: int | None = None) -> dict[
             "bytes": delivery.get("bytes", len(content.encode("utf-8"))), "usage": state.get("delivery_usage") or {}}
 
 
+def _checkpoint_recovery(settings: Settings, ticket: str, state: dict[str, Any]) -> dict[str, str] | None:
+    checkpoint = state.get("progressive_checkpoint") or {}
+    if checkpoint.get("status") != "published" or checkpoint.get("continuation_status") not in {"pending", "failed"}:
+        return None
+    try:
+        checkpoint_retry_request(settings, ticket)
+    except CheckpointRetryRequired as exc:
+        return _recovery(exc)
+    return _recovery(CheckpointRetryRequired(ticket, retry_available=True))
+
+
 def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
     directory = session_dir(settings, ticket)
     if not directory.is_dir():
@@ -347,6 +376,7 @@ def _session_detail(settings: Settings, ticket: str) -> dict[str, Any]:
         "coverage_map": state.get("coverage_map") or {},
         "prefetch": state.get("prefetch") or {},
         "progressive_checkpoint": state.get("progressive_checkpoint") or {},
+        "checkpoint_recovery": _checkpoint_recovery(settings, ticket, state),
         "cockpit": state.get("investigation_runtime") or {},
         "artifacts": _session_artifacts(settings, ticket),
         "delivery": _delivery(settings, ticket),
@@ -751,8 +781,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(value, ensure_ascii=False).encode("utf-8")
-        self._headers(status, "application/json; charset=utf-8", len(data))
-        self.wfile.write(data)
+        try:
+            self._headers(status, "application/json; charset=utf-8", len(data))
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Losing the browser must not mark already committed work as failed.
+            self.close_connection = True
 
     def _error(self, exc: Exception, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
         payload: dict[str, Any] = {"ok": False, "error": str(exc)}
@@ -979,6 +1013,33 @@ class _Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _retrieval_job(settings: Settings, body: dict[str, Any], progress: Any) -> dict[str, Any]:
+        ticket = str(body.get("ticket") or "").strip()
+        if type(body.get("retry_checkpoint", False)) is not bool:
+            raise BrainError("retry_checkpoint must be a boolean user action")
+        # Saved-request validation and execution share the normal cross-process
+        # ticket lock. The nested create_context lock is intentionally reentrant.
+        with retrieval_session(settings, ticket):
+            if body.get("retry_checkpoint"):
+                text, include_diff = checkpoint_retry_request(settings, ticket)
+                body = {"ticket": ticket, "text": text, "include_diff": include_diff}
+            try:
+                return _Handler._execute_retrieval(settings, body, progress)
+            except (CheckpointRetryRequired, ContextDeliveryError):
+                raise
+            except Exception as exc:
+                try:
+                    recovery = _checkpoint_recovery(settings, ticket, session_state(settings, ticket))
+                except (BrainError, OSError):
+                    recovery = None
+                if recovery is not None:
+                    raise CheckpointRetryRequired(
+                        ticket, recovery["action"] == "retry_checkpoint",
+                        checkpoint_problem=recovery["code"] == "checkpoint_artifact_unavailable",
+                    ) from exc
+                raise
+
+    @staticmethod
+    def _execute_retrieval(settings: Settings, body: dict[str, Any], progress: Any) -> dict[str, Any]:
         ticket = str(body.get("ticket") or "").strip()
         text = str(body.get("text") or "")
         preview = response_preview(text, settings, ticket)

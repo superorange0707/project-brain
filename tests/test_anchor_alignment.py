@@ -71,6 +71,161 @@ class AnchorAlignmentTests(unittest.TestCase):
                                                        [{"kind": "symbol", "value": "handlePayment"}])
         self.assertTrue(any(item["entity_id"] and item["line"] == 2 for item in result["candidates"]))
 
+    def test_v5_explicit_callers_reach_inbound_source_on_the_ticket_generation(self):
+        source = (
+            "package com.example;\nclass Payments {\n  void validatePayment() {}\n"
+            + "\n" * 220 + "  void oldCaller() { validatePayment(); }\n}\n"
+        )
+        self.path.write_text(source, encoding="utf-8")
+        (self.root / "repo/Decoy.java").write_text(
+            "package com.other;\nclass Payments { void validatePayment() {} }\n", encoding="utf-8",
+        )
+        core.snapshot_indexes(self.settings)
+        core.start_session(self.settings, "CALLERS-A", "Find the requested callers")
+        request = {"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "flow_trace", "objective": "com.example.Payments.validatePayment",
+            "anchors": [{"kind": "symbol", "value": "com.example.Payments.validatePayment"}],
+            "required": ["callers"],
+        }}
+        parsed = core.parse_context_request(json.dumps(request))
+        from brain.retrieval.planner import compile_request
+        self.assertTrue(any(op.kind == "symbol" and "callers" in op.includes for op in compile_request(parsed).operations))
+        first, _, _ = core.create_context(self.settings, "CALLERS-A", json.dumps(request))
+        self.assertIn("void oldCaller()", first)
+        self.assertNotIn("package com.other", first)
+        runtime = core.session_state(self.settings, "CALLERS-A")["investigation_runtime"]
+        self.assertTrue(any(step["edge_type"] == "CALLS" and step["state"] == "verified"
+                            and step["line"] > 200 for step in runtime["execution_flow"]["steps"]))
+        self.path.write_text(source.replace("oldCaller", "newCaller"), encoding="utf-8")
+        core.snapshot_indexes(self.settings)
+        core.start_session(self.settings, "CALLERS-B", "Find the requested callers")
+        request["INVESTIGATION_REQUEST"]["objective"] += " again"
+        old, _, _ = core.create_context(self.settings, "CALLERS-A", json.dumps(request))
+        new, _, _ = core.create_context(self.settings, "CALLERS-B", json.dumps(request))
+        self.assertIn("void oldCaller()", old)
+        self.assertNotIn("void newCaller()", old)
+        self.assertIn("void newCaller()", new)
+        self.assertNotIn("void oldCaller()", new)
+
+    def test_v5_explicit_implementations_use_inbound_typed_edges(self):
+        self.path.write_text("package com.example;\ninterface Payments {}\n", encoding="utf-8")
+        (self.root / "repo/CardPayments.java").write_text(
+            "package com.example;\nclass CardPayments implements Payments {}\n", encoding="utf-8",
+        )
+        core.snapshot_indexes(self.settings)
+        core.start_session(self.settings, "IMPLEMENTATIONS", "Find implementations")
+        request = {"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "implementation_plan", "objective": "com.example.Payments",
+            "anchors": [{"kind": "symbol", "value": "com.example.Payments"}],
+            "required": ["implementations"],
+        }}
+        content, _, _ = core.create_context(self.settings, "IMPLEMENTATIONS", json.dumps(request))
+        self.assertIn("class CardPayments implements Payments", content)
+        runtime = core.session_state(self.settings, "IMPLEMENTATIONS")["investigation_runtime"]
+        self.assertTrue(any(step["edge_type"] == "IMPLEMENTS" and step["state"] == "verified"
+                            for step in runtime["execution_flow"]["steps"]), runtime["execution_flow"])
+        self.assertTrue(any(step["edge_type"] == "IMPLEMENTS" and step["state"] == "candidate"
+                            for step in runtime["execution_flow"]["steps"]), "unresolved type leaves are not verified")
+
+    def test_v5_relations_reject_ambiguous_symbols_and_corrupt_pinned_edges(self):
+        from brain.retrieval.planner import compile_request
+
+        self.path.write_text("class Payments {\n void validate() {}\n void caller() { validate(); }\n}\n", encoding="utf-8")
+        (self.root / "repo/Other.java").write_text("class Other {\n void validate() {}\n void caller() { validate(); }\n}\n", encoding="utf-8")
+        core.snapshot_indexes(self.settings)
+        generation = current_generation_ref(self.settings)
+        pinned = replace(self.settings, atlas_generation=generation, atlas_generation_mode="pinned")
+        body = {"version": 5, "mode": "flow_trace", "objective": "validate",
+                "anchors": [{"kind": "symbol", "value": "validate"}], "required": ["caller"]}
+        request = core.parse_context_request(json.dumps({"INVESTIGATION_REQUEST": body}))
+        bundle = core.retrieve_context(pinned, request)
+        self.assertTrue(any("ambiguous" in value for value in bundle.unresolved), bundle.unresolved)
+        self.assertIn("symbol_relation", bundle.trace["backend_ms"])
+        self.assertFalse(any("requested symbol relationship" in item.kind for item in bundle.evidence))
+        without_intent = core.parse_context_request(json.dumps({"INVESTIGATION_REQUEST": {**body, "required": []}}))
+        self.assertFalse(any(op.kind == "symbol" for op in compile_request(without_intent).operations))
+        body.update(objective="Payments.validate", anchors=[{"kind": "symbol", "value": "Payments.validate"}])
+        request = core.parse_context_request(json.dumps({"INVESTIGATION_REQUEST": body}))
+        healthy = core.retrieve_context(pinned, request)
+        self.assertTrue(any("requested symbol relationship" in item.kind for item in healthy.evidence))
+        connection = investigation.connect(self.settings)
+        try:
+            connection.execute("UPDATE atlas_edges SET confidence=.123 WHERE edge_type='CALLS'")
+            connection.commit()
+        finally:
+            connection.close()
+        corrupted = core.retrieve_context(pinned, request)
+        self.assertTrue(any("content identity" in value for value in corrupted.unresolved), corrupted.unresolved)
+        self.assertFalse(any("requested symbol relationship" in item.kind for item in corrupted.evidence))
+        self.assertIn("symbol_relation", corrupted.trace["backend_ms"])
+
+    def test_v5_relation_batch_preserves_each_independently_qualified_symbol(self):
+        self.path.write_text("package com.example;\n" + self.source, encoding="utf-8")
+        core.snapshot_indexes(self.settings)
+        core.start_session(self.settings, "RELATION-BATCH", "Trace two known methods together")
+        request = {"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "flow_trace", "objective": "Trace the requested relationships",
+            "required": ["callers", "callees"], "anchors": [
+                {"kind": "symbol", "value": "com.example.Payments.validatePayment"},
+                {"kind": "symbol", "value": "com.example.Payments.checkAccount"},
+            ],
+        }}
+        core.create_context(self.settings, "RELATION-BATCH", json.dumps(request))
+        runtime = core.session_state(self.settings, "RELATION-BATCH")["investigation_runtime"]
+        flow = runtime["execution_flow"]
+        self.assertEqual("ready", flow["status"], flow)
+        self.assertEqual({"validatePayment", "checkAccount"}, {step["target"] for step in flow["steps"]})
+        self.assertTrue(all(step["state"] == "verified" for step in flow["steps"]))
+        self.assertLessEqual(runtime["bounds"]["database_operations"], investigation.MAX_RUNTIME_DB_OPERATIONS)
+
+    def test_incoming_and_outgoing_flow_keeps_direction_and_bounded_branching(self):
+        source = "class Payments {\n void target() { sink(); }\n void sink() {}\n" + "".join(
+            f" void caller{i}() {{ target(); }}\n" for i in range(100)
+        ) + "}\n"
+        self.path.write_text(source, encoding="utf-8")
+        core.snapshot_indexes(self.settings)
+        generation = current_generation_ref(self.settings)
+        resolved = investigation.resolve_runtime_anchors(self.settings, generation, [{"kind": "symbol", "value": "Payments.target"}])
+        seeds = [item["entity_id"] for item in resolved["candidates"] if item.get("method") == "entity_name"]
+        evidence = core.Evidence("repo", "Payments.java", 1, len(source.splitlines()), source, "code", 100, verification_content=source)
+        bundle = core.ContextBundle("target relations", evidence=[evidence], atlas_generation=generation)
+        flow = investigation._execution_flow(self.settings, generation, seeds, bundle,
+                                             incoming_types=("CALLS",), outgoing_types=("CALLS",))
+        self.assertEqual("ready", flow["status"], flow)
+        self.assertTrue(flow["truncated"])
+        self.assertLessEqual(len(flow["steps"]), investigation.MAX_FLOW_STEPS)
+        self.assertLessEqual(flow["database_operations"], investigation.MAX_FLOW_DB_QUERIES)
+        self.assertEqual(investigation.MAX_FLOW_BRANCH, sum(step["target_id"] == seeds[0] for step in flow["steps"]))
+        by_id = {step["identity"]: step for step in flow["steps"]}
+        self.assertTrue(flow["paths"])
+        for path in flow["paths"]:
+            ordered = [by_id[identifier] for identifier in path["step_ids"]]
+            for first, second in zip(ordered, ordered[1:]):
+                self.assertEqual(first["target_id"], second["source_id"], "inbound traversal never reverses a call")
+        with mock.patch.object(investigation, "MAX_FLOW_SECONDS", -1):
+            failed = investigation._execution_flow(self.settings, generation, seeds, bundle, incoming_types=("CALLS",))
+        self.assertEqual("degraded", failed["status"])
+        self.assertEqual([], failed["steps"])
+        expired = False
+        original = investigation._valid_generation_entities
+
+        def validate_then_expire(*args, **kwargs):
+            nonlocal expired
+            result = original(*args, **kwargs)
+            expired = True
+            return result
+
+        with mock.patch.object(investigation, "_valid_generation_entities", side_effect=validate_then_expire), \
+                mock.patch.object(investigation.time, "monotonic", side_effect=lambda: 100 if expired else 0):
+            partial = investigation._execution_flow(self.settings, generation, seeds, bundle,
+                                                    incoming_types=("CALLS",), outgoing_types=("CALLS",))
+        self.assertEqual("degraded", partial["status"], partial)
+        self.assertTrue(partial["truncated"])
+        self.assertTrue(partial["steps"], "a later budget timeout cannot erase completed, validated depths")
+        self.assertTrue(partial["paths"])
+        self.assertTrue(all(step["state"] == "verified" for step in partial["steps"]))
+        self.assertTrue({step["identity"] for step in partial["steps"]}.issubset(by_id))
+
     def test_structure_edges_cannot_consume_the_execution_path_depth(self):
         edges = [("DEFINES", "file", "class"), ("DEFINES", "class", "entry"),
                  ("CALLS", "entry", "validate"), ("CALLS", "validate", "check")]
@@ -302,13 +457,15 @@ class AnchorAlignmentTests(unittest.TestCase):
             "anchors": [{"kind": "symbol", "value": "Payments.handlePayment"}],
         }}))
         limited = compile_request(request, max_effective_operations=1)
-        self.assertEqual(["search"], [item.kind for item in limited.operations])
-        self.assertEqual(1, limited.deferred_operations)
+        self.assertEqual([("symbol", ("definition", "tests"))],
+                         [(item.kind, item.includes) for item in limited.operations])
+        self.assertTrue(limited.operations[0].protected)
+        self.assertEqual(0, limited.deferred_operations)
         complete = compile_request(request, max_effective_operations=2)
-        self.assertEqual([("search", ()), ("symbol", ("tests",))],
+        self.assertEqual([("symbol", ("definition", "tests"))],
                          [(item.kind, item.includes) for item in complete.operations])
         request["symbols"] = [{"name": "Payments.handlePayment", "include": ["tests"]}]
-        self.assertEqual(2, len(compile_request(request).operations), "merge duplicate test requests")
+        self.assertEqual(1, len(compile_request(request).operations), "merge the definition and duplicate test requests")
 
     def test_required_test_discovery_reaches_remote_test_repo_at_scale(self):
         from brain import index
@@ -341,6 +498,7 @@ class AnchorAlignmentTests(unittest.TestCase):
                     initial_repo_limit=1, widen_repo_limit=2,
                     repositories=[replace(repo, source_sha=generation.snapshots[repo.name]) for repo in self.settings.repositories])
                 with mock.patch.object(index, "query_generation_indexes", wraps=index.query_generation_indexes) as queries, \
+                        mock.patch.object(index, "read_generation_files", wraps=index.read_generation_files) as sources, \
                         mock.patch("brain.editions.current_edition", return_value="precision"), \
                         mock.patch("brain.semantic.search_semantic", side_effect=AssertionError("optional model search")), \
                         mock.patch("brain.models.rerank_candidates", side_effect=AssertionError("optional model rerank")):
@@ -353,7 +511,10 @@ class AnchorAlignmentTests(unittest.TestCase):
                 self.assertEqual(1, queries.call_count)
                 self.assertTrue(queries.call_args.kwargs["test_only"])
                 self.assertEqual(count, len(queries.call_args.args[2]))
-                self.assertLessEqual(bundle.metrics["physical_backend_operations"], 3)
+                self.assertEqual(1, sources.call_count, "source hydration stays one batch at every repository scale")
+                self.assertIn("source-hydration", bundle.trace["backend_ms"])
+                # Resolver, global test lookup, source batch, and exact ranges.
+                self.assertEqual(4, bundle.metrics["physical_backend_operations"])
                 self.assertLessEqual(bundle.metrics["bytes_read"], 2_000)
                 if count == 10:
                     self.assertEqual([], core.test_hits(pinned, "Payments.handlePayment", ["repo"]))

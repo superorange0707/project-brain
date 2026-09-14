@@ -901,14 +901,27 @@ The direction is deliberate: `.runs/ABC-1234/request-010.yml` is the AI command
 sent into Brain, while `generated/handoffs/ABC-1234/context-010.md` is Brain's evidence sent back to
 the AI. Only upload the visible `context-NNN.md` file.
 
-The v1.0.14 continuation patch keeps Agent Kit v4 and Investigation Protocol v5,
-but updates the instructions to permit user-approved evidence requests beyond
-four waves. Regenerate the kit and replace your existing Agent's INSTRUCTIONS.md
-and PROJECT_KNOWLEDGE.md. You do not need a new Agent or a new ticket.
+Agent Kit v4 and Investigation Protocol v5 support continued evidence requests
+without a lifetime round limit or extra continuation approval. Regenerate the
+kit and replace your existing Agent's INSTRUCTIONS.md and PROJECT_KNOWLEDGE.md
+to update older guidance. You do not need a new Agent or a new ticket.
 
 ```bash
 brain agent-kit m365 --json
 ```
+
+The current kit asks Copilot to emit a valid fenced JSON request, including on
+the first investigation reply. JSON works in Brain's `.yml` request files.
+Regenerate the kit after upgrading and replace the Agent Builder Instructions;
+already configured agents do not receive local template changes automatically.
+
+If Copilot returns only plain text, open **Continue with AI**, paste or edit it
+to the repository question you need answered, and choose **Create request from
+text**. Brain prepares and validates a JSON request for the selected ticket;
+review it, then click **Run retrieval**. This uses your text as the objective,
+keeps the pinned generation, and copies the actual context ID when available.
+It does not execute anything until you choose Run retrieval. Questions about
+business decisions or external runtime facts still belong in the AI chat.
 
 ## 9. Continue an AI investigation
 
@@ -993,29 +1006,40 @@ downgrade or switch a legacy ticket's protocol to work around a missing file.
 
 ### Continue after an investigation pauses
 
-The automatic allowance is three normal waves and a justified fourth. It does
-not permanently close the ticket or mean that enough evidence exists. If a
-material question remains, keep the same ticket and submit a new focused request.
-In **Continue with AI**, choose **Classify reply**, then **Continue gathering
-evidence**. The confirmation shows the next wave, pinned generation and per-wave
-operation/context limits. Each confirmation runs one bounded wave only; it does
-not authorize an automatic loop. A changed ticket/context requires a new preview.
+There is no fixed investigation round limit. If a material question remains,
+keep the same ticket and submit a new focused request. In **Continue with AI**,
+choose **Classify reply**, then **Run retrieval**. Each submitted request has its
+own operation and context budgets; earlier rounds do not consume a lifetime
+quota. No-progress and coverage signals guide the next request, not lock the
+ticket. Submitting a request does not start an endless automatic retrieval loop.
 
-For the equivalent explicit CLI approval:
+The equivalent CLI commands need no extra continuation flag:
 
 ```bash
-brain continue ABC-1234 --file ai-response.txt --target m365 --continue-investigation
+brain continue ABC-1234 --file ai-response.txt --target m365
 # Or, for a request-only file:
-brain ctx ABC-1234 --file request.yml --target m365 --continue-investigation
+brain ctx ABC-1234 --file request.yml --target m365
 ```
 
 The original Atlas/Semantic pin, evidence IDs, hypothesis ledger and context
 lineage remain in use. Old four-wave sessions work without a reset or index
 refresh. Omit the optional `wave` field or use the next sequential integer (5,
-6, and later); do not restart at 1. Repeated requests, corrupt evidence, unavailable
-pinned components, source authority and per-wave resource checks still apply.
-Old artifacts are not overwritten. Cumulative operation accounting is retained
-even when the bounded request-history view rolls forward.
+6, and later); do not restart at 1 or add approval fields to the request. Repeated
+requests, corrupt evidence, unavailable pinned components, source authority and
+per-request resource checks still apply. Old artifacts are not overwritten.
+Cumulative operation accounting is telemetry, not a limit on future requests.
+If a first-useful checkpoint is pending or failed, retry that same request before
+changing the plan so its reserved context ID and evidence lineage remain intact.
+The UI offers **Retry saved request**, including after reopening the ticket. It
+validates the saved request and original include-diff option before running on
+the ticket's pinned generation. It never substitutes the latest generation.
+For older checkpoints without a saved request, or a missing/damaged request file,
+the UI asks you to paste the original request instead of guessing. No reset or
+index rebuild is needed for request recovery. A successfully saved final context
+can be reopened directly if only its notification or AI delivery failed.
+If the checkpoint itself or its pinned evidence is damaged, Brain refuses to run
+the retry and asks for the retained artifacts to be restored; it does not guess
+the missing evidence or silently use a newer generation.
 
 After installing a build containing this change, update an existing M365 Agent's
 instructions with `brain agent-kit m365 --json` so it no longer treats four waves
@@ -1052,7 +1076,11 @@ The handover includes the request contract supported by that ticket. Source-only
 legacy tickets keep their supported legacy request form; Atlas-backed legacy
 contexts retain their original IDs when continuing with v5. Corrupt identities
 still fail validation rather than silently switching to the newest source.
-Whole-response JSON code fences are accepted as well as raw JSON and YAML.
+JSON and YAML code fences may include surrounding chat explanation. Raw JSON,
+YAML, Windows UTF-8 BOMs and both backtick and tilde fences are accepted. The
+latest request document is selected; protocol-looking text inside its values
+remains data. Invalid requests produce a repair prompt instead of executing an
+older request.
 
 Claude/clipboard and M365 both export to `generated/handoffs/<TICKET>/`; `current.md`
 is the latest prepared handoff. `.runs/<TICKET>/` retains internal history and
@@ -1448,6 +1476,9 @@ Use `--file` or stdin for input and `--no-copy` for output. On Linux, install
 
 Request the exact string, interface name, annotation, event/topic, config key, and
 known neighboring symbols. Dynamic behavior may not have a static call site.
+Python caller navigation checks explicit imports and aliases against pinned
+source; a same-name function is not proof of a call. An incomplete candidate
+search is reported as incomplete, not as proof that no callers exist.
 
 ### Context is very large
 

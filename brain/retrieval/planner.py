@@ -23,7 +23,7 @@ def _repos(item: dict[object, object]) -> tuple[str, ...]:
     return tuple(sorted({str(value) for value in (item.get("repos") or [])}))
 
 
-def objective_terms(objective: str, *, limit: int = 4) -> list[str]:
+def objective_terms(objective: str, *, limit: int = 4, allow_prose: bool = True) -> list[str]:
     """Extract only deterministic, source-like objective terms for cheap discovery."""
     patterns = (
         r"['\"]([^'\"]{2,80})['\"]",
@@ -35,10 +35,10 @@ def objective_terms(objective: str, *, limit: int = 4) -> list[str]:
     values: list[str] = []
     for pattern in patterns:
         values.extend(match.group(1) if match.lastindex else match.group(0) for match in re.finditer(pattern, objective))
-    if not values:
+    if not values and allow_prose:
         words = re.findall(r"\b[A-Za-z][A-Za-z0-9_-]{3,}\b", objective)
         values.extend(word for word in words if word.lower() not in _OBJECTIVE_STOP_WORDS)
-    if not values and objective.strip():
+    if not values and allow_prose and objective.strip():
         values.append(objective.strip()[:500])
     return list(dict.fromkeys(value.strip() for value in values if value.strip()))[:limit]
 
@@ -52,6 +52,18 @@ def requested_operation_count(request: dict[object, object]) -> int:
         + len(request.get("history") or [])
         + len(request.get("expand") or [])
     )
+
+
+def requested_symbol_relations(request: dict[object, object]) -> tuple[str, ...]:
+    """Keep explicit v5 relationship intent when compiling its typed anchors."""
+    if request.get("version") != 5:
+        return ()
+    required = " ".join(str(value) for value in request.get("required") or []).casefold()
+    return tuple(name for name, pattern in (
+        ("callers", r"\bcallers?\b"),
+        ("callees", r"\bcallees?\b"),
+        ("implementations", r"\bimplementations?\b"),
+    ) if re.search(pattern, required))
 
 
 def compile_request(
@@ -74,12 +86,25 @@ def compile_request(
             continue
         name, repos = str(item["name"]), _repos(item)
         symbols[(name, repos)].update(str(value) for value in (item.get("include") or ["definition"]))
+    relations = requested_symbol_relations(request)
+    if relations:
+        for anchor in request.get("anchors") or []:
+            if isinstance(anchor, dict) and anchor.get("kind") == "symbol" and anchor.get("value"):
+                symbols[(str(anchor["value"]), ())].update(relations)
     if (request.get("coverage") or {}).get("tests") == "required":
         for anchor in request.get("anchors") or []:
             if isinstance(anchor, dict) and anchor.get("kind") == "symbol" and anchor.get("value"):
                 symbols[(str(anchor["value"]), ())].add("tests")
+    from ..investigation import _qualified_symbol_queries
+
+    qualified = set(_qualified_symbol_queries(request.get("anchors") or [])) if request.get("version") == 5 else set()
+    # One explicit symbol operation owns its definition and requested relations.
+    # Separate relation operations must not crowd out the target's source read.
+    fused_definitions = {name for name, repos in symbols if not repos and name in qualified}
+    for name in fused_definitions:
+        symbols[(name, ())].add("definition")
     for (name, repos), includes in symbols.items():
-        tier = 0 if "." in name and includes != {"tests"} else 1
+        tier = 0 if ("." in name or name in qualified) and includes != {"tests"} else 1
         operations.append(QueryOperation("symbol", name, repos, tier, "definition" in includes, 2, "shared symbol discovery", tuple(sorted(includes))))
     for item in request.get("paths") or []:
         if isinstance(item, dict):
@@ -87,6 +112,8 @@ def compile_request(
     for item in request.get("searches") or []:
         if isinstance(item, dict):
             value = str(item["query"])
+            if value in fused_definitions and not _repos(item):
+                continue
             protected = int(request.get("version") or 1) in {4, 5}
             operations.append(QueryOperation(
                 "search", value, _repos(item),

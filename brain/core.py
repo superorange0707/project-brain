@@ -17,6 +17,7 @@ import tempfile
 import time
 import tomllib
 import xml.etree.ElementTree as ET
+from array import array
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -57,6 +58,7 @@ PROTOCOL_VERSION = 5
 LEGACY_DEFAULT_PROTOCOL_VERSION = 1
 CURRENT_SESSION_SCHEMA_VERSION = 3
 MAX_REQUEST_ITEMS = 50
+PINNED_SYMBOL_ANCHOR_PREFIX = 'pinned symbol anchor (navigation only): '
 MAX_REQUEST_TEXT_CHARS = 100_000
 MAX_REQUEST_TEXT_BYTES = 100_000
 MAX_SESSION_STATE_BYTES = 4 * 1024 * 1024
@@ -108,6 +110,11 @@ MAX_PINNED_PATH_CANDIDATES = 20_000
 MAX_PINNED_PATH_SECONDS = 2.0
 MAX_PINNED_HYDRATION_BYTES = 32 * 1024 * 1024
 MAX_PINNED_HYDRATION_SECONDS = 2.0
+MAX_TOPIC_SEED_FILES = 4
+MAX_TOPIC_NAVIGATION_BYTES = 1_000_000
+MAX_TOPIC_NAVIGATION_KEYS = 8
+MAX_SYMBOL_TRACE_CACHED_FILES = 8
+MAX_SYMBOL_TRACE_CACHE_BYTES = 8 * 1024 * 1024
 
 
 class BrainError(RuntimeError):
@@ -115,7 +122,39 @@ class BrainError(RuntimeError):
 
 
 class InvestigationContinuationRequired(BrainError):
-    """A paused investigation can run one more bounded, human-approved wave."""
+    """Request sequence or legacy continuation-token validation failed."""
+
+
+class CheckpointRetryRequired(BrainError):
+    """A published early checkpoint still owns the unfinished request."""
+
+    def __init__(self, ticket: str, retry_available: bool = False, *, checkpoint_problem: bool = False) -> None:
+        self.ticket, self.retry_available = ticket, retry_available
+        self.checkpoint_problem = checkpoint_problem
+        super().__init__(
+            "The early checkpoint has a pending or failed continuation. "
+            + ("The checkpoint artifact is corrupt or unavailable. Restore this ticket's retained checkpoint/source "
+               "artifacts before retrying; do not reset, refresh or substitute a newer generation."
+               if checkpoint_problem else "Retry the saved request on this ticket's original generation."
+               if retry_available else
+               "The saved request cannot be verified. Paste the same original AI request with its original "
+               "include-diff option. Keep this ticket and its pinned generation; do not reset or refresh to retry.")
+        )
+
+
+class ContextDeliveryError(BrainError):
+    """The retrieval committed successfully but its chat delivery failed."""
+
+    def __init__(self, ticket: str, artifact: str) -> None:
+        self.ticket, self.artifact = ticket, artifact
+        super().__init__(
+            f"Evidence is saved as {artifact}; AI delivery failed. "
+            "Open that context in this ticket's history and copy it to your AI. Do not rerun retrieval or refresh."
+        )
+
+
+class ClipboardWriteError(BrainError):
+    """A clipboard transport failure, not a source or retrieval error."""
 
 
 def _bounded_utf8_text(text: str, max_bytes: int, marker: str) -> tuple[str, bool]:
@@ -451,6 +490,10 @@ class ContextBundle:
     metrics: dict[str, int | float] = field(default_factory=dict)
     trace: dict[str, Any] = field(default_factory=dict)
     atlas_generation: Any | None = None
+    # Transient query resolutions, never loaded from ticket state or used as
+    # evidence authority. Runtime revalidates their pinned entities and edges.
+    _resolved_relation_seeds: dict[str, str] = field(default_factory=dict, repr=False)
+    _python_package_sources: dict[tuple[str, str], str] = field(default_factory=dict, repr=False)
 
 
 def run(
@@ -486,6 +529,43 @@ def _record_backend(name: str, elapsed_ms: float, **values: int | bool) -> None:
         trace.add_backend(name, elapsed_ms, **values)
 
 
+def _yaml_parts(value: str, delimiter: str) -> list[str]:
+    """Split flow values outside quotes/collections; strip only YAML comments."""
+    parts: list[str] = []
+    start = 0
+    quote = ""
+    depth = 0
+    escaped = False
+    for index, char in enumerate(value):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote == '"':
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in "\"'" and (index == start or value[index - 1] in " \t:[{,"):
+            quote = char
+        elif char == "#" and (index == 0 or value[index - 1].isspace()):
+            value = value[:index]
+            break
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+        elif char == delimiter and depth == 0 and (
+            delimiter != ":" or index + 1 == len(value) or value[index + 1].isspace()
+            or value[start:index].strip().startswith(('"', "'"))
+        ):
+            parts.append(value[start:index].strip())
+            start = index + 1
+            if delimiter == ":":
+                # The rest is one scalar; a colon inside it is not another key.
+                return [*parts, _yaml_parts(value[start:], "\0")[0]]
+    parts.append(value[start:].strip())
+    return parts
+
+
 def _scalar(value: str) -> Any:
     value = value.strip()
     if value == "":
@@ -495,11 +575,28 @@ def _scalar(value: str) -> Any:
         return None
     if lowered in {"true", "false"}:
         return lowered == "true"
+    if value.startswith('"') and value.endswith('"'):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1].replace("''", "'")
     if value.startswith("[") and value.endswith("]"):
         inner = value[1:-1].strip()
         if not inner:
             return []
-        return [_scalar(part.strip()) for part in inner.split(",")]
+        return [_scalar(part) for part in _yaml_parts(inner, ",") if part]
+    if value.startswith("{") and value.endswith("}"):
+        result = {}
+        for part in _yaml_parts(value[1:-1], ","):
+            if not part:
+                continue
+            pair = _yaml_parts(part, ":")
+            if len(pair) != 2:
+                raise BrainError(f"Invalid YAML mapping: {part}")
+            result[str(_scalar(pair[0]))] = _scalar(pair[1])
+        return result
     try:
         return ast.literal_eval(value)
     except (ValueError, SyntaxError):
@@ -517,7 +614,7 @@ def simple_yaml_load(text: str) -> Any:
     index = 0
     while index < len(raw):
         line = raw[index]
-        stripped = line.strip()
+        stripped = _yaml_parts(line.strip(), "\0")[0]
         if not stripped or stripped.startswith("#") or stripped.startswith("```") or stripped == "---":
             index += 1
             continue
@@ -546,10 +643,10 @@ def simple_yaml_load(text: str) -> Any:
         return {}
 
     def split_pair(value: str) -> tuple[str, str]:
-        match = re.match(r"^([^:]+):(?:\s*(.*))?$", value)
-        if not match:
+        pair = _yaml_parts(value, ":")
+        if len(pair) != 2:
             raise BrainError(f"Invalid YAML line: {value}")
-        return match.group(1).strip(), (match.group(2) or "").strip()
+        return str(_scalar(pair[0])), pair[1]
 
     def parse(position: int, indent: int) -> tuple[Any, int]:
         is_list = tokens[position][1].startswith("-")
@@ -565,7 +662,7 @@ def simple_yaml_load(text: str) -> Any:
                         value = None
                     result.append(value)
                     continue
-                if re.match(r"^[^:]+:", rest):
+                if len(_yaml_parts(rest, ":")) == 2:
                     key, raw_value = split_pair(rest)
                     item: dict[str, Any] = {key: _scalar(raw_value)}
                     if not raw_value and position < len(tokens) and tokens[position][0] > indent:
@@ -1006,6 +1103,31 @@ def _store_hits(key: tuple[Any, ...], hits: list[SearchHit]) -> None:
         cache[key] = _clone_hits(hits)
 
 
+def _lexical_cache_scope(settings: Settings, selected: list[Repository]) -> tuple[Any, ...]:
+    generation = settings.atlas_generation
+    component = generation.component("lexical") if generation is not None else {}
+    return (
+        settings.state_dir, settings.atlas_generation_mode,
+        generation.identity if generation is not None else None,
+        tuple(component.get(field) for field in ("status", "schema_version", "content_hash")),
+        tuple((repo.name, repo.path, repo.source_path, repo.source_sha) for repo in selected),
+        settings.max_results, settings.candidate_limit,
+        MAX_PINNED_QUERY_CANDIDATE_FILES, MAX_PINNED_QUERY_BYTES, MAX_PINNED_QUERY_SECONDS,
+    )
+
+
+def _record_source_lookup_failure(kind: str) -> None:
+    trace = _ACTIVE_RETRIEVAL_TRACE.get()
+    if trace is not None:
+        trace.fallback_reasons.append(f"{kind}_lookup_unavailable")
+        if trace.stop_reason == "coverage_satisfied":
+            trace.stop_reason = "source_lookup_incomplete"
+
+
+def _source_lookup_failed_since(trace: Any, offset: int) -> bool:
+    return any(reason.endswith("_lookup_unavailable") for reason in trace.fallback_reasons[offset:])
+
+
 def _parallel_repositories(settings: Settings, repositories: list[Repository], operation: Any) -> list[Any]:
     """Use the one shared bounded repository worker pool and preserve input order."""
     if len(repositories) <= 1 or settings.repo_workers <= 1:
@@ -1024,39 +1146,44 @@ def _lexical_generation_ready(settings: Settings, repo: Repository | None = None
     generation = settings.atlas_generation
     if generation is None:
         return True
-    key = ("component-validation", "lexical", generation.generation, generation.identity, repo.name if repo else "all")
+    key = ("component-validation", "lexical", _lexical_cache_scope(settings, [repo] if repo else settings.repositories))
     cache = _ACTIVE_RETRIEVAL_CACHE.get()
     if cache is not None and key in cache:
         return bool(cache[key])
     component = generation.component("lexical")
     from .index import LEXICAL_COMPONENT_SCHEMA_VERSION
 
-    expected_snapshots = {
-        str(name): str(value) for name, value in (component.get("details") or {}).get("snapshots", {}).items()
-    }
+    details = component.get("details") if isinstance(component.get("details"), dict) else {}
+    snapshots = details.get("snapshots")
+    if not isinstance(snapshots, dict):
+        return False
+    expected_snapshots = {str(name): str(value) for name, value in snapshots.items()}
     valid = False
     if (
         component.get("status") == "ready"
         and component.get("schema_version") == str(LEXICAL_COMPONENT_SCHEMA_VERSION)
         and expected_snapshots == generation.snapshots
     ):
-        details = component.get("details") if isinstance(component.get("details"), dict) else {}
         repository_hashes = details.get("repository_hashes") if isinstance(details.get("repository_hashes"), dict) else {}
         repository_files = details.get("repository_files") if isinstance(details.get("repository_files"), dict) else {}
         if repo is not None and repo.name in repository_hashes:
             from .index import lexical_repository_identity
 
+            try:
+                expected_files = int(repository_files.get(repo.name, -1))
+            except (TypeError, ValueError, OverflowError):
+                return False
             identity = lexical_repository_identity(settings, repo.name, generation.snapshots.get(repo.name, ""))
             valid = bool(
                 identity and identity[0] == repository_hashes.get(repo.name)
-                and identity[1] == int(repository_files.get(repo.name, -1))
+                and identity[1] == expected_files
             )
         else:
             from .index import lexical_membership_identity
 
             identity = lexical_membership_identity(settings, generation.snapshots)
             valid = bool(identity and identity[0] == component.get("content_hash"))
-    if cache is not None and len(cache) < 256:
+    if valid and cache is not None and len(cache) < 256:
         cache[key] = valid
     return valid
 
@@ -1086,7 +1213,8 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
 
         settings = replace(settings, atlas_generation=current_generation_ref(settings))
     selected = settings.repos(repos)
-    key = ("search", pattern, fixed, tuple(repo.name for repo in selected))
+    cache_scope = _lexical_cache_scope(settings, selected)
+    key = ("search", pattern, fixed, cache_scope)
     cached = _cached_hits(key)
     if cached is not None:
         return cached
@@ -1115,6 +1243,10 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
             max_bytes=MAX_PINNED_QUERY_BYTES,
             max_seconds=MAX_PINNED_QUERY_SECONDS,
             stats=indexed_stats,
+            collect_java_declarations=(_ACTIVE_RETRIEVAL_CACHE.get() is not None
+                                       and bool(re.fullmatch(r"[A-Za-z_$][\w$]{0,499}", pattern))),
+            collect_java_call_references=(bool(re.fullmatch(r"[A-Za-z_$][\w$]{0,499}", pattern))
+                                          and pattern in (_ACTIVE_RETRIEVAL_CACHE.get() or {}).get(("java-call-queries",), ())),
         )
         elapsed = (time.perf_counter() - indexed_started) * 1000
         if trace is not None:
@@ -1143,8 +1275,21 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
                     trace.stop_reason = "lexical_batch_budget"
             else:
                 _store_hits(key, hits)
+                if indexed_stats.get("java_declarations_complete"):
+                    _store_hits(("java-declarations", pattern, cache_scope), [
+                        SearchHit(repo, path, line, text, "definition", 100, ["sqlite trigram index", "symbol declaration"])
+                        for repo, path, line, text in indexed_stats["java_declarations"]
+                    ])
+                if indexed_stats.get("java_call_references_complete"):
+                    _store_hits(("java-caller-references", pattern, cache_scope), [
+                        SearchHit(repo, path, line, text, "Java call reference candidate", 98,
+                                  ["pinned lexical call reference; receiver type and dispatch are not established"])
+                        for repo, path, line, text in indexed_stats["java_call_references"]
+                    ])
             return _clone_hits(hits)
+    unavailable_repos: list[str] = []
     if trace is not None:
+        unavailable_repos.extend(repo.name for repo in selected[trace.physical_budget_remaining:])
         selected = selected[: trace.physical_budget_remaining]
         if not selected:
             trace.stop_reason = "physical_budget"
@@ -1194,6 +1339,7 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
             )
         if local_trace is not None and local_trace.physical_budget_remaining <= 0:
             local_trace.stop_reason = "physical_budget"
+            unavailable_repos.append(repo.name)
             return []
         indexed_started = time.perf_counter()
         indexed_reserved = False
@@ -1205,6 +1351,7 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
             indexed_reserved = local_trace.try_reserve_backend()
             if not indexed_reserved:
                 local_trace.stop_reason = "physical_budget"
+                unavailable_repos.append(repo.name)
                 return []
         indexed = query_index(
             settings, repo, pattern, max_results=settings.max_results, snapshot_sha=repo.source_sha,
@@ -1216,6 +1363,7 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
             )
         if indexed is None:
             if settings.atlas_generation_mode == "pinned":
+                unavailable_repos.append(repo.name)
                 return []
             return search_repo(
                 repo, pattern, fixed=fixed, max_results=settings.max_results,
@@ -1231,7 +1379,10 @@ def search(settings: Settings, pattern: str, repos: Iterable[str] | None = None,
 
     hits = [hit for rows in _parallel_repositories(settings, selected, one) for hit in rows]
     hits = hits[: settings.max_results * max(1, len(selected))]
-    _store_hits(key, hits)
+    if unavailable_repos:
+        _record_source_lookup_failure("lexical")
+    else:
+        _store_hits(key, hits)
     return _clone_hits(hits)
 
 
@@ -1248,7 +1399,8 @@ def path_hits(settings: Settings, query: str, repos: Iterable[str] | None = None
 
         settings = replace(settings, atlas_generation=current_generation_ref(settings))
     selected = settings.repos(repos)
-    key = ("path", needle, tuple(repo.name for repo in selected))
+    key = ("path", needle, _lexical_cache_scope(settings, selected), settings.path_result_limit,
+           MAX_PINNED_PATH_CANDIDATES, MAX_PINNED_PATH_SECONDS)
     cached = _cached_hits(key)
     if cached is not None:
         return cached
@@ -1316,7 +1468,9 @@ def path_hits(settings: Settings, query: str, repos: Iterable[str] | None = None
             else:
                 _store_hits(key, hits)
             return _clone_hits(hits)
+    unavailable_repos: list[str] = []
     if trace is not None:
+        unavailable_repos.extend(repo.name for repo in selected[trace.physical_budget_remaining:])
         selected = selected[: trace.physical_budget_remaining]
         if not selected:
             trace.stop_reason = "physical_budget"
@@ -1335,6 +1489,8 @@ def path_hits(settings: Settings, query: str, repos: Iterable[str] | None = None
             (time.perf_counter() - indexed_started) * 1000,
             raw_hits=len(indexed or []), cache_hit=indexed is not None,
         )
+        if indexed is None and settings.atlas_generation_mode == "pinned":
+            unavailable_repos.append(repo.name)
         paths = indexed if indexed is not None else (
             [] if settings.atlas_generation_mode == "pinned"
             else (logical_path(path.relative_to(root)) for path in _walk_files(root)) if root.is_dir() else []
@@ -1342,7 +1498,10 @@ def path_hits(settings: Settings, query: str, repos: Iterable[str] | None = None
         return ranked(repo, paths)
 
     hits = [hit for rows in _parallel_repositories(settings, selected, one) for hit in rows]
-    _store_hits(key, hits)
+    if unavailable_repos:
+        _record_source_lookup_failure("path")
+    else:
+        _store_hits(key, hits)
     return _clone_hits(hits)
 
 
@@ -1353,6 +1512,20 @@ def _is_documentation_path(path: str) -> bool:
 
 def _symbol_declaration(name: str, *, path: str = "") -> re.Pattern[str]:
     escaped = re.escape(name)
+    if path.casefold().endswith(".java"):
+        # A return type is a qualified identifier with optional type arguments
+        # and array suffixes, not arbitrary words/operators before a call.
+        identifier = r"[A-Za-z_$][\w$]*"
+        non_type = r"(?!(?:return|new|throw|throws|assert|case|else|yield|break|continue|instanceof|if|for|while|switch|catch|try|do|finally)\b)"
+        java_type = rf"{non_type}{identifier}(?:\s*\.\s*{identifier})*(?:\s*<[\w$?, .<>\[\]\s]+>)?(?:\s*\[\s*\])*"
+        modifiers = r"(?:(?:public|protected|private|static|final|abstract|synchronized|native|default|strictfp)\s+)*"
+        annotations = rf"(?:@{identifier}(?:\.{identifier})*(?:\([^()]*\))?\s*)*"
+        return re.compile(
+            rf"(?:^|(?<=[;{{}}]))\s*{annotations}{modifiers}(?:"
+            rf"(?:class|interface|enum|record)\s+(?P<class_name>{escaped})(?![\w$])"
+            rf"|(?:<[\w$?, .<>\[\]&\s]+>\s*)?{java_type}\s+(?P<method_name>{escaped})\s*\()",
+            re.MULTILINE,
+        )
     if path.casefold().endswith((".py", ".pyi")):
         # Python control-flow words are not Java-style return types. In
         # particular, `for x in name(...)` is a call, never a definition.
@@ -1371,14 +1544,7 @@ def symbol_hits(settings: Settings, query: str, repos: Iterable[str] | None = No
     scope = list(repos or [])
     name = query.rsplit(".", 1)[-1]
     escaped = re.escape(name)
-    hits = [
-        hit for hit in search(settings, name, scope, fixed=True)
-        if _symbol_declaration(name, path=hit.path).search(hit.text)
-    ]
-    for hit in hits:
-        hit.kind = "definition"
-        hit.score = 100
-        hit.found_by.append("symbol declaration")
+    hits = _symbol_definition_hits(settings, name, scope)
     graph_scope = scope or sorted({hit.repo for hit in hits})
     graph_hits = graph_symbol_hits(settings, query, graph_scope)
     if graph_hits or hits:
@@ -1412,6 +1578,270 @@ def implementation_hits(settings: Settings, name: str, repos: Iterable[str] | No
     return hits
 
 
+def _java_caller_reference_hits(settings: Settings, query: str, repos: Iterable[str] | None = None) -> tuple[list[SearchHit], str | None]:
+    """Retrieve possible receiver/static-import callers without asserting dispatch."""
+    return _java_symbol_index_hits(settings, query, repos, declarations=False)
+
+
+def _java_symbol_index_hits(
+    settings: Settings, query: str, repos: Iterable[str] | None, *, declarations: bool,
+) -> tuple[list[SearchHit], str | None]:
+    from .index import query_generation_indexes
+
+    generation = settings.atlas_generation
+    if generation is None:
+        return [], "pinned lexical generation unavailable"
+    name = query.replace("#", ".").rsplit(".", 1)[-1]
+    scope = list(repos or [])
+    if any(name not in generation.snapshots for name in scope):
+        return [], "requested repository is outside the pinned generation"
+    selected = [repo for repo in settings.repos(scope) if repo.name in generation.snapshots]
+    backend = "java-declarations" if declarations else "java-caller-references"
+    key = (backend, name, _lexical_cache_scope(settings, selected))
+    if (cached := _cached_hits(key)) is not None:
+        return cached, None
+    trace = _ACTIVE_RETRIEVAL_TRACE.get()
+    if trace is not None and not trace.try_reserve_backend():
+        return [], "physical operation budget"
+    started = time.perf_counter()
+    stats: dict[str, object] = {}
+    try:
+        indexed = query_generation_indexes(
+            settings, generation, selected, name, max_results=settings.max_results,
+            max_candidate_files=min(MAX_PINNED_QUERY_CANDIDATE_FILES, max(len(selected), settings.candidate_limit)),
+            max_hits=min(settings.candidate_limit, settings.max_results * max(1, len(selected))),
+            max_bytes=MAX_PINNED_QUERY_BYTES, max_seconds=MAX_PINNED_QUERY_SECONDS,
+            stats=stats, java_calls_only=not declarations, java_declarations_only=declarations,
+        )
+    finally:
+        if trace is not None:
+            trace.complete_reserved_backend(backend, (time.perf_counter() - started) * 1000,
+                                            bytes_scanned=int(stats.get("candidate_bytes") or 0),
+                                            files=int(stats.get("candidate_files") or 0),
+                                            raw_hits=int(stats.get("hits") or 0))
+    if indexed is None:
+        return [], "pinned lexical component unavailable or incompatible"
+    hits = [SearchHit(repo.name, path, line, text, "definition" if declarations else "Java call reference candidate",
+                      100 if declarations else 98,
+                      ["sqlite trigram index", "symbol declaration"] if declarations else
+                      ["pinned lexical call reference; receiver type and dispatch are not established"])
+            for repo in selected for path, line, text in indexed[repo.name]]
+    if stats.get("budget_exhausted"):
+        return hits, f"reference search budget: {stats.get('reason') or 'unknown'}"
+    _store_hits(key, hits)
+    return hits, None
+
+
+def _symbol_definition_hits(
+    settings: Settings, name: str, repos: Iterable[str] | None, lexical: list[SearchHit] | None = None,
+    *, _verified_sources: dict[tuple[str, str], str] | None = None,
+) -> list[SearchHit]:
+    """Share source-aware Java definition classification across discovery/trace."""
+    from .index import _java_declaration_lines
+
+    if settings.atlas_generation is None and settings.atlas_generation_mode == "current":
+        from .catalog import current_generation_ref
+
+        settings = replace(settings, atlas_generation=current_generation_ref(settings))
+    lexical = search(settings, name, repos, fixed=True) if lexical is None else lexical
+    hits = [replace(hit, found_by=list(hit.found_by)) for hit in lexical
+            if not hit.path.lower().endswith(".java") and not _is_documentation_path(hit.path)
+            and _symbol_declaration(name, path=hit.path).search(hit.text)]
+    for hit in hits:
+        hit.kind, hit.score = "definition", 100
+        hit.found_by = sorted(set([*hit.found_by, "symbol declaration"]))
+    trace = _ACTIVE_RETRIEVAL_TRACE.get()
+    reason = None
+    if settings.atlas_generation is not None or settings.atlas_generation_mode == "pinned":
+        java_hits, reason = _java_symbol_index_hits(settings, name, repos, declarations=True)
+        hits.extend(java_hits)
+    else:
+        # Legacy source-pin operation has no registered lexical component.
+        # Validate only bounded candidate files using the same full-source mask.
+        files = {(hit.repo, hit.path): hit for hit in lexical if hit.path.lower().endswith(".java")
+                 and _symbol_declaration(name, path=hit.path).search(hit.text)}
+        deadline = time.monotonic() + MAX_PINNED_QUERY_SECONDS
+        total_bytes = 0
+        retained_bytes = 0
+        for number, hit in enumerate(files.values()):
+            if number >= min(MAX_PINNED_QUERY_CANDIDATE_FILES, settings.candidate_limit) or time.monotonic() >= deadline:
+                reason = "source file/time budget"
+                break
+            if trace is not None and not trace.try_reserve_backend():
+                reason = "physical operation budget"
+                break
+            started = time.perf_counter()
+            size = 0
+            try:
+                evidence = read_source(settings, hit, full=True)
+                source = evidence.verification_content or evidence.content
+                size = len(source.encode("utf-8"))
+                total_bytes += size
+                if total_bytes > MAX_PINNED_QUERY_BYTES:
+                    reason = "source byte budget"
+                    break
+                if (_verified_sources is not None and len(_verified_sources) < MAX_SYMBOL_TRACE_CACHED_FILES
+                        and retained_bytes + size <= MAX_SYMBOL_TRACE_CACHE_BYTES):
+                    _verified_sources[(hit.repo, hit.path)] = source
+                    retained_bytes += size
+                for line, text in _java_declaration_lines(source, name, deadline=deadline):
+                    hits.append(SearchHit(hit.repo, hit.path, line, text, "definition", 100,
+                                          sorted(set([*hit.found_by, "symbol declaration"]))))
+                    if len(hits) >= settings.candidate_limit:
+                        reason = "source hit budget"
+                        break
+                if time.monotonic() >= deadline:
+                    reason = "source time budget"
+                if reason:
+                    break
+            except (BrainError, OSError):
+                reason = "candidate source unavailable"
+            finally:
+                if trace is not None:
+                    trace.complete_reserved_backend("java-declaration-source", (time.perf_counter() - started) * 1000,
+                                                    bytes_scanned=size, files=1)
+    if reason and trace is not None:
+        message = f"Java declaration verification is incomplete: {reason}; source availability is unknown."
+        if message not in trace.fallback_reasons:
+            trace.fallback_reasons.append(message)
+    return hits
+
+
+def _configuration_prefix_hits(settings: Settings, anchors: Iterable[object]) -> tuple[list[SearchHit], str | None]:
+    """Find declared Java configuration prefixes, not inferred member bindings."""
+    from .investigation import MAX_ANCHOR_CANDIDATES, MAX_EXACT_ANCHOR_QUERIES, _bounded_anchor_queries, resolve_runtime_anchors
+
+    prefixes: list[str] = []
+    limited = False
+    for kind, key in _bounded_anchor_queries(anchors):
+        if kind != "config_key":
+            continue
+        parts = key.split(".")
+        for count in range(len(parts) - 1, 0, -1):
+            prefix = ".".join(parts[:count])
+            if prefix in prefixes:
+                continue
+            if len(prefixes) >= MAX_EXACT_ANCHOR_QUERIES:
+                limited = True
+                break
+            prefixes.append(prefix)
+    if not prefixes:
+        return [], None
+    generation = settings.atlas_generation
+    if generation is None:
+        return [], "pinned runtime-anchor component unavailable"
+    trace = _ACTIVE_RETRIEVAL_TRACE.get()
+    if trace is not None and not trace.try_reserve_backend():
+        return [], "physical operation budget"
+    started = time.perf_counter()
+    resolved: dict[str, Any] = {}
+    try:
+        resolved = resolve_runtime_anchors(
+            settings, generation, [{"kind": "config_key", "value": prefix} for prefix in prefixes],
+            use_cache="generation_cache" not in settings.evaluation_ablations,
+        )
+    finally:
+        if trace is not None:
+            trace.complete_reserved_backend("configuration-prefix", (time.perf_counter() - started) * 1000,
+                                            raw_hits=len(resolved.get("candidates") or []))
+    if resolved.get("status") != "ready":
+        return [], str(resolved.get("reason") or "pinned configuration anchors unavailable")
+    normalized = {prefix.strip().casefold() for prefix in prefixes}
+    hits = [SearchHit(item["repo"], item["path"], item["line"], item["value"],
+                      "requested configuration prefix candidate", 100,
+                      ["generation-validated configuration prefix; member binding not established"])
+            for item in resolved.get("candidates") or []
+            if item.get("method") == "exact" and item.get("kind") == "config_key"
+            and str(item.get("value") or "").strip().casefold() in normalized
+            and str(item.get("path") or "").lower().endswith(".java")
+            and (item.get("provenance") or {}).get("direction") == "prefix"]
+    if limited or len(resolved.get("candidates") or []) >= MAX_ANCHOR_CANDIDATES:
+        return hits, "configuration prefix candidate/input budget"
+    return hits, None
+
+
+def _topic_peer_hits(
+    settings: Settings, anchors: list[dict[str, Any]], candidates: list[SearchHit],
+    source_cache: dict[tuple[str, str], str],
+) -> tuple[list[SearchHit], str | None]:
+    """Follow concrete topic declarations near event hits as navigation, not payload proof."""
+    from .index import read_generation_files
+    from .investigation import MAX_ANCHOR_CANDIDATES, _literal_java_topics, _mask_java_comments, resolve_runtime_anchors
+
+    topics = list(dict.fromkeys(str(item.get("value") or "") for item in anchors if item.get("kind") == "topic"))
+    events = {str(item.get("value") or "").rsplit(".", 1)[-1] for item in anchors if item.get("kind") == "event"}
+    events = {name for name in events if re.fullmatch(r"[A-Za-z_$][\w$]{0,199}", name)}
+    if not topics and not events:
+        return [], None
+    generation = settings.atlas_generation
+    if generation is None:
+        return [], "pinned runtime-anchor component unavailable"
+    trace = _ACTIVE_RETRIEVAL_TRACE.get()
+    limited: list[str] = []
+    # Source-backed lexical hits only; a generated card mentioning an event is
+    # not a reason to scan its entire repository or infer a payload relationship.
+    locations = list(dict.fromkeys(
+        (hit.repo, hit.path) for hit in candidates
+        if hit.path.endswith('.java') and hit.repo in generation.snapshots
+        and any(channel.startswith('lexical anchor ') for channel in hit.found_by)
+        and any(re.search(rf'\b{re.escape(name)}\b', hit.text) for name in events)
+    ))
+    if len(locations) > MAX_TOPIC_SEED_FILES:
+        limited.append("event source file budget")
+    locations = locations[:MAX_TOPIC_SEED_FILES]
+    if locations:
+        if trace is not None and not trace.try_reserve_backend():
+            return [], "physical operation budget"
+        started = time.perf_counter()
+        loaded: dict[tuple[str, str], str] = {}
+        try:
+            loaded = read_generation_files(settings, generation, locations,
+                                           max_bytes=MAX_TOPIC_NAVIGATION_BYTES, max_seconds=.25) or {}
+            source_cache.update(loaded)
+        finally:
+            if trace is not None:
+                trace.complete_reserved_backend('topic-source', (time.perf_counter() - started) * 1000,
+                                                files=len(loaded), bytes_scanned=sum(len(text.encode('utf-8')) for text in loaded.values()))
+        if len(loaded) != len(locations):
+            limited.append("pinned event source unavailable or source budget")
+        for key in locations:
+            content = loaded.get(key)
+            if content is None:
+                continue
+            code = _mask_java_comments(content, strings=True)
+            if any(re.search(rf'\b{re.escape(name)}\b', code) for name in events):
+                topics.extend(topic for topic, _, _, _ in sorted(_literal_java_topics(content), key=lambda row: row[1:]))
+    topics = list(dict.fromkeys(topics))
+    if len(topics) > MAX_TOPIC_NAVIGATION_KEYS:
+        limited.append("topic key budget")
+    topics = topics[:MAX_TOPIC_NAVIGATION_KEYS]
+    if not topics:
+        return [], '; '.join(limited) or "no literal topic established in the bounded event source candidates"
+    if trace is not None and not trace.try_reserve_backend():
+        return [], "physical operation budget"
+    started = time.perf_counter()
+    resolved: dict[str, Any] = {}
+    try:
+        resolved = resolve_runtime_anchors(settings, generation, [{"kind": "topic", "value": topic} for topic in topics],
+                                           use_cache="generation_cache" not in settings.evaluation_ablations)
+    finally:
+        if trace is not None:
+            trace.complete_reserved_backend('topic-peers', (time.perf_counter() - started) * 1000,
+                                            raw_hits=len(resolved.get('candidates') or []))
+    if resolved.get("status") != "ready":
+        return [], str(resolved.get("reason") or "pinned topic anchors unavailable")
+    hits = [SearchHit(item['repo'], item['path'], item['line'], item['value'], 'requested topic peer candidate', 100,
+                      ['generation-validated topic location; event payload association is not established'])
+            for item in resolved.get('candidates') or []
+            if item.get('method') == 'exact' and item.get('kind') == 'topic' and item.get('value') in topics
+            and (item.get('provenance') or {}).get('direction') in {'inbound', 'outbound'}]
+    if len(resolved.get('candidates') or []) >= MAX_ANCHOR_CANDIDATES:
+        limited.append('topic candidate budget')
+    if not hits:
+        limited.append('no generation-validated topic producer or consumer registered')
+    return hits, '; '.join(limited) or None
+
+
 def test_hits(settings: Settings, name: str, repos: Iterable[str] | None = None) -> list[SearchHit]:
     from .index import query_generation_indexes
 
@@ -1421,8 +1851,7 @@ def test_hits(settings: Settings, name: str, repos: Iterable[str] | None = None)
         settings = replace(settings, atlas_generation=current_generation_ref(settings))
     selected = settings.repos(repos)
     short = name.replace('#', '.').rsplit('.', 1)[-1]
-    key = ("test-search", short, tuple(repo.name for repo in selected),
-           settings.atlas_generation.identity if settings.atlas_generation is not None else None)
+    key = ("test-search", short, _lexical_cache_scope(settings, selected))
     if (cached := _cached_hits(key)) is not None:
         return cached
     trace = _ACTIVE_RETRIEVAL_TRACE.get()
@@ -1452,6 +1881,7 @@ def test_hits(settings: Settings, name: str, repos: Iterable[str] | None = None)
             return tests
         if trace is not None:
             trace.fallback_reasons.append("test_index_filter_unavailable")
+        _record_source_lookup_failure("test")
     candidates = search(settings, short, [repo.name for repo in selected], fixed=True)
     tests = [hit for hit in candidates if is_test_path(hit.path)]
     for hit in tests:
@@ -1528,8 +1958,130 @@ def read_source(
     )
 
 
+def _symbol_trace_file_intelligence(
+    settings: Settings, repo: str, path: str, blob: str, source: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    from .atlas import ATLAS_SCHEMA_VERSION, EXTRACTOR_VERSION, _file_intelligence
+
+    cache = _ACTIVE_RETRIEVAL_CACHE.get()
+    generation = settings.atlas_generation
+    key = ("symbol-trace-file-intelligence", ATLAS_SCHEMA_VERSION, EXTRACTOR_VERSION,
+           generation.identity if generation is not None else "legacy", repo, path, blob)
+    if cache is not None and key in cache:
+        _, entities, edges = cache[key]
+        return entities, edges, True
+    _, entities, _, edges = _file_intelligence(repo, path, blob, source)
+    if cache is not None and len(cache) < 256:
+        retained = [value for item, value in cache.items() if item[:1] == key[:1]]
+        remaining = MAX_SYMBOL_TRACE_CACHE_BYTES - sum(value[0] for value in retained)
+        if len(retained) < MAX_SYMBOL_TRACE_CACHED_FILES and remaining > 0:
+            # Count the complete retained projection (including nested metadata),
+            # not just its source. Stream ASCII JSON to avoid a large temporary.
+            size = 0
+            for fragment in json.JSONEncoder(ensure_ascii=True, separators=(",", ":")).iterencode((key, entities, edges)):
+                size += len(fragment)
+                if size > remaining:
+                    break
+            else:
+                cache[key] = (size, entities, edges)
+    return entities, edges, False
+
+
+@source_verification_scope()
 def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = None) -> tuple[list[SearchHit], list[str]]:
-    from .atlas import AtlasCapacityError, _file_intelligence, symbol_call_edges
+    # Standalone traces use the same request-local projection cache as retrieval.
+    # Declare intent before the lexical pass; ordinary searches do no caller scan.
+    cache = _ACTIVE_RETRIEVAL_CACHE.get()
+    token = _ACTIVE_RETRIEVAL_CACHE.set({}) if cache is None else None
+    try:
+        _ACTIVE_RETRIEVAL_CACHE.get().setdefault(("java-call-queries",), set()).add(query.rsplit(".", 1)[-1])
+        return _trace_symbol(settings, query, repos)
+    finally:
+        if token is not None:
+            _ACTIVE_RETRIEVAL_CACHE.reset(token)
+
+
+def _load_python_binding_sources(
+    settings: Settings, generation: Any, keys: list[tuple[str, str]],
+    sources: dict[tuple[str, str], str], attempted: set[tuple[str, str]], deadline: float,
+) -> dict[tuple[str, str], str]:
+    """Accounted pinned batch shared by graph navigation and symbol tracing."""
+    from .index import read_generation_files
+    from .investigation import MAX_FLOW_SEEDS
+
+    trace = _ACTIVE_RETRIEVAL_TRACE.get()
+    missing = [key for key in dict.fromkeys(keys) if key not in sources and key not in attempted]
+    missing = missing[:max(0, MAX_FLOW_SEEDS - len(attempted))]
+    remaining = MAX_PINNED_HYDRATION_BYTES - sum(len(value.encode('utf-8')) for value in sources.values())
+    if generation is not None and missing and remaining > 0 and time.perf_counter() < deadline and (
+        trace is None or trace.try_reserve_backend()
+    ):
+        attempted.update(missing)
+        started = time.perf_counter()
+        loaded = {}
+        try:
+            loaded = read_generation_files(settings, generation, missing, max_bytes=remaining,
+                max_seconds=min(MAX_PINNED_HYDRATION_SECONDS, max(.001, deadline - time.perf_counter()))) or {}
+            sources.update(loaded)
+        finally:
+            if trace is not None:
+                trace.complete_reserved_backend('python-binding-source', (time.perf_counter() - started) * 1000,
+                    bytes_scanned=sum(len(value.encode('utf-8')) for value in loaded.values()), files=len(loaded))
+    return {key: sources[key] for key in keys if key in sources}
+
+
+def _find_python_caller_sources(
+    settings: Settings, generation: Any, entities: Iterable[dict[str, Any]],
+    sources: dict[tuple[str, str], str], deadline: float,
+) -> str | None:
+    """Find alias candidates in the existing pinned lexical index, not by call name."""
+    from pathlib import PurePosixPath
+    from .index import query_generation_indexes
+    from .investigation import MAX_FLOW_SEEDS
+
+    trace = _ACTIVE_RETRIEVAL_TRACE.get()
+    searched = set()
+    reason = None
+    for entity in entities:
+        path = PurePosixPath(entity['path'])
+        if path.suffix.lower() != '.py':
+            continue
+        module = path.parent.name if path.name == '__init__.py' else path.stem
+        key = entity['repo'], module
+        if not module or key in searched:
+            continue
+        searched.add(key)
+        remaining_files = MAX_FLOW_SEEDS - len(sources)
+        remaining_bytes = MAX_PINNED_HYDRATION_BYTES - sum(len(value.encode('utf-8')) for value in sources.values())
+        if remaining_files <= 0 or remaining_bytes <= 0 or time.perf_counter() >= deadline or (
+            trace is not None and not trace.try_reserve_backend()
+        ):
+            return 'Python caller candidate scope budget reached'
+        started = time.perf_counter()
+        loaded: dict[tuple[str, str], str] = {}
+        stats: dict[str, object] = {}
+        try:
+            result = query_generation_indexes(settings, generation,
+                [repo for repo in settings.repositories if repo.name == entity['repo']], module,
+                max_results=remaining_files, max_candidate_files=remaining_files, max_hits=remaining_files,
+                max_bytes=remaining_bytes, max_seconds=min(MAX_PINNED_QUERY_SECONDS, max(.001, deadline - started)),
+                stats=stats, python_sources=loaded)
+            if result is None:
+                reason = 'pinned Python caller index is unavailable'
+            else:
+                sources.update(loaded)
+                if stats.get('budget_exhausted'):
+                    reason = 'Python caller candidate ' + str(stats.get('reason') or 'scope') + ' budget reached'
+        finally:
+            if trace is not None:
+                trace.complete_reserved_backend('python-caller-index', (time.perf_counter() - started) * 1000,
+                    bytes_scanned=int(stats.get('candidate_bytes') or 0), files=int(stats.get('candidate_files') or 0))
+    return reason
+
+
+def _trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = None) -> tuple[list[SearchHit], list[str]]:
+    from .atlas import AtlasCapacityError, symbol_call_edges
+    from .index import _java_method_reference_prefix
     from .investigation import MAX_REFRESH_FILE_BYTES
     from .graph import graph_trace
 
@@ -1540,38 +2092,66 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
     scope = list(repos or [])
     name = query.rsplit(".", 1)[-1]
     invocation = re.compile(rf"\b{re.escape(name)}\s*\(")
-    uses = [hit for hit in search(settings, name, scope, fixed=True) if invocation.search(hit.text)]
+    identifier = re.compile(rf"(?<![\w$@]){re.escape(name)}(?![\w$])")
+    lexical = search(settings, name, scope, fixed=True)
+    uses = [hit for hit in lexical if invocation.search(hit.text) or (
+        hit.path.lower().endswith(".java") and any(
+            _java_method_reference_prefix(hit.text, match.start()) for match in identifier.finditer(hit.text)
+        )
+    )]
     inbound: list[SearchHit] = []
-    definitions: list[SearchHit] = []
+    # Reuse an already-validated legacy source only within this single trace.
+    # A later trace must re-read it before consulting the parser-result cache.
+    verified_sources: dict[tuple[str, str], str] = {}
+    definitions = [hit for hit in _symbol_definition_hits(settings, name, scope, uses, _verified_sources=verified_sources)
+                   if invocation.search(hit.text)]
+    definition_keys = {(hit.repo, hit.path, hit.line) for hit in definitions}
     for hit in uses:
-        if _symbol_declaration(name, path=hit.path).search(hit.text):
-            hit.kind = "definition"
-            hit.score = 100
-            definitions.append(hit)
-        else:
-            hit.kind = "caller"
+        if (hit.repo, hit.path, hit.line) not in definition_keys:
+            hit.kind = "lexical reference candidate (call and dispatch not established)"
             hit.score = 96
             inbound.append(hit)
+    if settings.atlas_generation is not None:
+        references, reference_limit = _java_caller_reference_hits(settings, name, scope)
+        seen = definition_keys | {(hit.repo, hit.path, hit.line) for hit in inbound}
+        inbound.extend(hit for hit in references if (hit.repo, hit.path, hit.line) not in seen)
+        trace = _ACTIVE_RETRIEVAL_TRACE.get()
+        if reference_limit and trace is not None:
+            trace.fallback_reasons.append(
+                f"Java caller verification is incomplete: {reference_limit}; source availability is unknown."
+            )
     graph_scope = scope or sorted({hit.repo for hit in definitions + inbound})
     graph_hits, graph_relationships = graph_trace(settings, query, graph_scope)
-    relationships = graph_relationships + [f"{hit.repo}:{hit.path}:{hit.line}  CALLS  {query}" for hit in inbound]
+    # Raw lexical text may be a comment or literal, not a static call edge.
+    relationships = list(graph_relationships)
     call_names: set[str] = set()
+    unknown_calls: set[str] = set()
     callee_hits: list[SearchHit] = []
     selected = definitions[:5]
     trace = _ACTIVE_RETRIEVAL_TRACE.get()
     if selected and (trace is None or trace.try_reserve_backend()):
         started = time.perf_counter()
         try:
+            attempted: set[tuple[str, str]] = set()
+            def load_sources(keys):
+                return _load_python_binding_sources(settings, settings.atlas_generation, keys,
+                                                    verified_sources, attempted, started + 2.0)
+            if settings.atlas_generation is not None:
+                caller_reason = _find_python_caller_sources(settings, settings.atlas_generation,
+                    ({'repo': hit.repo, 'path': hit.path} for hit in selected), verified_sources, started + 2.0)
+                if caller_reason and trace is not None:
+                    trace.fallback_reasons.append(caller_reason + '; caller coverage is incomplete')
             result = symbol_call_edges(
                 settings, settings.atlas_generation,
                 ((hit.repo, hit.path, hit.line) for hit in selected), name,
+                python_sources=verified_sources, load_python_sources=load_sources,
             )
             if result is None:
                 if trace is not None:
                     trace.fallback_reasons.append("symbol_trace_exact_source_fallback")
                 # Legacy/unavailable Atlas: reuse the same bounded extractor
                 # against exact source, never infer callees from a whole file.
-                edges, targets = [], {}
+                edges, targets, python_targets = [], {}, {}
                 source_settings = settings
                 if settings.atlas_generation is not None:
                     source_settings = replace(
@@ -1587,43 +2167,73 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
                         if trace is not None:
                             trace.fallback_reasons.append("symbol_trace_time_budget")
                         break
-                    if trace is not None and not trace.try_reserve_backend():
+                    source = verified_sources.get((repo, path))
+                    reused_source = source is not None
+                    if not reused_source and trace is not None and not trace.try_reserve_backend():
                         trace.fallback_reasons.append("symbol_trace_physical_budget")
                         break
                     read_started = time.perf_counter()
+                    parsed_cache_hit = False
                     try:
-                        evidence = read_source(source_settings, hits[0], full=True)
-                        source = evidence.verification_content or evidence.content
+                        if source is None:
+                            evidence = read_source(source_settings, hits[0], full=True)
+                            source = evidence.verification_content or evidence.content
                         raw = source.encode("utf-8")
-                        if trace is not None:
+                        if trace is not None and not reused_source:
                             trace.bytes_read += len(raw)
                         if len(raw) > MAX_REFRESH_FILE_BYTES:
                             if trace is not None:
                                 trace.fallback_reasons.append("symbol_trace_source_byte_budget")
                             continue
-                        _, entities, _, extracted = _file_intelligence(repo, path, hashlib.sha256(raw).hexdigest(), source)
+                        entities, extracted, parsed_cache_hit = _symbol_trace_file_intelligence(
+                            source_settings, repo, path, hashlib.sha256(raw).hexdigest(), source,
+                        )
                     except (BrainError, AtlasCapacityError, OSError):
                         if trace is not None:
                             trace.fallback_reasons.append("symbol_trace_source_unavailable")
                         continue
                     finally:
-                        if trace is not None:
-                            trace.complete_reserved_backend("symbol_trace_source", (time.perf_counter() - read_started) * 1000)
+                        if trace is not None and not reused_source:
+                            trace.complete_reserved_backend("symbol_trace_source", (time.perf_counter() - read_started) * 1000,
+                                                            cache_hit=parsed_cache_hit)
                     owners = {item["entity_id"] for item in entities if item["simple_name"] == name
                               and item["line_start"] in {hit.line for hit in hits}}
-                    edges.extend(item for item in extracted if item["edge_type"] == "CALLS" and item["source_id"] in owners)
+                    file_edges = [item for item in extracted if item["edge_type"] == "CALLS" and item["source_id"] in owners]
+                    edges.extend(file_edges)
                     targets.update({item["entity_id"]: item for item in entities})
-                result = {"edges": edges[:80], "targets": targets, "truncated": len(edges) > 80}
+                    if path.lower().endswith('.py'):
+                        from .python_bindings import source_bindings
+                        bindings = source_bindings(source)[0]
+                        for edge in file_edges:
+                            owner = targets.get(edge['source_id'])
+                            if owner is None or (edge['repo'], edge['path']) != (repo, path):
+                                continue
+                            metadata = edge['metadata']
+                            binding = bindings.get((owner['line_start'], edge['line_start'],
+                                                    metadata.get('target_name'), metadata.get('receiver')))
+                            matches = [item for item in entities if binding and binding[0] == 'definition'
+                                       and item['simple_name'] == binding[3] and item['line_start'] == binding[4]]
+                            if len(matches) == 1:
+                                python_targets[edge['edge_id']] = matches[0]
+                result = {"edges": edges[:80], "targets": targets, "python_targets": python_targets,
+                          "truncated": len(edges) > 80}
             if result.get("truncated") and trace is not None:
                 trace.fallback_reasons.append("symbol_trace_edge_budget")
+            inbound.extend(SearchHit(item['repo'], item['path'], item['line_start'], item['signature'],
+                'caller candidate', 96, ['generation-validated Python caller binding'])
+                for item in result.get('callers') or [])
             for edge in result["edges"]:
                 metadata = edge["metadata"]
                 target_name = str(metadata.get("target_name") or "")
                 receiver = str(metadata.get("receiver") or "")
+                python_call = edge['path'].lower().endswith('.py')
+                target = (result.get('python_targets', {}).get(edge['edge_id']) if python_call
+                          else result["targets"].get(edge["target_id"]))
+                bound = target is not None and (python_call or metadata.get('resolved') and receiver in {'', 'this'})
                 if target_name:
-                    call_names.add((receiver + "." if receiver else "") + target_name)
-                target = result["targets"].get(edge["target_id"])
-                if metadata.get("resolved") and target is not None:
+                    (call_names if bound else unknown_calls).add(
+                        (receiver + "." if receiver else "") + target_name)
+                if bound:
                     callee_hits.append(SearchHit(
                         str(target["repo"]), str(target["path"]), int(target["line_start"]),
                         str(target["signature"]), "callee candidate", 96, ["scoped static call candidate"],
@@ -1634,6 +2244,7 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
     elif selected and trace is not None:
         trace.fallback_reasons.append("symbol_trace_physical_budget")
     relationships.extend(f"{query}  CALLS  {called}" for called in sorted(call_names)[:80])
+    relationships.extend(f"{query}  CALL CANDIDATE (binding unavailable)  {called}" for called in sorted(unknown_calls)[:80])
     combined = graph_hits + definitions + inbound + callee_hits
     return list({(hit.repo, hit.path, hit.line, hit.kind): hit for hit in combined}.values()), relationships
 
@@ -1865,10 +2476,53 @@ def generate_map(settings: Settings) -> str:
     return text
 
 
-def _unwrap_request_fence(text: str) -> str:
-    stripped = text.strip()
-    match = re.fullmatch(r"(`{3,}|~{3,})(?:json)?[ \t]*\r?\n(.*?)\r?\n\1[ \t]*", stripped, re.DOTALL | re.IGNORECASE)
-    return match.group(2).strip() if match and match.group(2).lstrip().startswith("{") else stripped
+def _request_document(text: str) -> str | None:
+    """Select the latest structural directive, shared by routing and parsing."""
+    if len(text) > MAX_REQUEST_TEXT_CHARS or len(text.encode("utf-8")) > MAX_REQUEST_TEXT_BYTES:
+        raise BrainError(f"Project Brain request exceeds the {MAX_REQUEST_TEXT_CHARS:,}-character input limit")
+    text = text.lstrip("\ufeff \t\r\n")
+    candidates: list[tuple[int, str]] = []
+    fence_pattern = re.compile(r"(?ms)^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n(.*?)^[ \t]*\1[ \t]*\r?$")
+
+    def is_request(value: str) -> bool:
+        value = re.sub(r"\A(?:(?:[ \t]*#[^\r\n]*|[ \t]*---[ \t]*|[ \t]*)\r?\n)+", "", value).lstrip()
+        return bool(re.match(r"(?:CONTEXT_REQUEST|INVESTIGATION_REQUEST)\s*:", value) or (
+            value.startswith("{") and re.search(r'"(?:CONTEXT_REQUEST|INVESTIGATION_REQUEST|objective)"\s*:', value)
+        ))
+
+    # Mask whole fences so markers inside JSON strings or source examples do
+    # not supersede their containing document.
+    outside = list(text)
+    for match in fence_pattern.finditer(text):
+        body = match.group(2).strip()
+        if is_request(body):
+            candidates.append((match.start(), body))
+        outside[match.start():match.end()] = " " * (match.end() - match.start())
+    markers = list(re.finditer(r"(?m)^[ \t]*(?:(?:CONTEXT_REQUEST|INVESTIGATION_REQUEST)[ \t]*:|\{)", "".join(outside)))
+    consumed = 0
+    for index, marker in enumerate(markers):
+        if marker.start() < consumed:
+            continue
+        payload = text[marker.start():].lstrip()
+        if payload.startswith("{"):
+            try:
+                _, end = json.JSONDecoder().raw_decode(payload)
+            except (ValueError, RecursionError):
+                end = len(payload)
+            consumed = marker.end() - 1 + end
+            payload = payload[:end]
+        else:
+            indent = len(marker.group()) - len(marker.group().lstrip())
+            end = next((following.start() for following in markers[index + 1:]
+                        if len(following.group()) - len(following.group().lstrip()) <= indent), len(text))
+            # Nested JSON or protocol-looking text in a YAML block scalar is
+            # data belonging to this document, never a newer command.
+            consumed = end
+            payload = text[marker.start():end].strip()
+            payload = re.split(r"(?m)^[ \t]*(?:`{3,}|~{3,})", payload, maxsplit=1)[0].strip()
+        if is_request(payload):
+            candidates.append((marker.start(), payload))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def _request_body(text: str) -> dict[str, Any]:
@@ -1876,47 +2530,39 @@ def _request_body(text: str) -> dict[str, Any]:
     # Windows PowerShell 5.1 writes ``Set-Content -Encoding UTF8`` files with
     # a UTF-8 BOM.  Treat that transport marker as encoding metadata, not as
     # part of the protocol document, for JSON, YAML, stdin, and clipboard use.
-    text = text.removeprefix("\ufeff")
-    stripped = text.strip()
-    if not stripped:
+    if not text.lstrip("\ufeff \t\r\n"):
         raise BrainError("The AI response is empty")
-    if len(text) > MAX_REQUEST_TEXT_CHARS or len(text.encode("utf-8")) > MAX_REQUEST_TEXT_BYTES:
-        raise BrainError(f"Project Brain request exceeds the {MAX_REQUEST_TEXT_CHARS:,}-character input limit")
-
+    stripped = _request_document(text)
+    if stripped is None:
+        raise BrainError(
+            "Input does not contain CONTEXT_REQUEST: or INVESTIGATION_REQUEST:. Copy the AI's complete response, "
+            "or ask it to return one Project Brain request block."
+        )
     loaded: Any = None
-    stripped = _unwrap_request_fence(text)
     if stripped.startswith("{"):
         try:
             loaded = json.loads(stripped)
         except json.JSONDecodeError as exc:
             raise BrainError(f"Invalid CONTEXT_REQUEST JSON: line {exc.lineno}, column {exc.colno}: {exc.msg}") from exc
+        except RecursionError as exc:
+            raise BrainError("Project Brain JSON nesting is too deep") from exc
 
     if loaded is None:
-        # A textarea or copied chat can contain an earlier request followed by
-        # the AI's new one. The newest directive is the one to execute.
-        markers = [(text.rfind(name + ":"), name) for name in ("CONTEXT_REQUEST", "INVESTIGATION_REQUEST")]
-        marker, marker_name = max(markers)
-        if marker < 0:
-            raise BrainError(
-                "Input does not contain CONTEXT_REQUEST: or INVESTIGATION_REQUEST:. Copy the AI's complete response, "
-                "or ask it to return one Project Brain request block."
-            )
-        payload = text[marker:]
-        closing_fence = payload.find("\n```")
-        if closing_fence >= 0:
-            payload = payload[:closing_fence]
         try:
             import yaml  # type: ignore[import-not-found]
         except ImportError:
-            loaded = simple_yaml_load(payload)
+            try:
+                loaded = simple_yaml_load(stripped)
+            except RecursionError as exc:
+                raise BrainError("Project Brain YAML nesting is too deep") from exc
         else:
             try:
-                loaded = yaml.safe_load(payload)
+                loaded = yaml.safe_load(stripped)
             except Exception as exc:
                 raise BrainError(f"Invalid CONTEXT_REQUEST YAML: {exc}") from exc
 
     if isinstance(loaded, dict) and not ({"CONTEXT_REQUEST", "INVESTIGATION_REQUEST"} & set(loaded)) and "objective" in loaded:
-        wrapper = "INVESTIGATION_REQUEST" if loaded.get("version") in {4, 5} else "CONTEXT_REQUEST"
+        wrapper = "INVESTIGATION_REQUEST" if loaded.get("version") in (4, 5) else "CONTEXT_REQUEST"
         loaded = {wrapper: loaded}
     if not isinstance(loaded, dict):
         raise BrainError("Project Brain request must be a YAML mapping or JSON object")
@@ -1929,7 +2575,7 @@ def _request_body(text: str) -> dict[str, Any]:
         raise BrainError(f"CONTEXT_REQUEST wrapper has unknown keys: {', '.join(unknown_wrapper)}")
     request = dict(loaded[wrapper])
     version = request.get("version", loaded.get("version", LEGACY_DEFAULT_PROTOCOL_VERSION))
-    if version not in {1, 2, 3, 4, 5}:
+    if not isinstance(version, int) or isinstance(version, bool) or version not in {1, 2, 3, 4, 5}:
         raise BrainError(f"Unsupported Project Brain request version {version!r}; this build supports versions 1, 2, 3, 4, and 5")
     if version in {4, 5} and wrapper != "INVESTIGATION_REQUEST":
         raise BrainError(f"version {version} must use the INVESTIGATION_REQUEST wrapper")
@@ -2033,7 +2679,7 @@ def _request_body(text: str) -> dict[str, Any]:
                     raise BrainError(f"anchors[{index}] has an invalid kind or value")
                 anchors.append({"kind": kind, "value": value})
             request["anchors"] = anchors
-        from .retrieval.planner import objective_terms
+        from .retrieval.planner import objective_terms, requested_symbol_relations
         from .investigation import _qualified_symbol_queries
 
         exact_anchor_terms = [
@@ -2048,16 +2694,22 @@ def _request_body(text: str) -> dict[str, Any]:
             for term in objective_terms(value, limit=4)
             if term != value
         ]
-        resolve_terms = [
-            *exact_anchor_terms, *request["resolve"], *derived_anchor_terms,
-            *(term for term in objective_terms(objective, limit=8) if term.casefold() not in qualified_parts),
-        ]
+        explicit_terms = list(dict.fromkeys([*exact_anchor_terms, *request["resolve"]]))
+        derived_terms = [term for term in dict.fromkeys([
+            *derived_anchor_terms,
+            *(term for term in objective_terms(objective, limit=8, allow_prose=not qualified_symbols)
+              if term.casefold() not in qualified_parts),
+        ]) if term not in explicit_terms]
+        # Parsing preserves explicit intent; only the execution planner defers it.
+        # Generated discovery terms retain their small independent work bound.
+        derived_limit = 12 if version == 5 else max(0, 12 - len(explicit_terms))
+        resolve_terms = [*explicit_terms, *derived_terms[:derived_limit]]
         requested_files = request.get("files", []) if version == 5 else []
         if not isinstance(requested_files, list) or len(requested_files) > MAX_REQUEST_ITEMS:
             raise BrainError(f"files must be a list of at most {MAX_REQUEST_ITEMS} items")
         if requested_files and not exact_anchor_terms and not request["resolve"]:
             resolve_terms = []  # Known files need exact reads, not another discovery pass.
-        request["searches"] = [{"query": value, "repos": []} for value in list(dict.fromkeys(resolve_terms))[:12]]
+        request["searches"] = [{"query": value, "repos": []} for value in resolve_terms]
         request["paths"] = []
         request["symbols"] = []
         request["files"] = requested_files
@@ -2074,7 +2726,9 @@ def _request_body(text: str) -> dict[str, Any]:
         request["coverage"] = {
             "production": "required",
             "tests": "required" if request.get("mode") == "test_surface" or "test" in required_text else "auto",
-            "relationships": "required" if any(value in required_text for value in ("flow", "integration", "relationship", "graph")) else "auto",
+            "relationships": "required" if requested_symbol_relations(request) or any(
+                value in required_text for value in ("flow", "integration", "relationship", "graph")
+            ) else "auto",
             "configuration": "required" if "config" in required_text else "auto",
             "history": "required" if request.get("mode") == "history" or any(value in required_text for value in ("history", "change", "commit")) else "auto",
         }
@@ -2155,8 +2809,9 @@ def _request_body(text: str) -> dict[str, Any]:
         elif not isinstance(value, list):
             raise BrainError(f"{key} must be a list")
         else:
-            if len(value) > MAX_REQUEST_ITEMS:
-                raise BrainError(f"{key} exceeds the {MAX_REQUEST_ITEMS}-item limit")
+            item_limit = MAX_REQUEST_ITEMS * 2 + 12 if version == 5 and key == "searches" else MAX_REQUEST_ITEMS
+            if len(value) > item_limit:
+                raise BrainError(f"{key} exceeds the {item_limit}-item limit")
             request[key] = value
     return request
 
@@ -2168,8 +2823,9 @@ def parse_context_request(text: str) -> dict[str, Any]:
             raise BrainError(f"searches[{index}].query is required")
         if set(item) - {"query", "repos"}:
             raise BrainError(f"searches[{index}] has unknown keys")
-        if len(str(item["query"])) > 500:
-            raise BrainError(f"searches[{index}].query exceeds 500 characters")
+        query_limit = 1_000 if request["version"] == 5 else 500
+        if len(str(item["query"])) > query_limit:
+            raise BrainError(f"searches[{index}].query exceeds {query_limit} characters")
         _requested_repos(item)
     for index, item in enumerate(request["paths"]):
         if not isinstance(item, dict) or not str(item.get("query") or "").strip():
@@ -2326,13 +2982,12 @@ def request_repair_prompt(error: str) -> str:
     return (
         "Your previous response could not be executed by Project Brain.\n\n"
         f"Validation error: {error}\n\n"
-        "Return only one minimal fenced YAML block. State the repository fact to establish; do not invent repository names or enumerate command matrices.\n\n"
+        "Return only one minimal fenced json block with a valid JSON object. Use ordinary double quotes, escaped strings, no comments and no trailing commas. State the repository fact to establish; do not invent repository names or enumerate command matrices.\n\n"
         "Legacy CONTEXT_REQUEST forms with version: 1, version: 2, or version: 3 and INVESTIGATION_REQUEST version: 4 remain supported; new repairs use investigation protocol v5.\n\n"
-        "```yaml\n"
-        "INVESTIGATION_REQUEST:\n"
-        f"  version: {PROTOCOL_VERSION}\n"
-        "  mode: root_cause\n"
-        "  objective: State the next repository fact that must be established.\n"
+        "Preserve this ticket's protocol and actual latest base_context_id when supplied; omit wave and never invent a context ID.\n\n"
+        "```json\n"
+        + json.dumps({"INVESTIGATION_REQUEST": {"version": PROTOCOL_VERSION, "mode": "root_cause",
+                      "objective": "State the next repository fact that must be established."}}, indent=2) + "\n"
         "```\n"
     )
 
@@ -2370,28 +3025,225 @@ def _direct_file(settings: Settings, item: dict[str, Any]) -> Evidence | None:
         return None
 
 
+def _requested_symbol_ranges(
+    settings: Settings, anchors: dict[str, dict[str, Any]],
+    *, definitions: dict[tuple[str, str, int], set[str]] | None = None,
+    enclosing: Iterable[tuple[str, str, int]] = (),
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Revalidate a bounded batch of resolved symbols; ranges remain navigation, not source."""
+    from .atlas import ATLAS_SCHEMA_VERSION, _valid_generation_entities
+    from .catalog import connect
+    from .investigation import GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION
+
+    generation = settings.atlas_generation
+    if generation is None or generation.component("hierarchy").get("status") != "ready" or (
+        generation.component("hierarchy").get("schema_version") != ATLAS_SCHEMA_VERSION
+    ):
+        return [], "pinned hierarchy unavailable"
+    connection = None
+    deadline = time.monotonic() + .25
+    try:
+        connection = connect(settings)
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1_000)
+        identifiers = list(anchors)[:MAX_REQUEST_ITEMS]
+        definitions = definitions or {}
+        locations = [(repo, path, line, name) for (repo, path, line), names in definitions.items()
+                     for name in sorted(names)]
+        incomplete = len(locations) > MAX_REQUEST_ITEMS
+        locations = locations[:MAX_REQUEST_ITEMS]
+        definition_ids: dict[tuple[str, str, int, str], str] = {}
+        if locations:
+            # Recover bodies only at already-selected declaration locations.
+            # A same-name owner elsewhere is not a resolved dispatch target.
+            slots = ",".join("(?,?,?,?)" for _ in locations)
+            rows = connection.execute(
+                f"WITH requested(repo,path,line,name) AS (VALUES {slots}) "
+                "SELECT r.repo,r.path,r.line,r.name,e.entity_id FROM requested r "
+                "CROSS JOIN atlas_entities e ON e.entity_id IN ("
+                "SELECT a.entity_id FROM atlas_entities a INDEXED BY atlas_entities_repo_path "
+                "CROSS JOIN generation_entities g ON g.entity_id=a.entity_id AND g.generation=? "
+                "CROSS JOIN generation_intelligence_files f ON f.generation=g.generation "
+                "AND f.repo=a.repo AND f.path=a.path AND f.blob_sha=a.blob_sha AND f.schema_version=? "
+                "WHERE a.repo=r.repo AND a.path=r.path AND a.line_start=r.line "
+                "AND a.simple_name=r.name AND a.kind!='file' LIMIT 2)",
+                (*[value for location in locations for value in location], generation.generation,
+                 GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION),
+            ).fetchall()
+            # A crowded/ambiguous location must not consume another one's
+            # lookup budget, or be mistaken for a uniquely identified body.
+            matches: dict[tuple[str, str, int, str], list[str]] = {}
+            for row in rows:
+                matches.setdefault(tuple(row[:4]), []).append(str(row[4]))
+            definition_ids = {location: values[0] for location, values in matches.items() if len(values) == 1}
+            incomplete = incomplete or set(locations) != set(definition_ids)
+            identifiers = list(dict.fromkeys([*identifiers, *definition_ids.values()]))
+            incomplete = incomplete or len(identifiers) > MAX_REQUEST_ITEMS
+            identifiers = identifiers[:MAX_REQUEST_ITEMS]
+        enclosing_points = list(dict.fromkeys(enclosing))[:MAX_REQUEST_ITEMS]
+        enclosing_ids: dict[tuple[str, str, int], list[str]] = {}
+        if enclosing_points:
+            # Literal loci are not declarations. Seek only their pinned file's
+            # two narrowest callable scopes; tied/overlapping scopes stay windows.
+            rows = connection.execute(
+                f"WITH requested(repo,path,line) AS (VALUES {','.join('(?,?,?)' for _ in enclosing_points)}) "
+                "SELECT r.repo,r.path,r.line,e.entity_id FROM requested r "
+                "CROSS JOIN atlas_entities e ON e.entity_id IN ("
+                "SELECT a.entity_id FROM atlas_entities a INDEXED BY atlas_entities_repo_path "
+                "CROSS JOIN generation_entities g ON g.entity_id=a.entity_id AND g.generation=? "
+                "CROSS JOIN generation_intelligence_files f ON f.generation=g.generation "
+                "AND f.repo=a.repo AND f.path=a.path AND f.blob_sha=a.blob_sha AND f.schema_version=? "
+                "WHERE a.repo=r.repo AND a.path=r.path AND a.line_start<=r.line AND a.line_end>=r.line "
+                "AND a.language IN ('python','java') AND a.kind IN ('function','method','constructor','test') "
+                "AND a.signature NOT LIKE 'class %' "
+                "ORDER BY a.line_end-a.line_start,a.line_start DESC,a.entity_id LIMIT 2)",
+                (*[value for point in enclosing_points for value in point], generation.generation,
+                 GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION),
+            ).fetchall()
+            for row in rows:
+                enclosing_ids.setdefault(tuple(row[:3]), []).append(str(row[3]))
+            identifiers = list(dict.fromkeys([*identifiers, *(key for values in enclosing_ids.values() for key in values)]))
+        entities = _valid_generation_entities(connection, generation.generation, identifiers)
+        invalid = set(identifiers) - set(entities) | (set(anchors) - set(entities))
+        invalid.update(key for key, entity in entities.items() if key in anchors and
+            (entity["repo"], entity["path"], entity["line_start"], entity["qualified_name"], entity["module_id"]) != (
+                anchors[key]["repo"], anchors[key]["path"], anchors[key]["line"], anchors[key]["value"], anchors[key]["module_id"]
+            ))
+        if anchors:
+            # Flow targets did not pass the runtime-anchor resolver. Validate
+            # their file membership in one bounded batch, never per callee.
+            members = {str(row[0]) for row in connection.execute(
+                "SELECT e.entity_id FROM atlas_entities e CROSS JOIN generation_intelligence_files f "
+                "ON f.generation=? AND f.repo=e.repo AND f.path=e.path AND f.blob_sha=e.blob_sha "
+                f"AND f.schema_version=? WHERE e.entity_id IN ({','.join('?' for _ in anchors)})",
+                (generation.generation, GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION, *anchors),
+            )}
+            invalid.update(set(anchors) - members)
+        parent_ids = {item['parent_entity_id'] for item in entities.values() if item['parent_entity_id']} - set(entities)
+        parents = {**entities, **(_valid_generation_entities(connection, generation.generation, parent_ids) if parent_ids else {})}
+        invalid.update(key for key, item in entities.items() if item['parent_entity_id'] and (
+            item['parent_entity_id'] not in parents or any(
+                item[key] != parents[item['parent_entity_id']][key] for key in ('repo', 'path', 'module_id', 'blob_sha'))
+            or not parents[item['parent_entity_id']]['line_start'] <= item['line_start'] <= item['line_end'] <= parents[item['parent_entity_id']]['line_end']
+        ))
+        invalid.update(key for location, key in definition_ids.items() if key in entities and
+                       (entities[key]["repo"], entities[key]["path"], entities[key]["line_start"], entities[key]["simple_name"]) != location)
+        # One unavailable derived callee must not erase a valid root body.
+        # Keep only independently validated ranges and report partial identity.
+        entities = {key: item for key, item in entities.items() if key not in invalid}
+        enclosing_matches: dict[str, list[int]] = {}
+        enclosing_incomplete = False
+        if enclosing_points:
+            for point in enclosing_points:
+                if invalid.intersection(enclosing_ids.get(point, [])):
+                    enclosing_incomplete = True
+                    continue  # Do not promote an outer scope when its narrower candidate is damaged.
+                scopes = sorted((entities[key] for key in enclosing_ids.get(point, []) if key in entities),
+                                key=lambda item: (item['line_end'] - item['line_start'], -item['line_start'], item['entity_id']))
+                if not scopes:
+                    continue  # A class field/configuration literal need not be inside a callable.
+                child = scopes[0]
+                parent = parents.get(child['parent_entity_id']) if child['parent_entity_id'] else None
+                # Java boundary rows can also contain adjacent fields/callables.
+                # Without columns, even a one-line method cannot own that locus.
+                if ((child['repo'], child['path']) != point[:2]
+                    or not child['line_start'] <= point[2] <= child['line_end']
+                    or (child['language'] == 'java' and point[2] in (child['line_start'], child['line_end']))
+                    or (child['parent_entity_id'] and (parent is None or any(
+                        child[key] != parent[key] for key in ('repo', 'path', 'module_id', 'blob_sha'))
+                        or not parent['line_start'] <= child['line_start'] <= child['line_end'] <= parent['line_end']))
+                    or (len(scopes) > 1 and (child['parent_entity_id'] != scopes[1]['entity_id']
+                        or (child['line_start'], child['line_end']) == (scopes[1]['line_start'], scopes[1]['line_end'])))):
+                    enclosing_incomplete = True
+                    continue
+                enclosing_matches.setdefault(child['entity_id'], []).append(point[2])
+            requested_ids = list(dict.fromkeys([*anchors, *definition_ids.values(), *enclosing_matches]))
+            enclosing_incomplete = enclosing_incomplete or len(requested_ids) > MAX_REQUEST_ITEMS
+            entities = {key: entities[key] for key in requested_ids[:MAX_REQUEST_ITEMS] if key in entities}
+            for key, lines in enclosing_matches.items():
+                if key in entities:
+                    entities[key]['enclosing_match_lines'] = lines
+        # Generic-language entity ranges are fixed-window estimates. Never call
+        # those complete methods. Python AST and Java brace ranges are reusable.
+        ranges = [entity for entity in entities.values() if entity["language"] in {"python", "java"}
+                  and entity["kind"] in {"function", "method", "constructor", "class", "interface", "type", "test"}]
+        matched = {(item["repo"], item["path"], item["line_start"], item["simple_name"]) for item in ranges}
+        if invalid:
+            return ranges, "some pinned symbol file/owner identity unavailable; only independently validated ranges returned"
+        if incomplete or set(locations) - matched:
+            return ranges, "some requested definitions have no validated exact range within the lookup budget; their source windows may be incomplete"
+        if enclosing_incomplete:
+            return ranges, "some enclosing callable ranges are ambiguous or unavailable; exact-match windows remain authoritative"
+        return ranges, ("some symbols have only estimated ranges; their source windows may be incomplete"
+                        if len(ranges) != len(entities) else None)
+    except (sqlite3.Error, OSError):
+        return [], "pinned symbol lookup unavailable or over budget"
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _source_line_offsets(content: str) -> array:
+    """Compact boundaries for the authoritative reader's normalized lines."""
+    offsets = array("Q", [0])
+    offsets.extend(match.end() for match in re.finditer("\n", content))
+    offsets.append(len(content) + 1)
+    return offsets
+
+
 def _requested_file_page(
     settings: Settings, item: dict[str, Any], *, max_bytes: int,
+    source_cache: dict[tuple[str, str], tuple[Evidence, int, array]] | None = None,
+    _indexed_source: object = _INDEXED_SOURCE_UNSET,
+    _source_anchor_line: int | None = None,
 ) -> tuple[Evidence | None, dict[str, Any]]:
     """Read a bounded, whole-line page from the existing authoritative reader."""
     repo, path = str(item["repo"]), str(item["path"])
     result: dict[str, Any] = {"repo": repo, "path": path, "requested_lines": item.get("lines") or "all"}
-    try:
-        source = read_source(settings, SearchHit(repo, path, 1, "", "requested file", 100, ["direct file request"]), full=True)
-    except BrainError as error:
-        return None, {**result, "status": "unavailable", "reason": str(error)}
-    rows = source.content.split("\n") if source.line_end else []
-    total = len(rows)
-    result["source_bytes_read"] = len(source.content.encode("utf-8"))
+    cached = source_cache.get((repo, path)) if source_cache is not None else None
+    if cached is not None:
+        source, _, offsets = cached
+        result["source_bytes_read"] = 0
+    else:
+        try:
+            source = read_source(settings, SearchHit(repo, path, 1, "", "requested file", 100, ["direct file request"]),
+                                 full=True, _indexed_source=_indexed_source)
+        except BrainError as error:
+            return None, {**result, "status": "unavailable", "reason": str(error)}
+        result["source_bytes_read"] = len(source.content.encode("utf-8"))
+        offsets = _source_line_offsets(source.content) if source.line_end else array("Q", [0])
+        retained_bytes = result["source_bytes_read"] + len((source.verification_content or "").encode("utf-8")) + sys.getsizeof(offsets)
+        if source_cache is not None and retained_bytes + sum(value[1] for value in source_cache.values()) <= MAX_PINNED_HYDRATION_BYTES:
+            source_cache[(repo, path)] = source, retained_bytes, offsets
+    # Page slicing and provenance must not mutate the full verified cached file.
+    source = replace(source, found_by=list(source.found_by))
+    total = len(offsets) - 1
     start, end = (1, total) if not item.get("lines") else tuple(int(value) for value in re.split(r"[-:]", item["lines"]))
     result["total_lines"] = total
     if not total and not item.get("lines"):
         return None, {**result, "status": "empty", "reason": "The pinned file exists and is empty."}
     if start > total or end > total:
         return None, {**result, "status": "out_of_range", "reason": f"The pinned file contains {total} lines; requested {start}-{end}."}
+    if _source_anchor_line is not None:
+        # Extend the old source window; do not drop annotations or fused call
+        # sites that were already visible when filling in the method's tail.
+        requested_start, requested_end = start, end
+        radius = max(10, settings.source_window_lines // 2)
+        start, end = min(start, max(1, _source_anchor_line - radius)), max(end, min(total, _source_anchor_line + radius))
+        if total <= settings.full_file_lines and len(source.content.encode("utf-8")) <= max_bytes:
+            start, end = 1, total
+        window_start = offsets[start - 1]
+        window = source.content[window_start:min(offsets[end] - 1, window_start + max_bytes + 1)]
+        if end - start >= 2_000 or len(window.encode("utf-8")) > max_bytes:
+            # Optional surrounding code must not crowd a complete requested
+            # method off the page. Inspect at most one page worth of text.
+            first, last = offsets[requested_start - 1], offsets[requested_end] - 1
+            if (requested_end - requested_start < 2_000 and last - first <= max_bytes
+                    and len(source.content[first:last].encode("utf-8")) <= max_bytes):
+                start, end = requested_start, requested_end
     page: list[str] = []
     used = 0
-    for row in rows[start - 1:min(end, start + 1_999)]:
+    for number in range(start - 1, min(end, start + 1_999)):
+        row = source.content[offsets[number]:offsets[number + 1] - 1]
         size = len(row.encode("utf-8")) + (1 if page else 0)
         if used + size > max_bytes:
             break
@@ -2471,6 +3323,7 @@ def working_tree_diffs(settings: Settings, repos: Iterable[str] | None = None) -
     return evidence
 
 
+@source_verification_scope()
 def retrieve_context(
     settings: Settings,
     request: dict[str, Any],
@@ -2503,6 +3356,11 @@ def retrieve_context(
         emit("planning")
         stage = time.perf_counter()
         compiled_plan = compile_request(request, max_effective_operations=settings.max_effective_operations)
+        if compiled_plan.protocol_version != 5:
+            _ACTIVE_RETRIEVAL_CACHE.get()[("java-call-queries",)] = {
+                item.value.rsplit(".", 1)[-1] for item in compiled_plan.operations
+                if item.kind == "symbol" and {"callers", "callees"}.intersection(item.includes)
+            }
         deadline = started + max(0, compiled_plan.timeout_ms) / 1000
 
         def time_budget_exhausted() -> bool:
@@ -2524,6 +3382,11 @@ def retrieve_context(
         direct_started = time.perf_counter()
         file_values = {item.value for item in compiled_plan.operations if item.kind == "file"}
         file_reads: list[dict[str, Any]] = []
+        # Scoped to this request only. Cache capacity never limits which files
+        # may be read; uncached files still use the normal physical budget.
+        direct_sources: dict[tuple[str, str], tuple[Evidence, int, array]] | None = (
+            {} if settings.atlas_generation_mode == "pinned" else None
+        )
         seen_files: set[str] = set()
         page_bytes = min(64_000, max(1, settings.hard_context_chars // 3 // max(1, len(file_values))))
         for item in request["files"]:
@@ -2537,10 +3400,13 @@ def retrieve_context(
                 continue
             file_values.remove(value)
             if request.get("version") == 5:
-                if not trace.try_reserve_backend():
+                cached_source = direct_sources is not None and (str(item["repo"]), str(item["path"])) in direct_sources
+                if cached_source:
+                    trace.add_cache_hit()
+                elif not trace.try_reserve_backend():
                     bundle.unresolved.append(f"File read deferred by the physical-operation budget: {item['repo']}:{item['path']}.")
                     continue
-                evidence, report = _requested_file_page(settings, item, max_bytes=page_bytes)
+                evidence, report = _requested_file_page(settings, item, max_bytes=page_bytes, source_cache=direct_sources)
                 file_reads.append(report)
                 trace.bytes_read += int(report.get("source_bytes_read") or 0)
                 if not evidence:
@@ -2557,6 +3423,9 @@ def retrieve_context(
             else:
                 bundle.unresolved.append(f"Requested file `{item['repo']}:{item['path']}` was not found")
         trace.add_stage("source_hydration_ms", (time.perf_counter() - direct_started) * 1000)
+        files_incomplete = bool(bundle.unresolved) or any(report.get("next_lines") for report in file_reads)
+        if request.get("version") == 5 and files_incomplete and trace.stop_reason == "coverage_satisfied":
+            trace.stop_reason = "requested_files_incomplete"
 
         if request.get("version") == 5 and request["files"] and not any(
             request.get(key) for key in ("searches", "paths", "symbols", "history", "expand")
@@ -2564,7 +3433,8 @@ def retrieve_context(
             # Keep ticket runtime/lineage in create_context; only bypass optional
             # discovery and models for an exact, already-addressed source read.
             trace.hydrated_regions = len(bundle.evidence)
-            trace.stop_reason = "requested_files_read" if not bundle.unresolved else "requested_files_incomplete"
+            if trace.stop_reason == "coverage_satisfied":
+                trace.stop_reason = "requested_files_read"
             scope = sorted({str(item["repo"]) for item in request["files"]})
             trace.initial_repo_scope = trace.final_repo_scope = scope
             bundle.metrics = {
@@ -2581,6 +3451,16 @@ def retrieve_context(
 
         candidates: list[SearchHit] = []
         from .atlas import route as route_atlas
+
+        if settings.atlas_generation_mode == "pinned" and bundle.atlas_generation is not None:
+            # Candidate metadata is not deliverable evidence. Leave capacity
+            # for one pinned-source batch unless direct reads already buffered
+            # source, and, for symbols, exact range lookup.
+            # Direct file requests above retain their full original budget.
+            symbol_source = bool(request["symbols"]) or any(
+                item.get("kind") == "symbol" for item in request.get("anchors") or []
+            )
+            trace._set_backend_headroom(min(int(not direct_sources) + int(symbol_source), max(0, trace.physical_budget_remaining - 1)))
 
         atlas_started = time.perf_counter()
         atlas_route = route_atlas(
@@ -2616,55 +3496,121 @@ def retrieve_context(
             for item in atlas_route.get("graph_edges") or []
         )
         atlas_repo_scope = [str(name) for name in atlas_route.get("repos") or []]
+        if request.get("version") == 5 and not time_budget_exhausted():
+            config_hits, config_limit = _configuration_prefix_hits(settings, request.get("anchors") or [])
+            candidates.extend(config_hits)
+            if config_hits:
+                bundle.warnings.append(
+                    "Configuration prefix declarations are candidate owners: member binding and active configuration "
+                    "precedence are not established by a prefix match. Inspect the pinned declarations and members."
+                )
+            if config_limit:
+                bundle.unresolved.append(f"Configuration prefix lookup is incomplete: {config_limit}")
         emit("global_discovery", requested_operations=trace.requested_operations, effective_operations=trace.effective_operations)
         discovery_started = time.perf_counter()
-        search_operations = [item for item in compiled_plan.operations if item.kind == "search"]
+        from .investigation import _qualified_symbol_queries, resolve_runtime_anchors
+        from .retrieval.ranker import _SOURCE_CHANNELS
+
+        qualified_queries = set(_qualified_symbol_queries(request.get("anchors") or []))
+        explicit_symbol_queries = {item["value"] for item in request.get("anchors") or [] if item.get("kind") == "symbol"}
+        explicit_anchor_queries = {item["value"] for item in request.get("anchors") or []} | set(request.get("resolve") or [])
+        literal_relation_queries = {item['value'] for item in request.get('anchors') or []
+                                    if item.get('kind') in {'log_literal', 'error_code', 'exception'}}
+        relation_loci: dict[str, set[tuple[str, str, int]]] = {}
+        incomplete_relation_loci: set[str] = set()
+        search_operations = [item for item in compiled_plan.operations if item.kind == "search" or (
+            item.kind == "symbol" and "definition" in item.includes and item.value in qualified_queries
+        )]
+        if exact_symbol_scope:
+            # The router has validated every generated term as an identity
+            # alias in a source-only objective. Its canonical definition read
+            # already covers those terms; preserve all explicit requests.
+            search_operations = [item for item in search_operations
+                                 if item.value in qualified_queries or item.value in explicit_anchor_queries]
         lexical_anchors = {
             value: index for index, value in enumerate(dict.fromkeys(item.value.casefold() for item in search_operations), 1)
         }
         lexical_started = time.perf_counter()
-        from .investigation import _qualified_symbol_queries, resolve_runtime_anchors
+        requested_symbols: dict[str, dict[str, Any]] = {}
+        symbol_query_owners: dict[str, str] = {}
+        requested_definition_names: dict[tuple[str, str, int], set[str]] = {}
+        requested_anchor_locations: set[tuple[str, str, int]] = set()
 
-        qualified_queries = set(_qualified_symbol_queries(request.get("anchors") or []))
-        for operation in search_operations:
+        def protect_definitions(hits: list[SearchHit], name: str) -> bool:
+            found = False
+            for hit in hits:
+                if "definition" in hit.kind.casefold():
+                    requested_definition_names.setdefault((hit.repo, hit.path, hit.line), set()).add(
+                        name.replace("#", ".").rsplit(".", 1)[-1])
+                    hit.kind = "requested symbol definition"
+                    found = True
+            return found
+
+        symbol_overflow = False
+        scheduled_searches = {operation.value for operation in search_operations}
+        bundle.unresolved.extend(
+            f"Explicit resolve `{value}` lookup was deferred by this request's operation budget; "
+            "its result is unknown, not evidence that source is absent."
+            for value in dict.fromkeys(request.get("resolve") or []) if value not in scheduled_searches
+        )
+        for anchor in request.get("anchors") or []:
+            if anchor.get("kind") == "symbol" and anchor["value"] not in scheduled_searches:
+                bundle.unresolved.append(f"No dedicated symbol lookup was scheduled for `{anchor['value']}` within this request's operation budget; request it in a focused follow-up if needed.")
+                if trace.stop_reason == "coverage_satisfied":
+                    trace.stop_reason = "requested_symbols_incomplete"
+        for operation_index, operation in enumerate(search_operations):
             if time_budget_exhausted():
+                bundle.unresolved.extend(
+                    f"Search `{pending.value}` lookup was not executed within this request's time budget; source availability is unknown."
+                    for pending in search_operations[operation_index:]
+                )
                 break
+            lookup_offset = len(trace.fallback_reasons)
             repos = list(operation.repos) or atlas_repo_scope[: settings.initial_repo_limit]
             qualified_query = operation.value in qualified_queries and bundle.atlas_generation is not None
             if qualified_query:
-                hits = []
-                if trace.try_reserve_backend():
-                    query_started = time.perf_counter()
-                    try:
-                        resolved = resolve_runtime_anchors(settings, bundle.atlas_generation, [
-                            {"kind": "symbol", "value": operation.value},
-                        ], use_cache="generation_cache" not in settings.evaluation_ablations)
-                        hits = [
-                            SearchHit(item["repo"], item["path"], item["line"], item["value"],
-                                      "definition", 100, ["generation-validated qualified symbol"])
-                            for item in resolved.get("candidates") or []
-                            if not operation.repos or item["repo"] in operation.repos
-                        ]
-                        if resolved.get("status") != "ready":
-                            bundle.warnings.append("Qualified symbol resolution is unavailable for the pinned Atlas generation.")
-                    finally:
-                        trace.complete_reserved_backend("qualified_symbol", (time.perf_counter() - query_started) * 1000)
+                resolved = resolve_runtime_anchors(settings, bundle.atlas_generation, [
+                    {"kind": "symbol", "value": operation.value},
+                ], use_cache="generation_cache" not in settings.evaluation_ablations)
+                if resolved.get("status") != "ready":
+                    bundle.warnings.append("Qualified symbol resolution is unavailable for the pinned Atlas generation.")
+                    bundle.unresolved.append(
+                        f"Search `{operation.value}` lookup is unavailable for the pinned Atlas generation "
+                        f"({resolved.get('reason') or 'component unavailable'}); source availability is unknown."
+                    )
+                    if trace.stop_reason == "coverage_satisfied":
+                        trace.stop_reason = "requested_symbols_incomplete"
+                    continue
+                hits = [
+                    SearchHit(item["repo"], item["path"], item["line"], item["value"],
+                              "definition", 100, ["generation-validated qualified symbol"])
+                    for item in resolved.get("candidates") or []
+                    if not operation.repos or item["repo"] in operation.repos
+                ]
+                if len(resolved.get('candidates') or []) == 1:
+                    symbol_query_owners[operation.value] = str(resolved['candidates'][0]['entity_id'])
+                for item in resolved.get("candidates") or []:
+                    if not operation.repos or item["repo"] in operation.repos:
+                        if len(requested_symbols) < MAX_REQUEST_ITEMS or str(item["entity_id"]) in requested_symbols:
+                            requested_symbols[str(item["entity_id"])] = item
+                        else:
+                            symbol_overflow = True
             else:
                 hits = search(settings, operation.value, repos, fixed=True)
-            if not hits and not qualified_query:
+            if not hits and not qualified_query and not _source_lookup_failed_since(trace, lookup_offset):
                 try:
                     hits = search(settings, operation.value, repos)
                 except BrainError:
                     hits = []
-            symbol_query = operation.value in {
-                item["value"] for item in request.get("anchors") or [] if item.get("kind") == "symbol"
-            } or bool(SOURCE_SYMBOL_RE.fullmatch(operation.value))
+            symbol_query = operation.value in explicit_symbol_queries or bool(SOURCE_SYMBOL_RE.fullmatch(operation.value))
             symbol_name = operation.value.rsplit(".", 1)[-1] if symbol_query else None
+            if symbol_name is not None and not qualified_query:
+                hits.extend(_symbol_definition_hits(settings, symbol_name, repos, hits))
 
             def source_match() -> bool:
                 return any(
                     not _is_documentation_path(hit.path)
-                    and (qualified_query or symbol_name is None or _symbol_declaration(symbol_name, path=hit.path).search(hit.text))
+                    and (qualified_query or symbol_name is None or hit.kind == "definition")
                     for hit in hits
                 )
 
@@ -2683,18 +3629,45 @@ def retrieve_context(
                     if source_match() or time_budget_exhausted() or trace.physical_budget_remaining <= 0:
                         break
                     if pending:
-                        hits.extend(search(settings, operation.value, pending, fixed=True))
+                        wider = search(settings, operation.value, pending, fixed=True)
+                        if symbol_name is not None:
+                            wider.extend(_symbol_definition_hits(settings, symbol_name, pending, wider))
+                        hits.extend(wider)
                         searched_repos.update(pending)
                         trace.widening_rounds += 1
-            if symbol_name is not None:
-                for hit in hits:
-                    if not _is_documentation_path(hit.path) and _symbol_declaration(symbol_name, path=hit.path).search(hit.text):
-                        hit.kind = "definition"
-                        hit.score = max(hit.score, 100)
-                        hit.found_by = sorted(set([*hit.found_by, "symbol declaration"]))
-            if not hits:
-                bundle.unresolved.append(f"Search `{operation.value}` returned no code matches in {repos or ['all repositories']}")
+            if _source_lookup_failed_since(trace, lookup_offset):
+                bundle.unresolved.append(
+                    f"Search `{operation.value}` could not verify the full requested source scope; "
+                    "source availability is unknown for unavailable repositories."
+                )
+            elif not hits:
+                if trace.stop_reason in {"physical_budget", "time_budget", "lexical_batch_budget"}:
+                    bundle.unresolved.append(
+                        f"Search `{operation.value}` did not complete within this request's retrieval budget; source availability is unknown."
+                    )
+                else:
+                    bundle.unresolved.append(f"Search `{operation.value}` returned no code matches in {repos or ['all repositories']}")
+            definitions_protected = (not qualified_query and operation.value in explicit_symbol_queries
+                                     and protect_definitions(hits, operation.value))
+            if operation.value in literal_relation_queries and (
+                _source_lookup_failed_since(trace, lookup_offset)
+                or len(hits) >= min(settings.candidate_limit, settings.max_results)
+            ):
+                incomplete_relation_loci.add(operation.value)
             for hit in hits:
+                # An explicitly supplied literal is a stronger delivery request
+                # than incidental prose overlap. Promote only an observed source
+                # line, not a fuzzy regex result or a navigation-card label.
+                if (not definitions_protected and operation.value in explicit_anchor_queries and operation.value in hit.text
+                    and "requested symbol definition" not in hit.kind
+                    and _SOURCE_CHANNELS.intersection(hit.found_by)):
+                    hit.kind = ", ".join(dict.fromkeys([*hit.kind.split(", "), "requested anchor match"]))
+                    if hit.path.lower().endswith(('.py', '.java')) and len(requested_anchor_locations) < settings.pre_rerank_candidate_limit:
+                        requested_anchor_locations.add((hit.repo, hit.path, hit.line))
+                        if operation.value in literal_relation_queries:
+                            relation_loci.setdefault(operation.value, set()).add((hit.repo, hit.path, hit.line))
+                    elif operation.value in literal_relation_queries and hit.path.lower().endswith(('.py', '.java')):
+                        incomplete_relation_loci.add(operation.value)
                 # Request-local opaque ordinals retain joint-query coverage
                 # without copying private search text into provenance/metrics.
                 hit.found_by = sorted(set([*hit.found_by, f"lexical anchor {lexical_anchors[operation.value.casefold()]}"]))
@@ -2801,8 +3774,71 @@ def retrieve_context(
         trace.add_stage("repo_routing_ms", (time.perf_counter() - routing_started) * 1000)
 
         targeted = [item for item in compiled_plan.operations if item.kind not in {"search", "file"}]
+        from .retrieval.planner import requested_symbol_relations
+        from .retrieval.models import QueryOperation
+
+        literal_relations = tuple(name for name in requested_symbol_relations(request) if name in {'callers', 'callees'})
+        enclosing_queries: dict[str, set[str]] = {}
+        added_relation_operations = 0
+        relation_incomplete = False
+        if literal_relations and literal_relation_queries:
+            # Reuse exact pinned ownership, never guess a callable from prose
+            # or promote an arbitrary same-literal owner to the root cause.
+            points = sorted({point for loci in relation_loci.values() for point in loci})[:MAX_REQUEST_ITEMS]
+            owners: list[dict[str, Any]] = []
+            reason = 'request time or physical-operation budget'
+            if points and not time_budget_exhausted() and trace.try_reserve_backend():
+                lookup_started = time.perf_counter()
+                try:
+                    owners, reason = _requested_symbol_ranges(settings, {}, enclosing=points)
+                finally:
+                    trace.complete_reserved_backend('anchor_owner', (time.perf_counter() - lookup_started) * 1000)
+            for query in sorted(literal_relation_queries):
+                loci = relation_loci.get(query, set())
+                matched = [item for item in owners if any(
+                    (item['repo'], item['path'], line) in loci for line in item.get('enclosing_match_lines', []))]
+                covered = {(item['repo'], item['path'], line) for item in matched for line in item.get('enclosing_match_lines', [])}
+                if query in incomplete_relation_loci or not loci or len(matched) != 1 or not loci.issubset(covered):
+                    relation_incomplete = True
+                    bundle.unresolved.append(f'Requested literal relationships for `{query}` have no unique validated callable owner: '
+                                             f'{reason or "missing or ambiguous source scope"}; inspect the exact-match source or its pinned symbol anchor.')
+                    continue
+                owner = matched[0]
+                identifier = owner['entity_id']
+                existing = next((item for item in targeted if item.kind == 'symbol'
+                                 and (not item.repos or owner['repo'] in item.repos)
+                                 and (item.value == identifier or symbol_query_owners.get(item.value) == identifier)
+                                 and set(literal_relations).issubset(item.includes)), None)
+                if existing is None:
+                    if len(compiled_plan.operations) + added_relation_operations >= settings.max_effective_operations:
+                        relation_incomplete = True
+                        bundle.unresolved.append(f'Literal relationships for `{query}` were deferred by this request\'s operation budget.')
+                        continue
+                    targeted.append(QueryOperation('symbol', identifier, (owner['repo'],), includes=literal_relations))
+                    added_relation_operations += 1
+                enclosing_queries.setdefault(existing.value if existing else identifier, set()).add(query)
+            trace.effective_operations += added_relation_operations
+            if enclosing_queries:
+                bundle.warnings.append('Literal relationships describe the enclosing callable, not proof that the literal is an executed log or the root cause.')
         unscoped = any(not item.repos for item in targeted)
+        missing_definitions = {item.value for item in targeted if item.kind == "symbol"
+                               and "definition" in item.includes and item.value not in qualified_queries}
         seen_wave_repos: set[str] = set()
+        relation_sources = {
+            key: source.verification_content if source.verification_content is not None else source.content
+            for key, (source, _, _) in (direct_sources or {}).items()
+        }
+        relation_source_attempts: set[tuple[str, str]] = set()
+        pending_enclosing_queries = set(enclosing_queries)
+
+        def load_relation_sources(keys: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
+            loaded = _load_python_binding_sources(settings, bundle.atlas_generation, keys,
+                                                 relation_sources, relation_source_attempts, deadline)
+            # Package exports are binding proof, not an additional source page.
+            # Retain only request-local buffers for runtime revalidation; no IO there.
+            bundle._python_package_sources.update((key, value) for key, value in loaded.items()
+                                                  if key[1].endswith('/__init__.py'))
+            return loaded
 
         def scope_for(operation: Any, wave: list[str]) -> list[str]:
             return list(operation.repos) if operation.repos else [name for name in wave if name not in seen_wave_repos]
@@ -2814,6 +3850,7 @@ def retrieve_context(
             relationships = bool(bundle.relationships)
             return (
                 not production
+                or any(not item.repos and item.value in missing_definitions for item in targeted if item.kind == "symbol")
                 or (coverage.get("tests") == "required" and not tests)
                 or (coverage.get("relationships") == "required" and not relationships)
             )
@@ -2840,19 +3877,125 @@ def retrieve_context(
                     continue
                 if operation.kind == "path":
                     operation_started = time.perf_counter()
+                    lookup_offset = len(trace.fallback_reasons)
                     hits = path_hits(settings, operation.value, repos)
                     trace.add_stage("path_ms", (time.perf_counter() - operation_started) * 1000)
                     candidates.extend(hits)
-                    if not hits:
+                    if _source_lookup_failed_since(trace, lookup_offset) or trace.stop_reason in {"physical_budget", "path_batch_budget"}:
+                        bundle.unresolved.append(
+                            f"Path search `{operation.value}` did not complete in the requested scope; source availability is unknown."
+                        )
+                    elif not hits:
                         bundle.unresolved.append(f"Path search `{operation.value}` returned no matches in {repos}")
                 elif operation.kind == "symbol":
                     operation_started = time.perf_counter()
+                    pending_enclosing_queries.discard(operation.value)
                     include = set(operation.includes)
+                    if operation.value in qualified_queries:
+                        include.discard("definition")  # Already resolved with exact ranges above.
+                    typed_relations = include & {"callers", "callees", "implementations"} if request.get("version") == 5 else set()
+                    if typed_relations:
+                        # Query the one pinned graph, not a short-name scan that
+                        # can mistake a different owner's method for a caller.
+                        if not wave_number and trace.try_reserve_backend():
+                            from .investigation import _execution_flow, resolve_runtime_anchors
+
+                            generation = bundle.atlas_generation
+                            flow: dict[str, Any] = {"steps": [], "reason": "no pinned Atlas generation"}
+                            try:
+                                resolved = resolve_runtime_anchors(settings, generation, [
+                                    {"kind": "symbol", "value": operation.value},
+                                ], use_cache="generation_cache" not in settings.evaluation_ablations) if generation is not None else {}
+                                seeds = list(dict.fromkeys(
+                                    str(item["entity_id"]) for item in resolved.get("candidates") or []
+                                    if item.get("entity_id") and item.get("method") == "entity_name"
+                                ))
+                                if generation is not None and resolved.get("status") == "ready" and len(seeds) == 1:
+                                    bundle._resolved_relation_seeds[operation.value] = seeds[0]
+                                    for query in enclosing_queries.get(operation.value, ()):
+                                        bundle._resolved_relation_seeds[query] = seeds[0]
+                                    if 'callers' in typed_relations:
+                                        caller_reason = _find_python_caller_sources(settings, generation,
+                                            resolved.get('candidates') or [], relation_sources, deadline)
+                                        if caller_reason:
+                                            relation_incomplete = True
+                                            bundle.unresolved.append(caller_reason + '; caller coverage is incomplete.')
+                                    flow = _execution_flow(
+                                        settings, generation, seeds, bundle,
+                                        incoming_types=(
+                                            *(("CALLS",) if "callers" in typed_relations else ()),
+                                            *(("IMPLEMENTS", "EXTENDS") if "implementations" in typed_relations else ()),
+                                        ),
+                                        outgoing_types=("CALLS",) if "callees" in typed_relations else (),
+                                        python_sources=relation_sources, load_python_sources=load_relation_sources,
+                                    )
+                                elif generation is not None:
+                                    flow["reason"] = "symbol is unresolved, ambiguous, or its pinned component is unavailable; qualify the owner/package"
+                            finally:
+                                trace.complete_reserved_backend(
+                                    "symbol_relation", (time.perf_counter() - operation_started) * 1000,
+                                    raw_hits=len(flow.get("steps") or []),
+                                )
+                            for step in flow.get("steps") or []:
+                                candidates.append(SearchHit(
+                                    str(step["repo"]), str(step["path"]), int(step["line"]), str(step["target"]),
+                                    "requested symbol relationship candidate", 100,
+                                    [f"pinned Atlas {step['edge_type']} edge"],
+                                ))
+                                target = (step.get('target_symbol') if 'callees' in typed_relations and step['source_id'] in seeds
+                                          else step.get('source_symbol') if 'callers' in typed_relations and step['target_id'] in seeds else None)
+                                if step['depth'] == 0 and step['edge_type'] == 'CALLS' and target:
+                                    # Reuse the same canonical range/source batch;
+                                    # callsite provenance is not the callee body.
+                                    if len(requested_symbols) < MAX_REQUEST_ITEMS or target['entity_id'] in requested_symbols:
+                                        requested_symbols.setdefault(target['entity_id'], {**target, 'requested_relation': True})
+                                        candidates.append(SearchHit(target['repo'], target['path'], target['line'], target['value'],
+                                            'definition', 100, ['generation-validated qualified symbol']))
+                                    else:
+                                        symbol_overflow = True
+                                bundle.relationships.append(
+                                    f"{step['repo']}:{step['path']}:{step['line']}  {step['edge_type']}  {step['target']} "
+                                    "| pinned Atlas candidate; exact source verification required"
+                                )
+                            if flow.get('unresolved_python_bindings'):
+                                relation_incomplete = True
+                                bundle.unresolved.append(
+                                    f"{flow['unresolved_python_bindings']} Python call bindings remain unknown/unavailable: "
+                                    "a same-name candidate is not an established callee; inspect its pinned source binding."
+                                )
+                            if not flow.get("steps"):
+                                relation_incomplete = True
+                                bundle.unresolved.append(
+                                    f"Requested {', '.join(sorted(typed_relations))} for `{operation.value}` are not established "
+                                    f"in the pinned graph: {flow.get('reason') or 'no resolved typed edge'}. "
+                                    "A same-name reference is not proof of dispatch or implementation."
+                                )
+                            elif flow.get("truncated"):
+                                relation_incomplete = True
+                                bundle.unresolved.append(f"Symbol relationships for `{operation.value}` are a bounded partial graph; additional callers/callees may exist")
+                            if "callers" in typed_relations and resolved.get("status") == "ready" and len(seeds) == 1 and any(
+                                item.get("entity_id") in seeds and str(item.get("path") or "").lower().endswith(".java")
+                                for item in resolved.get("candidates") or []
+                            ):
+                                references, reference_limit = _java_caller_reference_hits(settings, operation.value, operation.repos)
+                                candidates.extend(references)
+                                if references:
+                                    bundle.warnings.append(
+                                        f"Java call references for `{operation.value}` are candidate call sites, not proof of receiver dispatch. "
+                                        "Inspect their exact source and types before drawing a call relationship."
+                                    )
+                                if reference_limit:
+                                    relation_incomplete = True
+                                    bundle.unresolved.append(f"Caller reference search for `{operation.value}` is incomplete: {reference_limit}")
+                        elif not wave_number:
+                            bundle.unresolved.append(f"Symbol relationships for `{operation.value}` were deferred by the physical operation budget")
+                            trace.stop_reason = "physical_budget"
+                        include -= typed_relations
                     if "definition" in include:
                         definitions = symbol_hits(settings, operation.value, repos)
+                        if protect_definitions(definitions, operation.value):
+                            missing_definitions.discard(operation.value)
                         candidates.extend(definitions)
-                        if not definitions:
-                            bundle.unresolved.append(f"Definition for `{operation.value}` was not found")
                     if include & {"callers", "callees"}:
                         traced, relationships = trace_symbol(settings, operation.value, repos)
                         candidates.extend(traced)
@@ -2869,9 +4012,14 @@ def retrieve_context(
                         # routed repositories. One pinned query searches all test
                         # files before applying the source candidate budget.
                         test_scope = repos if operation.repos else None
+                        lookup_offset = len(trace.fallback_reasons)
                         tests = test_hits(settings, operation.value, test_scope)
                         candidates.extend(tests)
-                        if not tests:
+                        if _source_lookup_failed_since(trace, lookup_offset) or trace.stop_reason in {"physical_budget", "lexical_batch_budget"}:
+                            bundle.unresolved.append(
+                                f"Test search for `{operation.value}` did not complete in the requested scope; source availability is unknown."
+                            )
+                        elif not tests:
                             bundle.unresolved.append(f"No tests referencing `{operation.value}` were found")
                     trace.add_stage("symbol_ms", (time.perf_counter() - operation_started) * 1000)
                 elif operation.kind == "history":
@@ -2901,6 +4049,18 @@ def retrieve_context(
                 physical_operations_completed=trace.physical_backend_operations,
             )
 
+        for identifier in sorted(pending_enclosing_queries):
+            relation_incomplete = True
+            bundle.unresolved.extend(f'Literal relationships for `{query}` were deferred by this request\'s retrieval budget; '
+                                     'caller/callee coverage is unknown.' for query in sorted(enclosing_queries[identifier]))
+        bundle.unresolved.extend(
+            f"Definition for `{name}` is not verified in the searched scope; lexical references are navigation only."
+            for name in sorted(missing_definitions)
+        )
+        bundle.unresolved.extend(reason for reason in trace.fallback_reasons
+                                 if reason.startswith(("Java declaration verification is incomplete:",
+                                                       "Java caller verification is incomplete:")))
+
         if include_diff and not time_budget_exhausted():
             bundle.evidence.extend(working_tree_diffs(settings))
 
@@ -2918,6 +4078,23 @@ def retrieve_context(
         relation_started = time.perf_counter()
         from .relations import related_relationships
 
+        # Direct pages retain the full verified file, not just the emitted
+        # range. Reuse that request-local source for navigation and hydration.
+        navigation_sources: dict[tuple[str, str], str] = dict(relation_sources)
+        if request.get('version') == 5 and not time_budget_exhausted():
+            topic_hits, topic_limit = _topic_peer_hits(settings, request.get('anchors') or [], candidates, navigation_sources)
+            candidates.extend(topic_hits)
+            if topic_hits:
+                bundle.warnings.append(
+                    "Topic peers are navigation candidates from the pinned generation. Event payload association "
+                    "and complete consumer coverage are not established by matching topic declarations."
+                )
+                if trace.stop_reason == 'coverage_satisfied':
+                    trace.stop_reason = 'candidate_evidence_collected'
+            if topic_limit:
+                bundle.unresolved.append(f"Topic peer navigation is incomplete: {topic_limit}")
+                if trace.stop_reason == 'coverage_satisfied':
+                    trace.stop_reason = 'candidate_evidence_incomplete'
         relationship_queries = [bundle.objective]
         relationship_queries.extend(str(item["query"]) for item in request["searches"])
         relationship_queries.extend(str(item["query"]) for item in request["paths"])
@@ -2961,7 +4138,7 @@ def retrieve_context(
 
         emit("reranking", pruned_candidate_count=len(candidates))
         rerank_started = time.perf_counter()
-        rerank_sources: dict[tuple[str, str], str] = {}
+        rerank_sources: dict[tuple[str, str], str] = navigation_sources
         try:
             from .editions import current_edition
 
@@ -2986,6 +4163,30 @@ def retrieve_context(
         omitted.extend(early_omitted)
         trace.add_stage("selection_ms", (time.perf_counter() - selection_started) * 1000)
 
+        symbol_ranges: list[dict[str, Any]] = []
+        symbol_reads: list[dict[str, Any]] = []
+        selected_files = {(hit.repo, hit.path) for hit in selected}
+        for item in requested_symbols.values():
+            if (item["repo"], item["path"]) not in selected_files:
+                bundle.unresolved.append(f"Requested symbol source deferred by candidate selection: {item['repo']}:{item['path']}:{item['line']}; request this file in a focused follow-up.")
+                if trace.stop_reason == "coverage_satisfied":
+                    trace.stop_reason = "requested_symbols_incomplete"
+        if symbol_overflow:
+            bundle.unresolved.append("Some requested symbol ranges exceeded the per-request range budget; remaining source windows may be incomplete.")
+            if trace.stop_reason == "coverage_satisfied":
+                trace.stop_reason = "requested_symbols_incomplete"
+        requested_symbols = {key: item for key, item in requested_symbols.items()
+                             if (item["repo"], item["path"]) in selected_files}
+        definition_locations = {
+            (hit.repo, hit.path, hit.line): requested_definition_names[(hit.repo, hit.path, hit.line)]
+            for hit in selected if "requested symbol definition" in hit.kind
+        }
+        requested_definition_names.clear()
+        radius = max(10, settings.source_window_lines // 2)
+        enclosing_locations = sorted(point for point in requested_anchor_locations if any(
+            'requested anchor match' in hit.kind and point[:2] == (hit.repo, hit.path)
+            and abs(point[2] - hit.line) <= radius for hit in selected))[:MAX_REQUEST_ITEMS]
+        trace._set_backend_headroom(0)
         emit("hydrating", evidence_count=len(bundle.evidence), candidate_count=len(selected))
         hydrate_started = time.perf_counter()
         indexed_sources: dict[tuple[str, str], str] | None = None
@@ -2993,18 +4194,64 @@ def retrieve_context(
             from .index import read_generation_files
 
             indexed_sources = dict(rerank_sources)
-            missing = [(hit.repo, hit.path) for hit in selected if (hit.repo, hit.path) not in indexed_sources]
+            missing = list(dict.fromkeys((hit.repo, hit.path) for hit in selected if (hit.repo, hit.path) not in indexed_sources))
             buffered = any((hit.repo, hit.path) in indexed_sources for hit in selected)
             if missing and (
                 not time_budget_exhausted() or (first_verified_evidence_ms is None and not buffered)
             ):
-                indexed_sources.update(read_generation_files(
-                    settings, bundle.atlas_generation, missing,
-                    max_bytes=MAX_PINNED_HYDRATION_BYTES,
-                    max_seconds=MAX_PINNED_HYDRATION_SECONDS,
-                ) or {})
+                if trace.try_reserve_backend():
+                    source_started = time.perf_counter()
+                    loaded: dict[tuple[str, str], str] = {}
+                    try:
+                        loaded = read_generation_files(
+                            settings, bundle.atlas_generation, missing,
+                            max_bytes=MAX_PINNED_HYDRATION_BYTES,
+                            max_seconds=MAX_PINNED_HYDRATION_SECONDS,
+                        ) or {}
+                        indexed_sources.update(loaded)
+                    finally:
+                        trace.complete_reserved_backend(
+                            "source-hydration", (time.perf_counter() - source_started) * 1000,
+                            bytes_scanned=sum(len(content.encode("utf-8")) for content in loaded.values()),
+                            files=len(loaded),
+                        )
+                else:
+                    bundle.unresolved.append("Pinned source hydration deferred by the physical-operation budget; unread candidate source remains unknown.")
+                    if trace.stop_reason == "coverage_satisfied":
+                        trace.stop_reason = "operation_budget"
+        # Small buffered files already fit the ordinary full-file reader. No
+        # entity lookup is needed to deliver those unqualified definitions.
+        full_file_budget = min(64_000, max(1, settings.hard_context_chars // 3 // max(1, len(requested_symbols) + len(definition_locations))))
+        complete_files = {
+            key for key in {(repo, path) for repo, path, _ in [*definition_locations, *enclosing_locations]}
+            if key in (indexed_sources or {}) and len(indexed_sources[key].encode("utf-8")) <= full_file_budget
+            and len(indexed_sources[key].splitlines()) <= settings.full_file_lines
+        }
+        definition_locations = {key: names for key, names in definition_locations.items() if key[:2] not in complete_files}
+        enclosing_locations = [point for point in enclosing_locations if point[:2] not in complete_files]
+        # Secure the source before spending the last physical operation on
+        # optional range metadata. A source window is useful even when the full
+        # method range cannot be validated; it must not claim complete coverage.
+        if (requested_symbols or definition_locations or enclosing_locations) and settings.atlas_generation_mode == "pinned":
+            reason = "request time or physical-operation budget"
+            if not time_budget_exhausted() and trace.try_reserve_backend():
+                range_started = time.perf_counter()
+                try:
+                    symbol_ranges, reason = _requested_symbol_ranges(
+                        settings, requested_symbols, definitions=definition_locations, enclosing=enclosing_locations,
+                    )
+                finally:
+                    trace.complete_reserved_backend("symbol_ranges", (time.perf_counter() - range_started) * 1000)
+            if reason and not (requested_symbols or definition_locations):
+                bundle.warnings.append(f"Enclosing source scope unavailable: {reason}; retained exact-match windows, not complete callable bodies.")
+            elif reason:
+                bundle.unresolved.append(f"Full requested symbol ranges unavailable: {reason}; returned source windows may be incomplete.")
+                if trace.stop_reason == "coverage_satisfied":
+                    trace.stop_reason = "requested_symbols_incomplete"
         source_budget = max(10_000, settings.hard_context_chars - 40_000)
         source_bytes = sum(len(item.content.encode("utf-8")) for item in bundle.evidence)
+        symbol_page_bytes = min(64_000, max(1, settings.hard_context_chars // 3 // max(1, len(symbol_ranges))))
+        delivered_symbols: set[str] = set()
         for hit in selected:
             # Stop new reads after the soft deadline, not delivery of pinned
             # source already read and verified. Later candidates may be buffered
@@ -3015,6 +4262,68 @@ def retrieve_context(
             ):
                 omitted.append(hit)
                 continue
+            ranges = [item for item in symbol_ranges if (item["repo"], item["path"]) == (hit.repo, hit.path) and (
+                ("generation-validated qualified symbol" in hit.found_by and item["entity_id"] in requested_symbols)
+                or ("requested symbol definition" in hit.kind and item["line_start"] == hit.line
+                    and item["simple_name"] in definition_locations.get((hit.repo, hit.path, hit.line), set()))
+                or ('requested anchor match' in hit.kind and any(
+                    abs(line - hit.line) <= radius for line in item.get('enclosing_match_lines', [])))
+            )]
+            window_reports: list[dict[str, Any]] = []
+            if ranges:
+                for item in ranges:
+                    if item["entity_id"] in delivered_symbols:
+                        continue
+                    delivered_symbols.add(item["entity_id"])
+                    enclosing_only = ('requested symbol definition' not in hit.kind
+                                      and 'generation-validated qualified symbol' not in hit.found_by)
+                    evidence, report = _requested_file_page(
+                        settings, {"repo": hit.repo, "path": hit.path, "lines": f"{item['line_start']}-{item['line_end']}"},
+                        max_bytes=max(0, min(symbol_page_bytes, source_budget - source_bytes)),
+                        source_cache=direct_sources,
+                        _indexed_source=indexed_sources.get((hit.repo, hit.path)) if indexed_sources is not None else None,
+                        # Only a matching candidate window belongs to this
+                        # range; a distant method in the same file has its own.
+                        _source_anchor_line=(hit.line if enclosing_only or abs(hit.line - item["line_start"]) <= max(10, settings.source_window_lines // 2)
+                                             else item["line_start"]),
+                    )
+                    symbol_reads.append(report)
+                    if enclosing_only and (not evidence or report.get('next_lines')):
+                        # Auto-expansion must not replace the known literal with
+                        # the first page of a huge method that lacks that literal.
+                        report.update(status='window_only', returned_lines=None,
+                                      next_lines=f"{item['line_start']}-{item['line_end']}")
+                        delivered_symbols.discard(item['entity_id'])
+                        window_reports.append(report)
+                        bundle.warnings.append(f"Enclosing callable exceeds this page budget: {hit.repo}:{hit.path}; "
+                                               f"kept its exact-match window. Read lines={report['next_lines']} for the callable body.")
+                        continue
+                    if not evidence or report.get("next_lines"):
+                        bundle.unresolved.append(
+                            f"Requested symbol source {report['status']}: {hit.repo}:{hit.path}; "
+                            + (f"continue with a files request, lines={report['next_lines']}." if report.get("next_lines")
+                               else str(report.get("reason") or "Source not delivered."))
+                        )
+                        if trace.stop_reason == "coverage_satisfied":
+                            trace.stop_reason = "requested_symbols_incomplete"
+                    if evidence:
+                        delivered_symbols.update(candidate["entity_id"] for candidate in symbol_ranges
+                                                 if (candidate["repo"], candidate["path"]) == (hit.repo, hit.path)
+                                                 and evidence.line_start <= candidate["line_start"] <= candidate["line_end"] <= evidence.line_end)
+                        evidence.kind, evidence.score = hit.kind, hit.score
+                        if requested_symbols.get(item['entity_id'], {}).get('requested_relation'):
+                            evidence.kind += ', requested symbol relationship source'
+                        evidence.found_by = [*hit.found_by, *evidence.found_by[1:],
+                            ('enclosing callable source range (not dispatch or behavioral proof)' if enclosing_only
+                             else 'requested symbol source range (not a behavioral proof)')]
+                        bundle.evidence.append(evidence)
+                        size = len(evidence.content.encode("utf-8"))
+                        source_bytes += size
+                        trace.bytes_read += size
+                        if first_verified_evidence_ms is None:
+                            first_verified_evidence_ms = (time.perf_counter() - started) * 1000
+                if not window_reports:
+                    continue
             try:
                 evidence = read_source(
                     settings,
@@ -3024,7 +4333,15 @@ def retrieve_context(
                     ) if settings.atlas_generation_mode == "pinned" else _INDEXED_SOURCE_UNSET,
                 )
             except BrainError:
-                bundle.warnings.append(f"Candidate source disappeared before hydration: {hit.repo}:{hit.path}")
+                for report in window_reports:
+                    report['status'] = 'unavailable'
+                bundle.warnings.append(f"Candidate source unavailable for hydration: {hit.repo}:{hit.path}")
+                bundle.unresolved.append(
+                    f"Source availability is unknown for `{hit.repo}:{hit.path}`; candidate source could not be read. "
+                    "Relationship metadata is not a substitute for the missing source evidence."
+                )
+                if trace.stop_reason == "coverage_satisfied":
+                    trace.stop_reason = "candidate_evidence_incomplete"
                 continue
             evidence_bytes = len(evidence.content.encode("utf-8"))
             if source_bytes and source_bytes + evidence_bytes > source_budget:
@@ -3032,6 +4349,8 @@ def retrieve_context(
                 trace.stop_reason = "context_budget"
                 continue
             bundle.evidence.append(evidence)
+            for report in window_reports:
+                report['returned_lines'] = f'{evidence.line_start}-{evidence.line_end}'
             source_bytes += evidence_bytes
             trace.bytes_read += evidence_bytes
             if first_verified_evidence_ms is None:
@@ -3039,6 +4358,41 @@ def retrieve_context(
         trace.add_stage("source_hydration_ms", (time.perf_counter() - hydrate_started) * 1000)
         bundle.additional_candidates = sorted(omitted, key=lambda item: (-item.score, item.repo, item.path, item.line))
         bundle.evidence = merge_evidence(bundle.evidence)
+        # Keep navigable identity with its actual source block: final byte
+        # bounding must omit both together. This never changes the evidence ID
+        # or establishes a call edge; the next request revalidates the same pin.
+        for evidence in bundle.evidence:
+            evidence.found_by.extend(
+                PINNED_SYMBOL_ANCHOR_PREFIX + json.dumps(
+                    {'kind': 'symbol', 'value': item['entity_id']}, separators=(',', ':'))
+                for item in symbol_ranges if (item['repo'], item['path']) == (evidence.repo, evidence.path)
+                and any(evidence.line_start <= line <= evidence.line_end
+                        for line in [item['line_start'], *item.get('enclosing_match_lines', [])])
+            )
+
+        deferred_definitions = {(hit.repo, hit.path, hit.line): hit for hit in omitted
+                                if "requested symbol definition" in hit.kind}
+        deferred_files = {(hit.repo, hit.path) for hit in deferred_definitions.values()}
+        # Check actual delivered windows, not just declaration lines. Reuse
+        # already-verified source to clamp at EOF; never read a deferred file.
+        line_counts = {key: len(source.splitlines()) for key, source in (indexed_sources or {}).items()
+                       if key in deferred_files}
+        for evidence in bundle.evidence:
+            key = evidence.repo, evidence.path
+            if key in deferred_files and key not in line_counts and evidence.verification_content is not None:
+                line_counts[key] = len(evidence.verification_content.splitlines())
+        for hit in deferred_definitions.values():
+            total = line_counts.get((hit.repo, hit.path))
+            radius = max(10, settings.source_window_lines // 2)
+            start, end = max(1, hit.line - radius), hit.line + radius
+            if total is not None:
+                start, end = (1, total) if total <= settings.full_file_lines else (start, min(total, end))
+            if any(item.repo == hit.repo and item.path == hit.path and item.line_start <= start and item.line_end >= end
+                   for item in bundle.evidence):
+                continue
+            bundle.unresolved.append(f"Requested symbol source window deferred: {hit.repo}:{hit.path}:{start}-{end}; candidate metadata is not the unread implementation.")
+            if trace.stop_reason == "coverage_satisfied":
+                trace.stop_reason = "requested_symbols_incomplete"
 
         if bundle.atlas_generation is None:
             state = load_index_state(settings)
@@ -3089,11 +4443,15 @@ def retrieve_context(
             "repo_scope_limit": repo_scope_limit,
             "semantic_repo_count": len(trace.semantic_repo_scope),
         }
+        if relation_incomplete and trace.stop_reason == 'coverage_satisfied':
+            trace.stop_reason = 'requested_symbols_incomplete'
         bundle.trace = trace.as_dict()
         if exact_symbol_scope:
             bundle.trace["qualified_symbols_only"] = True
         if file_reads:
             bundle.trace["file_reads"] = file_reads
+        if symbol_reads:
+            bundle.trace["symbol_reads"] = symbol_reads
         bundle.trace["cross_repo_relationships"] = cross_repo_relationships
         bundle.trace["atlas_generation"] = (
             bundle.atlas_generation.generation if bundle.atlas_generation is not None else None
@@ -3132,6 +4490,7 @@ def retrieve_context(
         emit("complete", evidence_count=len(bundle.evidence), pruned_candidate_count=len(candidates), physical_operations_completed=trace.physical_backend_operations)
         return bundle
     finally:
+        trace._set_backend_headroom(0)
         _ACTIVE_RETRIEVAL_CACHE.reset(cache_token)
         _ACTIVE_RETRIEVAL_TRACE.reset(trace_token)
 
@@ -3259,6 +4618,44 @@ def _restore_checkpoint_evidence(
     return restored, missed
 
 
+def _delivery_evidence(bundle: ContextBundle) -> list[Evidence]:
+    """Keep this request's exact pages ahead of optional ranked/retained source."""
+    pages: dict[tuple[str, str], list[tuple[int, int, bool]]] = {}
+    for channel in ("file_reads", "symbol_reads"):
+        for item in bundle.trace.get(channel) or []:
+            returned = str(item.get("returned_lines") or "")
+            if re.fullmatch(r"[0-9]+-[0-9]+", returned):
+                start, end = (int(value) for value in returned.split("-"))
+                pages.setdefault((str(item["repo"]), str(item["path"])), []).append((start, end, channel == "file_reads"))
+
+    def priority(item: Evidence) -> int:
+        matched = [direct for start, end, direct in pages.get((item.repo, item.path), [])
+                   if item.line_start <= start and item.line_end >= end]
+        if "direct file request" in item.found_by and True in matched:
+            return 0
+        if 'requested anchor match' in item.kind:
+            return 1  # The observed failure precedes bodies derived from it.
+        if "requested symbol definition" in item.kind or (
+            matched and {"direct file request", "generation-validated qualified symbol"}.intersection(item.found_by)
+        ):
+            return 2
+        return 3
+
+    return sorted(bundle.evidence, key=priority)
+
+
+def _source_request_memory(memory: dict[str, Any]) -> dict[str, Any]:
+    """Summarize duplicated source references on the wire, never in ticket state."""
+    duplicated = {"verified_facts", "verified_references", "implementation_surface", "test_surface"}
+    return {
+        key: {
+            "retained_count": len(value),
+            "authority": "Reference count only, not delivered evidence; use source blocks and evidence lineage.",
+        } if key in duplicated and isinstance(value, list) else value
+        for key, value in memory.items()
+    }
+
+
 def pack_delta_context(
     settings: Settings,
     ticket: str,
@@ -3287,6 +4684,8 @@ def pack_delta_context(
         output.append("- None")
     output.extend(["", "## Investigation Memory changes", ""])
     memory_changes = progress.get("memory_changes") or {}
+    if bundle.trace.get("direct_files_only"):
+        memory_changes = _source_request_memory(memory_changes)
     for key, value in sorted(memory_changes.items()):
         rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
         output.append(f"- `{key}`: {rendered[:2_000]}")
@@ -3296,17 +4695,24 @@ def pack_delta_context(
     output.append(f"- New or not-yet-emitted evidence: `{len(new_evidence_ids)}`")
     superseded = progress.get("superseded_evidence_ids") or []
     output.append(f"- Invalidated/superseded evidence: `{', '.join(superseded) if superseded else 'none'}`")
-    new_items = [item for item in bundle.evidence if _evidence_id(item) in new_evidence_ids or "direct file request" in item.found_by]
+    new_items = [item for item in _delivery_evidence(bundle) if _evidence_id(item) in new_evidence_ids
+                 or "requested symbol definition" in item.kind
+                 or 'requested anchor match' in item.kind
+                 or any(channel.startswith(PINNED_SYMBOL_ANCHOR_PREFIX) for channel in item.found_by)
+                 or {"direct file request", "generation-validated qualified symbol"}.intersection(item.found_by)]
     new_public_ids = [_public_evidence_id(progress, item) for item in new_items]
     output.append(f"- Embedded evidence IDs: `{', '.join(new_public_ids) or 'none'}`")
     output.append("- Omitted evidence IDs due to byte limit: `none`")
     if bundle.trace.get("file_reads"):
         output.append("- Explicitly requested file pages are re-emitted even when their stable evidence IDs are already known.")
+    if bundle.trace.get("symbol_reads"):
+        output.append("- Explicitly requested symbol pages are re-emitted even when their stable evidence IDs are already known.")
     output.extend(["", "## New source evidence", ""])
     if progress.get("protocol_version") == 5 and progress.get("investigation_runtime"):
         from .investigation import render_protocol_v5
 
-        output.extend([render_protocol_v5(progress["investigation_runtime"], delta=True), ""])
+        output.extend([render_protocol_v5(progress["investigation_runtime"], delta=True,
+                                          compact=bool(bundle.trace.get("direct_files_only"))), ""])
     if not new_items:
         output.append("- None")
     for item in new_items:
@@ -3387,6 +4793,202 @@ def _render_first_useful_checkpoint(
     return _bounded_markdown("\n".join(output).rstrip() + "\n", min(settings.hard_context_chars, 24_000))
 
 
+def _validate_checkpoint_artifacts(
+    settings: Settings, ticket: str, number: int, context_id: str,
+    requested_base: str | None, bundle: ContextBundle, state: dict[str, Any],
+) -> None:
+    """Validate at most three exact pinned proofs before retry or republication."""
+    from .investigation import stable_evidence_id
+
+    existing_checkpoint = state["progressive_checkpoint"]
+    generation = bundle.atlas_generation
+    directory = session_dir(settings, ticket)
+    expected_hash = str(existing_checkpoint.get("content_hash") or "")
+    artifact_name = str(existing_checkpoint.get("artifact") or "")
+    handoff_name = str(existing_checkpoint.get("handoff_artifact") or "")
+    artifact_path = directory / artifact_name
+    handoff_candidate = Path(handoff_name)
+    try:
+        handoff_path = handoff_candidate
+        if (
+            not artifact_name or Path(artifact_name).name != artifact_name
+            or artifact_name != f"checkpoint-{number:03d}.md"
+            or handoff_path != settings.generated_dir / "handoffs" / directory.name / artifact_name
+            or not artifact_path.is_file() or artifact_path.is_symlink()
+            or not handoff_path.is_file() or handoff_path.is_symlink()
+        ):
+            raise BrainError("Published first-useful checkpoint artifact is unavailable")
+        try:
+            artifact_content = read_managed_bytes(
+                directory, artifact_path, max_bytes=MAX_CHECKPOINT_ARTIFACT_BYTES,
+            )
+            handoff_content = read_managed_bytes(
+                settings.generated_dir, handoff_path, max_bytes=MAX_CHECKPOINT_ARTIFACT_BYTES,
+            )
+        except (OSError, ValueError) as error:
+            raise BrainError("Published first-useful checkpoint artifact is corrupt") from error
+        if (
+            expected_hash != "sha256:" + hashlib.sha256(artifact_content).hexdigest()
+            or handoff_content != artifact_content
+        ):
+            raise BrainError("Published first-useful checkpoint artifact is corrupt")
+        proofs = existing_checkpoint.get("evidence_proofs")
+        if (
+            generation is None
+            or int(existing_checkpoint.get("generation") or -1) != generation.generation
+            or not isinstance(proofs, list) or not 1 <= len(proofs) <= 3
+        ):
+            raise BrainError("Published first-useful checkpoint evidence proof is invalid")
+        proof_rows: list[tuple[str, Evidence]] = []
+        for proof in proofs:
+            if not isinstance(proof, dict):
+                raise BrainError("Published first-useful checkpoint evidence proof is invalid")
+            match = next((
+                item for item in bundle.evidence
+                if _evidence_id(item) == proof.get("internal_evidence_id")
+                and item.repo == proof.get("repo") and item.path == proof.get("path")
+                and item.line_start == proof.get("line_start") and item.line_end == proof.get("line_end")
+                and hashlib.sha256(item.content.encode("utf-8")).hexdigest() == proof.get("content_sha256")
+                and item.repo in generation.snapshots
+                and item.kind not in {"knowledge", "local diff", "user-supplied external evidence"}
+                and item.path != "(working tree diff)"
+            ), None)
+            if match is None and generation is not None:
+                from .index import read_indexed_file
+
+                repo_name = str(proof.get("repo") or "")
+                path = str(proof.get("path") or "")
+                try:
+                    start = int(proof.get("line_start") or 0)
+                    end = int(proof.get("line_end") or 0)
+                    pinned = read_indexed_file(
+                        settings, settings.repo(repo_name), path,
+                        snapshot_sha=generation.snapshots[repo_name],
+                    )
+                except (KeyError, TypeError, ValueError):
+                    pinned = None
+                    start = end = 0
+                pinned_lines = pinned.splitlines() if pinned is not None else []
+                content = "\n".join(pinned_lines[start - 1:end])
+                # Full-file evidence may preserve the final newline; snippets
+                # normally do not. Accept only the hash-proven pinned spelling.
+                preserved = "".join(pinned.splitlines(keepends=True)[start - 1:end]) if pinned is not None else ""
+                if hashlib.sha256(preserved.encode("utf-8")).hexdigest() == proof.get("content_sha256"):
+                    content = preserved
+                candidate = Evidence(
+                    repo_name, path, start, end, content, "code", 100,
+                    ["pinned checkpoint revalidation"], pinned,
+                )
+                if (
+                    1 <= start <= end <= len(pinned_lines)
+                    and _evidence_id(candidate) == proof.get("internal_evidence_id")
+                    and hashlib.sha256(content.encode("utf-8")).hexdigest() == proof.get("content_sha256")
+                ):
+                    match = candidate
+            public_id = str(proof.get("public_id") or "")
+            if match is None or stable_evidence_id(copy.deepcopy(state), match) != public_id:
+                raise BrainError("Published first-useful checkpoint evidence proof is invalid")
+            proof_rows.append((public_id, match))
+        expected_content = _render_first_useful_checkpoint(
+            settings, ticket, number, str(existing_checkpoint.get("checkpoint_id") or ""),
+            context_id, requested_base, generation, proof_rows,
+        ).encode("utf-8")
+        if expected_content != artifact_content:
+            raise BrainError("Published first-useful checkpoint does not match pinned evidence")
+    except OSError as exc:
+        raise BrainError(f"Published first-useful checkpoint artifact is unavailable: {exc}") from exc
+
+
+def _checkpoint_execution_signature(signature: str, include_diff: bool) -> str:
+    return hashlib.sha256((signature + "\0include_diff=" + str(int(include_diff))).encode("utf-8")).hexdigest()
+
+
+def checkpoint_retry_request(
+    settings: Settings, ticket: str, *, manual_request: tuple[str, bool] | None = None,
+) -> tuple[str, bool]:
+    """Validate saved retry; manual repair/execution require retrieval_session."""
+    try:
+        state = session_state(settings, ticket)
+        checkpoint = state.get("progressive_checkpoint") or {}
+        binding = checkpoint.get("retry_request") or {}
+        legacy = "retry_request" not in checkpoint
+        number = int(state.get("requests") or 0) + 1
+        artifact = f"request-{number:03d}.yml"
+        include_diff = manual_request[1] if legacy and manual_request is not None else binding.get("include_diff")
+        generation, _ = _resolve_session_generation(settings, state)
+        context_id = checkpoint.get("context_id")
+        signature = checkpoint.get("request_signature")
+        registry = (state.get("stable_identities") or {}).get("contexts") or {}
+        reserved = sum(value == context_id for value in registry.values())
+        if legacy and manual_request is not None and reserved == 0:
+            from .investigation import _allocate
+
+            reserved = int(_allocate({"contexts": dict(registry)}, "contexts", "retry", "CTX-", 3) == context_id)
+        if (
+            checkpoint.get("status") != "published"
+            or checkpoint.get("continuation_status") not in {"pending", "failed"}
+            or checkpoint.get("artifact") != f"checkpoint-{number:03d}.md"
+            or type(include_diff) is not bool or not isinstance(signature, str)
+            or generation is None
+            or checkpoint.get("generation") != generation.generation
+            or not context_id or checkpoint.get("checkpoint_id") != f"{context_id}-P1"
+            or reserved != 1 or state.get("last_context_id") == context_id
+            or any(row.get("context_id") == context_id for row in state.get("context_lineage") or [])
+            or (legacy and manual_request is None)
+            or (not legacy and (
+                binding.get("artifact") != artifact
+                or binding.get("atlas_generation_id") != generation.identity
+                or binding.get("source_signature") != generation.source_signature
+                or binding.get("execution_signature") != _checkpoint_execution_signature(signature, include_diff)
+                or ("active_artifacts" in state and artifact not in state["active_artifacts"])
+            ))
+        ):
+            raise ValueError("Unverified checkpoint request binding or uncommitted context reservation")
+        if manual_request is not None:
+            manual_plan = request_preview(manual_request[0], settings)
+            if (manual_request[1] != include_diff
+                or manual_plan["request"].get("version") != 5
+                or protocol_request_signature(manual_plan, ticket, state) != signature):
+                raise ValueError("Manual retry must preserve the original plan and options")
+        try:
+            _validate_checkpoint_artifacts(
+                settings, ticket, number, context_id, checkpoint.get("base_context_id"),
+                ContextBundle("Checkpoint retry", atlas_generation=generation), state,
+            )
+        except (BrainError, OSError, ValueError, TypeError) as exc:
+            raise CheckpointRetryRequired(ticket, checkpoint_problem=True) from exc
+        if legacy:
+            # Legacy writers did not save enough information for automatic replay.
+            # The explicit, validated manual request remains supported.
+            return manual_request
+        directory = session_dir(settings, ticket)
+        valid_saved = False
+        try:
+            payload = read_managed_bytes(directory, directory / artifact, max_bytes=MAX_REQUEST_TEXT_BYTES)
+            text = payload.decode("utf-8")
+            plan = request_preview(text, settings)
+            valid_saved = (
+                hashlib.sha256(payload).hexdigest() == binding.get("content_sha256")
+                and plan["request"].get("version") == 5
+                and protocol_request_signature(plan, ticket, state) == signature
+            )
+        except (BrainError, OSError, ValueError):
+            pass
+        if not valid_saved:
+            if manual_request is None:
+                raise ValueError("Saved request content changed")
+            text = manual_request[0]
+            payload = text.encode("utf-8")
+            _atomic_session_bytes_write(settings, ticket, directory / artifact, payload)
+            binding["content_sha256"] = hashlib.sha256(payload).hexdigest()
+            save_session(settings, ticket, state)
+        return text, include_diff
+    except CheckpointRetryRequired:
+        raise
+    except (BrainError, OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise CheckpointRetryRequired(ticket) from exc
+
+
 def _publish_first_useful_checkpoint(
     settings: Settings,
     ticket: str,
@@ -3399,12 +5001,16 @@ def _publish_first_useful_checkpoint(
     state: dict[str, Any],
     directory: Path,
     progress: Any | None,
+    *,
+    request_text: str | None = None,
+    include_diff: bool = False,
 ) -> dict[str, Any] | None:
     """Durably expose bounded pinned evidence before later v5 flow construction."""
     from .investigation import (
         _exact_evidence_anchors,
         _is_runtime_entry_anchor,
         _java_file_intelligence,
+        _runtime_anchor_inputs,
         _verified_value_location,
         resolve_runtime_anchors,
         stable_evidence_id,
@@ -3417,99 +5023,11 @@ def _publish_first_useful_checkpoint(
             existing_checkpoint.get("continuation_status") in {"pending", "failed"}
             and existing_checkpoint.get("request_signature") == request_signature
         ):
-            expected_hash = str(existing_checkpoint.get("content_hash") or "")
-            artifact_name = str(existing_checkpoint.get("artifact") or "")
-            handoff_name = str(existing_checkpoint.get("handoff_artifact") or "")
-            artifact_path = (directory / artifact_name).resolve()
-            handoff_candidate = Path(handoff_name)
-            try:
-                handoff_path = _validated_generated_artifact(
-                    settings, handoff_candidate, create_parents=False,
-                ).resolve()
-                if (
-                    not artifact_name or Path(artifact_name).name != artifact_name
-                    or not artifact_path.is_relative_to(directory.resolve())
-                    or not artifact_path.is_file() or artifact_path.is_symlink()
-                    or not handoff_path.is_file() or handoff_path.is_symlink()
-                ):
-                    raise BrainError("Published first-useful checkpoint artifact is unavailable")
-                try:
-                    artifact_content = _bounded_regular_file_bytes(
-                        artifact_path, MAX_CHECKPOINT_ARTIFACT_BYTES,
-                    )
-                    handoff_content = _bounded_regular_file_bytes(
-                        handoff_path, MAX_CHECKPOINT_ARTIFACT_BYTES,
-                    )
-                except BrainError as error:
-                    raise BrainError("Published first-useful checkpoint artifact is corrupt") from error
-                if (
-                    expected_hash != "sha256:" + hashlib.sha256(artifact_content).hexdigest()
-                    or handoff_content != artifact_content
-                ):
-                    raise BrainError("Published first-useful checkpoint artifact is corrupt")
-                proofs = existing_checkpoint.get("evidence_proofs")
-                if (
-                    generation is None
-                    or int(existing_checkpoint.get("generation") or -1) != generation.generation
-                    or not isinstance(proofs, list) or not 1 <= len(proofs) <= 3
-                ):
-                    raise BrainError("Published first-useful checkpoint evidence proof is invalid")
-                proof_rows: list[tuple[str, Evidence]] = []
-                for proof in proofs:
-                    if not isinstance(proof, dict):
-                        raise BrainError("Published first-useful checkpoint evidence proof is invalid")
-                    match = next((
-                        item for item in bundle.evidence
-                        if _evidence_id(item) == proof.get("internal_evidence_id")
-                        and item.repo == proof.get("repo") and item.path == proof.get("path")
-                        and item.line_start == proof.get("line_start") and item.line_end == proof.get("line_end")
-                        and hashlib.sha256(item.content.encode("utf-8")).hexdigest() == proof.get("content_sha256")
-                        and item.repo in generation.snapshots
-                        and item.kind not in {"knowledge", "local diff", "user-supplied external evidence"}
-                        and item.path != "(working tree diff)"
-                    ), None)
-                    if match is None and generation is not None:
-                        from .index import read_indexed_file
-
-                        repo_name = str(proof.get("repo") or "")
-                        path = str(proof.get("path") or "")
-                        try:
-                            start = int(proof.get("line_start") or 0)
-                            end = int(proof.get("line_end") or 0)
-                            pinned = read_indexed_file(
-                                settings, settings.repo(repo_name), path,
-                                snapshot_sha=generation.snapshots.get(repo_name),
-                            )
-                        except (KeyError, TypeError, ValueError):
-                            pinned = None
-                            start = end = 0
-                        pinned_lines = pinned.splitlines() if pinned is not None else []
-                        content = "\n".join(pinned_lines[start - 1:end])
-                        candidate = Evidence(
-                            repo_name, path, start, end, content, "code", 100,
-                            ["pinned checkpoint revalidation"], pinned,
-                        )
-                        if (
-                            1 <= start <= end <= len(pinned_lines)
-                            and _evidence_id(candidate) == proof.get("internal_evidence_id")
-                            and hashlib.sha256(content.encode("utf-8")).hexdigest() == proof.get("content_sha256")
-                        ):
-                            match = candidate
-                    public_id = str(proof.get("public_id") or "")
-                    if match is None or stable_evidence_id(state, match) != public_id:
-                        raise BrainError("Published first-useful checkpoint evidence proof is invalid")
-                    proof_rows.append((public_id, match))
-                expected_content = _render_first_useful_checkpoint(
-                    settings, ticket, number, str(existing_checkpoint.get("checkpoint_id") or ""),
-                    context_id, requested_base, generation, proof_rows,
-                ).encode("utf-8")
-                if expected_content != artifact_content:
-                    raise BrainError("Published first-useful checkpoint does not match pinned evidence")
-            except OSError as exc:
-                raise BrainError(f"Published first-useful checkpoint artifact is unavailable: {exc}") from exc
+            _validate_checkpoint_artifacts(settings, ticket, number, context_id, requested_base, bundle, state)
             return existing_checkpoint
         return None
-    if generation is None:
+    ablations = set(str(value) for value in request.get("_evaluation_ablation") or [])
+    if generation is None or "anchors" in ablations:
         return None
 
     entry_anchors: list[dict[str, Any]] = [
@@ -3519,13 +5037,9 @@ def _publish_first_useful_checkpoint(
         and _is_runtime_entry_anchor(item)
         and not is_test_path(str(item.get("path") or ""))
     ]
-    resolver_inputs: list[object] = [
-        str(request.get("objective") or ""),
-        *(request.get("runtime_facts") or []),
-        *(request.get("resolve") or []),
-        *(request.get("anchors") or []),
-    ]
-    resolved = resolve_runtime_anchors(settings, generation, resolver_inputs, use_cache=True)
+    resolved = resolve_runtime_anchors(
+        settings, generation, _runtime_anchor_inputs(request), use_cache="generation_cache" not in ablations,
+    )
     for item in resolved.get("candidates") or []:
         if (
             _is_runtime_entry_anchor(item)
@@ -3536,6 +5050,7 @@ def _publish_first_useful_checkpoint(
             )
         ):
             entry_anchors.append({**item, "evidence_authority": "exact_source", "confidence": 1.0})
+    parsed_entry_sources: set[tuple[str, str, str]] = set()
     for evidence in bundle.evidence[:50]:
         if (
             evidence.repo not in generation.snapshots
@@ -3548,9 +5063,15 @@ def _publish_first_useful_checkpoint(
         )
         if structural_source is None:
             continue
+        source_key = (evidence.repo, evidence.path, structural_source)
+        if source_key in parsed_entry_sources:
+            continue
         extracted, _ = _java_file_intelligence(
             evidence.repo, evidence.path, _evidence_id(evidence), None, structural_source,
         )
+        # These anchors only select source regions below; published evidence IDs
+        # still come from each region, not the first region's extraction IDs.
+        parsed_entry_sources.add(source_key)
         entry_anchors.extend(
             {
                 **item,
@@ -3632,7 +5153,22 @@ def _publish_first_useful_checkpoint(
         "created_at": datetime.now(UTC).isoformat(),
     }
     state_before = copy.deepcopy(state)
+    request_artifact = directory / f"request-{number:03d}.yml"
     try:
+        if request_text is not None:
+            payload = request_text.encode("utf-8")
+            if len(payload) > MAX_REQUEST_TEXT_BYTES:
+                raise BrainError("Checkpoint request exceeds the supported input size")
+            checkpoint["retry_request"] = {
+                "artifact": request_artifact.name,
+                "content_sha256": hashlib.sha256(payload).hexdigest(),
+                "include_diff": include_diff,
+                "execution_signature": _checkpoint_execution_signature(request_signature, include_diff),
+                "atlas_generation_id": generation.identity,
+                "source_signature": generation.source_signature,
+            }
+            _atomic_session_bytes_write(settings, ticket, request_artifact, payload)
+            mark_active_artifacts(state, request_artifact)
         _atomic_session_text_write(settings, ticket, artifact, content)
         _atomic_generated_text_write(settings, handoff, content)
         state["progressive_checkpoint"] = checkpoint
@@ -3650,8 +5186,11 @@ def _publish_first_useful_checkpoint(
         mark_active_artifacts(state, artifact)
         save_session(settings, ticket, state)
     except Exception:
-        artifact.unlink(missing_ok=True)
-        handoff.unlink(missing_ok=True)
+        for unfinished in (artifact, handoff):
+            try:
+                unfinished.unlink(missing_ok=True)
+            except OSError:
+                pass
         state.clear()
         state.update(state_before)
         raise
@@ -3664,6 +5203,27 @@ def _publish_first_useful_checkpoint(
     return checkpoint
 
 
+def _protocol_markdown_lines(text: str) -> Iterable[tuple[str, bool]]:
+    """Identify outer protocol lines without changing any fenced source bytes."""
+    fence: str | None = None
+    pre = False
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r"^(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+        outer = False
+        if pre:
+            pre = line.rstrip("\r\n") != "</code></pre>"
+        elif fence is not None:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip():
+                fence = None
+        elif marker:
+            fence = marker[1]
+        elif line.startswith('<pre data-language="'):
+            pre = True
+        else:
+            outer = True
+        yield line, outer
+
+
 def _bounded_markdown_details(text: str, max_bytes: int) -> tuple[str, set[str]]:
     """Apply the final byte ceiling and report whole evidence regions that were omitted."""
     encoded = text.encode("utf-8")
@@ -3671,53 +5231,59 @@ def _bounded_markdown_details(text: str, max_bytes: int) -> tuple[str, set[str]]
         return text, set()
     omitted_ids: list[str] = []
     heading = re.compile(r"(?m)^### (?:\d+\. )?(E(?:-|[0-9])[A-Za-z0-9-]*)\s+—")
-    while len(text.encode("utf-8")) > max_bytes:
-        # Source may itself contain Markdown headings or evidence-like IDs.
-        # Only outer sections are removable; never cut inside a source fence.
-        sections: list[tuple[int, re.Match[str] | None]] = []
-        offset = 0
-        fence: str | None = None
-        pre = False
-        for line in text.splitlines(keepends=True):
-            marker = re.match(r"^(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
-            if pre:
-                pre = line.rstrip("\r\n") != "</code></pre>"
-            elif fence is not None:
-                if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip():
-                    fence = None
-            elif marker:
-                fence = marker[1]
-            elif line.startswith('<pre data-language="'):
-                pre = True
-            elif re.match(r"^#{2,3}\s", line):
-                sections.append((offset, heading.match(line)))
-            offset += len(line)
-        evidence_sections = [(index, start, match) for index, (start, match) in enumerate(sections) if match]
-        if not evidence_sections:
+    # Find outer regions once; source-looking headings inside fences are data.
+    sections: list[tuple[int, re.Match[str] | None]] = []
+    offset = 0
+    for line, outer in _protocol_markdown_lines(text):
+        if outer and re.match(r"^#{2,3}\s", line):
+            sections.append((offset, heading.match(line)))
+        offset += len(line)
+    remaining_bytes = len(encoded)
+    manifest_header = (
+        "\n\n## Omitted evidence IDs\n\n"
+        "Each listed source region was omitted whole; no partial evidence was emitted.\n\n"
+    )
+    manifest_bytes = 0
+    manifest_lines: list[str] = []
+    removed: list[tuple[int, int]] = []
+    for index in range(len(sections) - 1, -1, -1):
+        start, match = sections[index]
+        if match is None:
+            continue
+        if remaining_bytes <= max_bytes:
             break
-        index, start, match = evidence_sections[-1]
-        assert match is not None
         end = sections[index + 1][0] if index + 1 < len(sections) else len(text)
+        removed.append((start, end))
+        remaining_bytes -= len(text[start:end].encode("utf-8"))
         omitted_ids.append(match.group(1))
-        text = text[:start].rstrip() + "\n\n" + text[end:].lstrip()
-    if omitted_ids:
-        text += (
-            "\n\n## Omitted evidence IDs\n\n"
-            + "\n".join(f"- `{identifier}` — omitted as a whole bounded region; no partial evidence was emitted."
-                        for identifier in reversed(omitted_ids))
-            + "\n"
-        )
-        if len(text.encode("utf-8")) <= max_bytes:
-            return text, set(omitted_ids)
-    suffix = (
+        line = f"- `{match.group(1)}` — omitted\n"
+        if not manifest_lines:
+            manifest_bytes = len(manifest_header.encode("utf-8"))
+        manifest_lines.append(line)
+        manifest_bytes += len(line.encode("utf-8"))
+    pieces = []
+    offset = 0
+    for start, end in reversed(removed):
+        pieces.append(text[offset:start])
+        offset = end
+    pieces.append(text[offset:])
+    text = "".join(pieces)
+    omission_manifest = manifest_header + "".join(reversed(manifest_lines)) if manifest_lines else ""
+    if remaining_bytes + manifest_bytes <= max_bytes:
+        return text + omission_manifest, set(omitted_ids)
+    tail_notice = (
         "\n\n## Bounded omission manifest\n\n"
         "- The remaining lower-priority tail was omitted to satisfy the protocol UTF-8 byte limit.\n"
         "- Exact pinned source remains authoritative; request a narrower checkpoint for omitted evidence.\n"
     )
-    reserve = len(suffix.encode("utf-8")) + 128
-    budget = max(0, max_bytes - reserve)
-    prefix = text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
-    prefix = prefix.rsplit("\n", 1)[0]
+    # Retained source sections precede all removed source sections, so their
+    # original offsets still apply. Do not discard a requested source page just
+    # to keep lower-priority candidate metadata at the end of the message.
+    retained = [
+        (start, start + len(text[start:sections[index + 1][0] if index + 1 < len(sections) else len(text)].rstrip()), match[1])
+        for index, (start, match) in enumerate(sections)
+        if match is not None and match[1] not in omitted_ids
+    ]
 
     def close_fence(value: str) -> str:
         open_fence: str | None = None
@@ -3732,14 +5298,32 @@ def _bounded_markdown_details(text: str, max_bytes: int) -> tuple[str, set[str]]
                 open_fence = None
         return f"\n{open_fence}" if open_fence else ""
 
+    extra_reserve = 128
     while True:
+        omission_manifest = manifest_header + "".join(reversed(manifest_lines)) if manifest_lines else ""
+        suffix = tail_notice
+        if len((omission_manifest + suffix).encode("utf-8")) + extra_reserve <= max_bytes:
+            suffix = omission_manifest + suffix
+        budget = max(0, max_bytes - len(suffix.encode("utf-8")) - extra_reserve)
+        prefix = text.encode("utf-8")[:budget].decode("utf-8", errors="ignore").rsplit("\n", 1)[0]
+        cutoff = len(prefix)
+        newly_omitted = [(start, identifier) for start, end, identifier in retained if end > cutoff]
+        if newly_omitted:
+            # The byte prefix may reach into a source block. Move it back to
+            # that block's heading and account for every later whole block.
+            cutoff = min(cutoff, min(start for start, _ in newly_omitted))
+            for _, identifier in reversed(newly_omitted):
+                omitted_ids.append(identifier)
+                manifest_lines.append(f"- `{identifier}` — omitted\n")
+            retained = [(start, end, identifier) for start, end, identifier in retained if end <= cutoff]
+            text = text[:cutoff]
+            continue
         result = prefix.rstrip() + close_fence(prefix) + suffix
         if len(result.encode("utf-8")) <= max_bytes:
             return (result if result.endswith("\n") else result + "\n"), set(omitted_ids)
-        if "\n" not in prefix:
-            prefix = ""
-        else:
-            prefix = prefix.rsplit("\n", 1)[0]
+        if not prefix:
+            return suffix.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore"), set(omitted_ids)
+        extra_reserve += len(result.encode("utf-8")) - max_bytes + 1
 
 
 def _bounded_markdown(text: str, max_bytes: int) -> str:
@@ -3754,31 +5338,31 @@ def _bounded_protocol_context(
     known = {str(identifier) for identifier in evidence_ids if identifier}
     omitted: set[str] = set()
     bounded = text
+    protocol_lines = list(_protocol_markdown_lines(text))
     for _ in range(len(known) + 2):
         embedded = sorted(known - omitted)
-        adjusted = re.sub(
-            r"(?m)^- Embedded evidence IDs: `[^`]*`$",
-            f"- Embedded evidence IDs: `{', '.join(embedded) or 'none'}`",
-            text,
-        )
-        adjusted = re.sub(
-            r"(?m)^- Omitted evidence IDs due to byte limit: `[^`]*`$",
-            f"- Omitted evidence IDs due to byte limit: `{', '.join(sorted(omitted)) or 'none'}`",
-            adjusted,
-        )
-        if omitted:
-            adjusted = adjusted.replace(
-                "- Replacement status: `complete_replacement`",
-                "- Replacement status: `incomplete_non_replacing`",
-            )
-            lines = []
-            for line in adjusted.splitlines():
-                if any(line.startswith(f"- `{identifier}` ") for identifier in omitted):
-                    line = re.sub(r"`included`$", "`omitted_by_byte_limit`", line)
-                lines.append(line)
-            adjusted = "\n".join(lines) + ("\n" if adjusted.endswith("\n") else "")
+        lines = []
+        for line, outer in protocol_lines:
+            if outer:
+                body = line.rstrip("\r\n")
+                ending = line[len(body):]
+                if re.fullmatch(r"- Embedded evidence IDs: `[^`]*`", body):
+                    body = f"- Embedded evidence IDs: `{', '.join(embedded) or 'none'}`"
+                elif re.fullmatch(r"- Omitted evidence IDs due to byte limit: `[^`]*`", body):
+                    body = f"- Omitted evidence IDs due to byte limit: `{', '.join(sorted(omitted)) or 'none'}`"
+                elif omitted and body == "- Replacement status: `complete_replacement`":
+                    body = "- Replacement status: `incomplete_non_replacing`"
+                elif omitted and (entry := re.match(r"- `([^`]+)` ", body)) and entry[1] in omitted:
+                    body = re.sub(r"`included`$", "`omitted_by_byte_limit`", body)
+                line = body + ending
+            lines.append(line)
+        adjusted = "".join(lines)
         bounded, observed = _bounded_markdown_details(adjusted, max_bytes)
-        expanded = omitted | (observed & known)
+        actual = {
+            match[1] for line, outer in _protocol_markdown_lines(bounded) if outer
+            and (match := re.match(r"^### (?:\d+\. )?(E(?:-|[0-9])[A-Za-z0-9-]*)\s+—", line))
+        }
+        expanded = omitted | (observed & known) | (known - actual)
         if expanded == omitted:
             if emitted_ids is not None:
                 emitted_ids.update(known - omitted)
@@ -3798,7 +5382,7 @@ def pack_context(
 ) -> str:
     output = [
         "# PROJECT BRAIN CONTEXT", "", f"Ticket: `{ticket}`", f"Request: `{request_number:03d}`", "",
-        "## Objective", "", bundle.objective, "", "## Repository state", "",
+        "## Objective", "", *_source_markdown_block(bundle.objective, "text"), "", "## Repository state", "",
     ]
     if progress and progress.get("context_id"):
         output[5:5] = [
@@ -3865,7 +5449,7 @@ def pack_context(
         if history:
             output.extend(["", "Earlier retrieval objectives:", ""])
             output.extend(
-                f"- {int(item.get('number') or 0):03d}: {item.get('objective')} "
+                f"- {int(item.get('number') or 0):03d}: {' '.join(str(item.get('objective') or '').splitlines())} "
                 f"({item.get('new_evidence', 0)} new evidence regions)"
                 for item in history[-8:]
             )
@@ -3904,6 +5488,8 @@ def pack_context(
             output.extend(f"- `{key}`: `{value}`" for key, value in sorted(coverage_map.items()))
         investigation_memory = progress.get("investigation_memory") or {}
         if investigation_memory:
+            if bundle.trace.get("direct_files_only"):
+                investigation_memory = _source_request_memory(investigation_memory)
             memory_block = _source_markdown_block(
                 json.dumps(investigation_memory, ensure_ascii=False, indent=2, sort_keys=True), "json"
             )
@@ -3922,7 +5508,8 @@ def pack_context(
         if progress.get("protocol_version") == 5 and progress.get("investigation_runtime"):
             from .investigation import render_protocol_v5
 
-            output.extend(["", render_protocol_v5(progress["investigation_runtime"]), ""])
+            output.extend(["", render_protocol_v5(progress["investigation_runtime"],
+                                                   compact=bool(bundle.trace.get("direct_files_only"))), ""])
         output.extend([
             "", "## Evidence lineage", "",
             f"- New stable evidence IDs: `{', '.join(progress.get('new_evidence_ids') or []) or 'none'}`",
@@ -3944,13 +5531,28 @@ def pack_context(
                 )
             manifest = progress.get("retained_evidence_manifest") or []
             output.extend(["", "### Retained evidence manifest", ""])
+            summarized = 0
+            if bundle.trace.get("direct_files_only"):
+                requested_ids = {_public_evidence_id(progress, item) for item in bundle.evidence
+                                 if "direct file request" in item.found_by}
+                retained = [item for item in manifest if item.get("status") != "included"
+                            or item.get("evidence_id") not in requested_ids]
+                summarized = len(manifest) - len(retained)
+                if summarized:
+                    output.append(
+                        f"- {summarized} current-request source regions catalogued; actual delivery is listed under "
+                        "Embedded/Omitted evidence IDs. Repeat a needed file entry from this request if it was omitted."
+                    )
+                manifest = retained
             output.extend(
                 f"- `{item.get('evidence_id')}` `{item.get('repo')}:{item.get('path')}:{item.get('line_start')}-{item.get('line_end')}` — `{item.get('status')}`"
                 for item in manifest
             )
-            if not manifest:
+            if not manifest and not summarized:
                 output.append("- None")
         memory_changes = progress.get("memory_changes") or {}
+        if bundle.trace.get("direct_files_only"):
+            memory_changes = _source_request_memory(memory_changes)
         if memory_changes:
             output.extend(["", "## Investigation Memory changes", ""])
             output.extend(
@@ -3963,11 +5565,12 @@ def pack_context(
             *_source_markdown_block("\n".join(sorted(set(bundle.relationships))), "text"),
         ])
     if bundle.experience:
-        output.extend(["", bundle.experience.rstrip(), ""])
+        output.extend(["", "## Similar ticket history (navigation only)", "",
+                       *_source_markdown_block(bundle.experience.rstrip(), "text"), ""])
     output.extend(["", "## Source evidence", ""])
     if not bundle.evidence:
         output.append("No source evidence was retrieved.")
-    for index, item in enumerate(bundle.evidence, 1):
+    for index, item in enumerate(_delivery_evidence(bundle), 1):
         found = ", ".join(item.found_by)
         source_block = _source_markdown_block(item.content, _language(item.path))
         output.extend([
@@ -4632,7 +6235,7 @@ def _session_prompt(generation: Any | None) -> str:
         raise BrainError("Packaged investigation prompt is missing its request contract")
     return common + """## Request contract
 
-This ticket uses legacy source pinning, not an Atlas generation. This ticket-specific contract takes precedence over generic v5 examples. Continue it with CONTEXT_REQUEST version 2; do not send INVESTIGATION_REQUEST, mode, wave, checkpoint, or base_context_id. Do not refresh or restart the ticket to obtain evidence. Existing user-approval pauses still apply; never switch protocols to evade a pause.
+This ticket uses legacy source pinning, not an Atlas generation. This ticket-specific contract takes precedence over generic v5 examples. Continue it with CONTEXT_REQUEST version 2; do not send INVESTIGATION_REQUEST, mode, wave, checkpoint, or base_context_id. Do not refresh or restart the ticket to obtain evidence. Additional requests keep the original source pin and use normal per-request resource limits, with no extra round approval.
 
 Use one focused source request, replacing the example query with a discriminating symbol or literal from this ticket:
 
@@ -4864,9 +6467,7 @@ def _required_coverage_key(value: str) -> str | None:
 
 
 def investigation_continuation(settings: Settings, state: dict[str, Any]) -> dict[str, Any]:
-    """Derive pause/approval state from the existing session, never from AI text."""
-    from .investigation import AUTOMATIC_MAX_WAVES
-
+    """Describe the next bounded request; prior usage is telemetry, not a quota."""
     runtime = state.get("investigation_runtime") or {}
     wave = int(runtime.get("wave") or 0)
     used = max(
@@ -4875,25 +6476,8 @@ def investigation_continuation(settings: Settings, state: dict[str, Any]) -> dic
         sum(int((item.get("retrieval") or {}).get("physical_backend_operations") or 0)
             for item in state.get("request_history") or [] if isinstance(item, dict)),
     )
-    reason = ""
-    if wave >= AUTOMATIC_MAX_WAVES:
-        reason = "Automatic wave allowance reached."
-    elif used >= settings.max_backend_operations * AUTOMATIC_MAX_WAVES:
-        reason = "Automatic physical-operation allowance reached."
-    elif runtime.get("stop_reason") in {"coverage_satisfied", "no_progress", "awaiting_user_continuation"}:
-        reason = "The previous wave paused: " + str(runtime["stop_reason"]).replace("_", " ") + "."
-    elif wave + 1 == AUTOMATIC_MAX_WAVES:
-        justified = any(
-            isinstance(item, dict) and item.get("status") == "contradicted"
-            for item in (runtime.get("hypothesis_ledger") or {}).get("items") or []
-        ) or any(
-            isinstance(item, dict) and item.get("status") == "unresolved" and item.get("priority") == "high"
-            for item in (runtime.get("evidence_frontier") or {}).get("items") or []
-        )
-        if not justified:
-            reason = "The next automatic wave has no contradiction or high-value unresolved blocker."
     return {
-        "required": bool(reason), "reason": reason, "completed_wave": wave, "next_wave": wave + 1,
+        "required": False, "reason": "", "completed_wave": wave, "next_wave": wave + 1,
         "token": hashlib.sha256(json.dumps({
             "ticket": state.get("ticket"), "generation": state.get("atlas_generation_id"),
             "started_at": state.get("started_at"),
@@ -4974,18 +6558,6 @@ def create_context(
             raise BrainError("Protocol v5 stable identity registry is corrupt; start a new ticket instead of reusing lineage") from error
         if atlas_generation is None:
             raise BrainError("Protocol v5 requires an available pinned Atlas generation")
-        from .investigation import AUTOMATIC_MAX_WAVES
-
-        if continuation["required"] and not continue_investigation:
-            raise InvestigationContinuationRequired(
-                continuation["reason"] + " Existing evidence and the pinned generation are preserved. "
-                "Review the new request and choose Continue gathering evidence in the UI, or pass "
-                "--continue-investigation to brain ctx/continue, to approve one more bounded wave. No refresh or reset is needed."
-            )
-        global_physical_limit = (
-            prior_physical_operations + settings.max_backend_operations if continue_investigation
-            else settings.max_backend_operations * AUTOMATIC_MAX_WAVES
-        )
         expected_wave = continuation["next_wave"]
         if request.get("wave") is not None and int(request["wave"]) != expected_wave:
             raise InvestigationContinuationRequired(
@@ -4993,9 +6565,6 @@ def create_context(
             )
         if progress_callback is not None:
             progress_callback({"phase": "wave_started", "wave": expected_wave, "generation": atlas_generation.generation})
-        remaining_physical_operations = global_physical_limit - prior_physical_operations
-    else:
-        remaining_physical_operations = settings.max_backend_operations
     request["_prefetch"] = state.get("prefetch") or {}
     request["_prior_entity_ids"] = [
         *(str(entity_id) for entity_id in state.get("atlas_entity_ids") or []),
@@ -5015,7 +6584,6 @@ def create_context(
         repositories=[replace(repo) for repo in settings.repositories],
         atlas_generation=atlas_generation,
         atlas_generation_mode="pinned" if atlas_generation is not None else "legacy_source_pin",
-        max_backend_operations=min(settings.max_backend_operations, remaining_physical_operations),
     )
     pinned_paths = _validated_session_snapshot_paths(settings, state, atlas_generation)
     for repo in retrieval_settings.repositories:
@@ -5073,19 +6641,29 @@ def create_context(
         and failed_checkpoint.get("continuation_status") in {"pending", "failed"}
         and failed_checkpoint.get("request_signature") != plan["signature"]
     ):
-        raise BrainError(
-            "The prior first-useful checkpoint has a pending or failed continuation; retry that same request before changing the plan"
-        )
+        checkpoint_retry_request(settings, ticket)
+        raise CheckpointRetryRequired(ticket, retry_available=True)
     progressive_checkpoint: dict[str, Any] | None = None
     durable_checkpoint_state: dict[str, Any] | None = None
+    if (
+        isinstance(failed_checkpoint, dict)
+        and failed_checkpoint.get("continuation_status") in {"pending", "failed"}
+        and failed_checkpoint.get("request_signature") == plan["signature"]
+    ):
+        checkpoint_retry_request(settings, ticket, manual_request=(request_text, include_diff))
+        # A repaired request binding is authoritative before any retrieval work.
+        state = session_state(settings, ticket)
+        pre_wave_state = copy.deepcopy(state)
+        failed_checkpoint = state.get("progressive_checkpoint")
+    context_committed = False
     continuation_path: Path | None = None
     continuation_handoff: Path | None = None
     continuation_event: dict[str, Any] | None = None
     completion_event: dict[str, Any] | None = None
     try:
         bundle = retrieve_context(retrieval_settings, request, include_diff=include_diff, progress=progress_callback)
-        if request.get("version") == 5 and int(bundle.trace.get("physical_backend_operations") or 0) > remaining_physical_operations:
-            raise BrainError("Protocol v5 wave exceeded its approved physical-operation budget")
+        if request.get("version") == 5 and int(bundle.trace.get("physical_backend_operations") or 0) > settings.max_backend_operations:
+            raise BrainError("Protocol v5 request exceeded its per-request physical-operation budget")
         from .query import merge_evidence
 
         bundle.evidence = merge_evidence(bundle.evidence + _external_evidence(settings, ticket))
@@ -5259,20 +6837,30 @@ def create_context(
 
             state["no_progress_rounds"] = no_progress_rounds
             state["coverage_map"] = dict(coverage_map)
-            progressive_checkpoint = _publish_first_useful_checkpoint(
-                settings, ticket, number, context_id, requested_base, bundle, request, plan["signature"],
-                state, directory,
-                progress_callback,
-            )
-            if progressive_checkpoint is not None:
-                durable_checkpoint_state = json.loads(json.dumps(state))
-            runtime_started = time.perf_counter()
-            runtime = build_ticket_runtime(
-                settings, atlas_generation, request, bundle, state, context_id=context_id,
-                next_best_evidence=next_evidence,
-                validated_prior_evidence_ids=validated_prior_evidence_ids,
-                continue_investigation=continue_investigation,
-            )
+            # Only these adjacent phases share resolver envelopes. No earlier
+            # retrieval hit/source entries are carried forward; each invocation
+            # (including nested contexts and retries) gets a fresh scope.
+            anchor_cache_token = _ACTIVE_RETRIEVAL_CACHE.set({})
+            anchor_trace_token = _ACTIVE_RETRIEVAL_TRACE.set(None)
+            try:
+                progressive_checkpoint = _publish_first_useful_checkpoint(
+                    settings, ticket, number, context_id, requested_base, bundle, request, plan["signature"],
+                    state, directory,
+                    progress_callback,
+                    request_text=request_text, include_diff=include_diff,
+                )
+                if progressive_checkpoint is not None:
+                    durable_checkpoint_state = json.loads(json.dumps(state))
+                runtime_started = time.perf_counter()
+                runtime = build_ticket_runtime(
+                    settings, atlas_generation, request, bundle, state, context_id=context_id,
+                    next_best_evidence=next_evidence,
+                    validated_prior_evidence_ids=validated_prior_evidence_ids,
+                    continue_investigation=continue_investigation,
+                )
+            finally:
+                _ACTIVE_RETRIEVAL_TRACE.reset(anchor_trace_token)
+                _ACTIVE_RETRIEVAL_CACHE.reset(anchor_cache_token)
             from .editions import current_edition as runtime_edition
 
             semantic_serving = str((runtime.get("serving_state") or {}).get("semantic") or "unavailable")
@@ -5472,7 +7060,8 @@ def create_context(
         record_metric(settings, "retrieve", **bundle.metrics, context_chars=len(content))
         bundle.trace["context_chars"] = len(content)
         record_trace(settings, ticket, number, bundle.trace)
-        _atomic_session_text_write(settings, ticket, request_path, request_text.rstrip() + "\n")
+        if not (progressive_checkpoint or {}).get("retry_request"):
+            _atomic_session_text_write(settings, ticket, request_path, request_text.rstrip() + "\n")
         _atomic_session_text_write(settings, ticket, path, content)
         state["requests"] = number
         state["physical_operations_total"] = prior_physical_operations + int(bundle.trace.get("physical_backend_operations") or 0)
@@ -5584,6 +7173,7 @@ def create_context(
 
             validate_stable_identity_registry(state)
         save_session(settings, ticket, state)
+        context_committed = True
         if progress_callback is not None:
             if continuation_event is not None:
                 progress_callback(continuation_event)
@@ -5597,13 +7187,42 @@ def create_context(
                 # must never make an otherwise durable context fail.
                 pass
     except Exception:
-        request_path.unlink(missing_ok=True)
-        path.unlink(missing_ok=True)
-        trace_path.unlink(missing_ok=True)
-        if continuation_path is not None:
-            continuation_path.unlink(missing_ok=True)
-        if continuation_handoff is not None:
-            continuation_handoff.unlink(missing_ok=True)
+        if context_committed:
+            # A notification failure cannot undo authoritative publication.
+            raise ContextDeliveryError(ticket, path.name) from None
+        if progressive_checkpoint is None:
+            # The early progress callback can fail after the checkpoint save,
+            # before _publish_first_useful_checkpoint returns to this caller.
+            try:
+                persisted = session_state(settings, ticket)
+                saved = persisted.get("progressive_checkpoint") or {}
+                if (persisted != pre_wave_state
+                    and saved.get("continuation_status") in {"pending", "failed"}
+                    and saved.get("request_signature") == plan["signature"]):
+                    progressive_checkpoint = saved
+                    durable_checkpoint_state = persisted
+            except (BrainError, OSError):
+                pass
+        cleanup = [path, trace_path, continuation_path, continuation_handoff]
+        retained_checkpoint = (durable_checkpoint_state or {}).get("progressive_checkpoint") or failed_checkpoint or {}
+        retained_binding = retained_checkpoint.get("retry_request") or {}
+        if not (isinstance(retained_binding, dict)
+                and retained_binding.get("artifact") == request_path.name
+                and retained_checkpoint.get("artifact") == f"checkpoint-{number:03d}.md"
+                and retained_checkpoint.get("continuation_status") in {"pending", "failed"}
+                and retained_checkpoint.get("request_signature") == plan["signature"]
+                and retained_binding.get("include_diff") is include_diff
+                and retained_binding.get("execution_signature") == _checkpoint_execution_signature(plan["signature"], include_diff)
+                and atlas_generation is not None
+                and retained_binding.get("atlas_generation_id") == atlas_generation.identity
+                and retained_binding.get("source_signature") == atlas_generation.source_signature):
+            cleanup.append(request_path)
+        for unfinished in cleanup:
+            if unfinished is not None:
+                try:
+                    unfinished.unlink(missing_ok=True)
+                except OSError:
+                    pass  # Preserve the original failure if cleanup is denied.
         if progressive_checkpoint is not None:
             published_state = durable_checkpoint_state or state
             published_checkpoint = json.loads(json.dumps(
@@ -5889,10 +7508,10 @@ def clipboard_read() -> str:
 def clipboard_write(text: str) -> None:
     command = _clipboard_command(True)
     if not command:
-        raise BrainError("No clipboard command found; use the generated file")
+        raise ClipboardWriteError("No clipboard command found; use the generated file")
     result = run(command, input_text=text)
     if result.returncode != 0:
-        raise BrainError(f"Clipboard write failed: {result.stderr.strip()}")
+        raise ClipboardWriteError(f"Clipboard write failed: {result.stderr.strip()}")
 
 
 @ticket_retrieval_exclusive
@@ -5946,7 +7565,7 @@ def resume_session(
         "Continue this same ticket. Do not reset its wave or refresh to recover evidence.",
         (f"Next wave: `{investigation_continuation(settings, state)['next_wave']}`; continue from the Context ID above."
          if generation is not None else "Legacy source-pin requests do not send wave or base_context_id."),
-        "Existing user-approval pauses still apply.",
+        "No extra round approval is required. Preserve this ticket's generation and context lineage.",
         "Only source blocks embedded below have been re-read and hash-verified for this handover. IDs in the manifest are references, not visible proof.",
         "Coverage, hypotheses and earlier decisions are navigation state, not a verified root cause. Re-read missing decision-critical source using files entries (repo, path, lines) in the request contract below. Known IDs requested this way are re-emitted.",
         "Brain cannot recover reasoning or user answers that stayed only in the old chat. Ask for a concise handover of those decisions if absent; do not invent them.",
@@ -6002,6 +7621,27 @@ def delivery_target(settings: Settings, ticket: str, target: str | None = None) 
 
 @ticket_exclusive
 def deliver(settings: Settings, ticket: str, text: str, target: str | None, *, copy: bool) -> tuple[list[Path], int]:
+    try:
+        return _prepare_delivery(settings, ticket, text, target, copy=copy)
+    except (OSError, ClipboardWriteError) as error:
+        match = re.search(r"(?m)^Request: `(\d+)`", text) if text.startswith("# PROJECT BRAIN CONTEXT") else None
+        if match:
+            number = int(match.group(1))
+            state = session_state(settings, ticket)
+            artifact = f"context-{number:03d}.md"
+            if any(isinstance(item, dict) and item.get("number") == number for item in state.get("request_history") or []):
+                try:
+                    directory = session_dir(settings, ticket)
+                    saved = read_managed_bytes(directory, directory / artifact, max_bytes=MAX_DELIVERY_ARTIFACT_BYTES)
+                except (BrainError, OSError, ValueError):
+                    pass
+                else:
+                    if saved == text.encode("utf-8"):
+                        raise ContextDeliveryError(ticket, artifact) from error
+        raise
+
+
+def _prepare_delivery(settings: Settings, ticket: str, text: str, target: str | None, *, copy: bool) -> tuple[list[Path], int]:
     from .agent import final_solution_contract
 
     directory = session_dir(settings, ticket)

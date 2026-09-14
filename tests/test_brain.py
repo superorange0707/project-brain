@@ -574,8 +574,9 @@ path = "batch-service"
         symbols = symbol_hits(self.settings, "EligibilityEvaluator", ["trading-service"])
         self.assertTrue(any(hit.path.endswith("EligibilityEvaluator.java") for hit in symbols))
         traced, relationships = trace_symbol(self.settings, "recalculate", ["trading-service"])
-        self.assertTrue(any(hit.kind == "caller" for hit in traced))
-        self.assertTrue(any("CustomerChangedListener.java" in relation for relation in relationships))
+        self.assertTrue(any(hit.kind.startswith("lexical reference candidate") and hit.path.endswith("CustomerChangedListener.java")
+                            for hit in traced))
+        self.assertFalse(any("CustomerChangedListener.java" in relation for relation in relationships))
 
     def test_map_extracts_framework_and_maven_facts(self) -> None:
         facts = generate_map(self.settings)
@@ -1797,11 +1798,15 @@ path = "batch-service"
 
         kit = create_m365_agent_kit(self.settings)
         self.assertLessEqual(len(kit["instructions"]), 8000)
+        self.assertLessEqual(len(create_m365_agent_kit(replace(self.settings, name='x' * 512))["instructions"]), 8000)
         self.assertIn("The user never needs to remind you", kit["instructions"])
         self.assertIn("Never guess a file path", kit["instructions"])
         self.assertIn("use `paths:` for a filename/path fragment", kit["instructions"])
         self.assertIn("customer-service", kit["knowledge"])
         self.assertIn("Investigate a ticket", kit["suggested_prompts"])
+        self.assertNotIn("at most one focused follow-up", kit["suggested_prompts"])
+        self.assertIn("no fixed investigation-round limit", kit["suggested_prompts"])
+        self.assertIn("material repository fact remains unresolved", kit["suggested_prompts"])
         self.assertTrue(Path(kit["suggested_prompts_path"]).is_file())
         self.assertTrue(Path(kit["setup_path"]).is_file())
 
@@ -3906,12 +3911,18 @@ class SyntheticFanoutTest(unittest.TestCase):
                 }
             }
             request = parse_context_request(json.dumps(payload))
-            bundle = retrieve_context(settings, request)
+            with mock.patch.object(core_module, "read_source", wraps=read_source) as reads:
+                bundle = retrieve_context(settings, request)
+            verified_reads = [call for call in reads.call_args_list if call.kwargs.get("full")]
+            self.assertEqual(2, len(verified_reads))
+            self.assertTrue(all(call.args[1].path == "Needle.java" for call in verified_reads))
 
         self.assertEqual(80, bundle.trace["requested_operations"])
         self.assertEqual(2, bundle.trace["effective_operations"])
         self.assertGreaterEqual(bundle.trace["physical_backend_operations"], 50)
-        self.assertLessEqual(bundle.trace["physical_backend_operations"], 56)
+        # The legacy search fan-out retains its old bound. Its two stages now
+        # explicitly verify Java source instead of trusting declaration text.
+        self.assertLessEqual(bundle.trace["physical_backend_operations"] - len(verified_reads), 56)
         self.assertLessEqual(len(bundle.trace["initial_repo_scope"]), 6)
         self.assertEqual("repo-37", bundle.trace["initial_repo_scope"][0])
         self.assertLessEqual(bundle.trace["candidates_after_prune"], 200)

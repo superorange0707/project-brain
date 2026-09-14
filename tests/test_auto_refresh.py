@@ -218,20 +218,65 @@ class AutoRefreshServiceTests(unittest.TestCase):
         self.assertEqual(2, detector.call_count)
         refresh.assert_not_called()
 
-    def test_runtime_refresh_failure_is_latched_instead_of_retried(self) -> None:
-        detector = Mock(side_effect=[
-            FreshnessDecision.refresh("Core indexes are stale."),
-            FreshnessDecision.refresh("New repositories are pending."),
-        ])
-        refresh = Mock(side_effect=RuntimeError("private runtime detail"))
+    def test_runtime_refresh_failure_retries_after_backoff_without_manual_reset(self) -> None:
+        detector = Mock(return_value=FreshnessDecision.refresh("Core indexes are stale."))
+        refresh = Mock(side_effect=[RuntimeError("private runtime detail"), RuntimeError("temporary IO"), {}])
         service = self.service(detector, refresh, debounce=0)
 
         first = service.poll(force_check=True)
-        self.assertEqual("action_required", first["status"])
+        self.assertEqual("unverified", first["status"])
         self.assertNotIn("private", json.dumps(first))
-        self.clock.advance(30)
+        self.clock.advance(29)
         service.poll(force_check=True)
         refresh.assert_called_once_with()
+        self.clock.advance(1)
+        service.poll()
+        self.assertEqual(2, refresh.call_count)
+        detector.return_value = FreshnessDecision.refresh("New repositories are pending.")
+        self.clock.advance(59)
+        service.poll()
+        self.assertEqual(2, refresh.call_count)
+        self.clock.advance(1)
+        self.assertEqual("ready", service.poll()["status"])
+        self.assertEqual(3, refresh.call_count)
+        self.assertEqual(0, service._failures)
+
+    def test_slow_failure_gets_a_full_backoff_after_the_operation_finishes(self) -> None:
+        def refresh():
+            if refresher.call_count == 1:
+                self.clock.advance(60)
+                raise OSError("temporary failure after slow refresh")
+            return {}
+
+        refresher = Mock(side_effect=refresh)
+        service = self.service(lambda _settings: FreshnessDecision.refresh("Stale index"), refresher, debounce=0)
+        self.assertEqual("unverified", service.poll()["status"])
+        service.poll()
+        self.clock.advance(29)
+        service.poll()
+        refresher.assert_called_once_with()
+        self.clock.advance(1)
+        self.assertEqual("ready", service.poll()["status"])
+        self.assertEqual(2, refresher.call_count)
+
+    def test_detector_exception_recovers_and_stopped_service_can_restart(self) -> None:
+        detector = Mock(side_effect=[OSError("private path"), FreshnessDecision.ready()])
+        service = self.service(detector, debounce=0)
+        failed = service.poll()
+        self.assertEqual("unverified", failed["status"])
+        self.assertNotIn("private", json.dumps(failed))
+        self.clock.advance(30)
+        self.assertEqual("ready", service.poll()["status"])
+        checked = threading.Event()
+        service._detector = lambda _settings: (checked.set() or FreshnessDecision.ready())
+        for _ in range(2):
+            checked.clear()
+            self.clock.advance(60)
+            service.start()
+            try:
+                self.assertTrue(checked.wait(3), "freshness worker did not run")
+            finally:
+                service.stop()
 
     def test_preference_is_brain_owned_and_persistent(self) -> None:
         service = AutoRefreshService(self.settings, mode="off")

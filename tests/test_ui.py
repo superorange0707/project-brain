@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -23,6 +23,7 @@ from brain.ui import (
     MAX_SESSION_ARTIFACT_RESULTS,
     MAX_SESSION_RESULTS,
     _OperationCoordinator,
+    _Handler,
     _continuation_options,
     _NoUiRedirect,
     _probe_ui_instance,
@@ -38,6 +39,41 @@ from brain.ui import (
 
 
 class OperationCoordinatorTest(unittest.TestCase):
+    def test_disconnected_response_does_not_fail_committed_operation(self) -> None:
+        for error in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            for stage in ("headers", "body"):
+                with self.subTest(error=error, stage=stage):
+                    coordinator = _OperationCoordinator()
+                    handler = _Handler.__new__(_Handler)
+                    handler.server = Mock()
+                    handler._headers = Mock(side_effect=error() if stage == "headers" else None)
+                    handler.wfile = Mock()
+                    if stage == "body":
+                        handler.wfile.write.side_effect = error()
+                    with patch("brain.ops.refresh_brain") as refresh, patch("brain.ui.project_status", return_value={}):
+                        refresh.return_value.as_dict.return_value = {"published": True}
+                        coordinator.foreground("/api/sync", lambda: handler._action("/api/sync", {}))
+                    refresh.assert_called_once()
+                    self.assertEqual("succeeded", coordinator.list()[0]["status"])
+                    self.assertTrue(coordinator.is_idle())
+
+    def test_response_handling_preserves_real_operation_and_serialization_failures(self) -> None:
+        handler = _Handler.__new__(_Handler)
+        handler.server = Mock()
+        handler._headers = Mock()
+        handler.wfile = Mock()
+        coordinator = _OperationCoordinator()
+        with patch("brain.ops.refresh_brain", side_effect=BrainError("build failed")):
+            with self.assertRaisesRegex(BrainError, "build failed"):
+                coordinator.foreground("/api/sync", lambda: handler._action("/api/sync", {}))
+        self.assertEqual("failed", coordinator.list()[0]["status"])
+        handler.wfile.write.assert_not_called()
+        with self.assertRaises(TypeError):
+            handler._json({"unsupported": object()})
+        handler._headers.side_effect = PermissionError("not a disconnected peer")
+        with self.assertRaises(PermissionError):
+            handler._json({"ok": True})
+
     def test_atlas_capacity_retains_actionable_detail_without_suggesting_disk_cleanup(self) -> None:
         from brain.atlas import AtlasCapacityError
 
@@ -358,6 +394,50 @@ class SessionSummaryTest(unittest.TestCase):
 
 
 class LocalUiTest(unittest.TestCase):
+    def test_handoff_failure_exposes_committed_evidence_without_retrieval_retry(self) -> None:
+        from brain.core import ContextDeliveryError, deliver
+
+        _refresh_all(self.settings, fetch=False, discover=False)
+        self.post("/api/start", {"ticket": "SAVED-EVIDENCE", "ticket_text": "Read HelloService.",
+                                 "sync": False, "target": "m365"})
+        request = json.dumps({"CONTEXT_REQUEST": {
+            "version": 2, "objective": "Read HelloService implementation", "files": [
+                {"repo": "service-a", "path": "src/main/java/demo/HelloService.java"},
+            ],
+        }})
+        with patch("brain.core._atomic_generated_text_write", side_effect=OSError("handoff write failed")):
+            _, started, _ = self.post("/api/retrieval", {"ticket": "SAVED-EVIDENCE", "text": request, "target": "m365"})
+            job = self.job(started["data"]["id"])
+        self.assertEqual("failed", job["status"])
+        recovery = job["recovery"]
+        self.assertEqual("open_saved_context", recovery["action"])
+        self.assertEqual("context-001.md", recovery["artifact"])
+        self.assertIn("Evidence is saved", job["error"])
+        before = session_state(self.settings, "SAVED-EVIDENCE")
+        self.assertEqual(1, before["requests"])
+        with patch("brain.core.retrieve_context", side_effect=AssertionError("must not retrieve again")):
+            _, saved, _ = self.get("/api/artifact?ticket=SAVED-EVIDENCE&name=" + recovery["artifact"])
+        text = saved["data"]["content"]
+        self.assertIn("HelloService", text)
+        self.assertEqual(before, session_state(self.settings, "SAVED-EVIDENCE"))
+        with patch("brain.core._clipboard_command", return_value=None), self.assertRaises(ContextDeliveryError):
+            deliver(self.settings, "SAVED-EVIDENCE", text, "claude", copy=True)
+        with patch("brain.core._clipboard_command", return_value=["test-clipboard"]), \
+                patch("brain.core.run", return_value=Mock(returncode=1, stderr="clipboard refused")), \
+                self.assertRaises(ContextDeliveryError):
+            deliver(self.settings, "SAVED-EVIDENCE", text, "claude", copy=True)
+        # Never advertise an unrelated/modified context as the saved result.
+        with patch("brain.core._prepare_delivery", side_effect=OSError("write failed")):
+            with self.assertRaises(OSError) as error:
+                deliver(self.settings, "SAVED-EVIDENCE", text + "not the saved bytes", "m365", copy=False)
+            self.assertNotIsInstance(error.exception, ContextDeliveryError)
+        # Lossy decoding must never pass a byte-integrity check.
+        context = session_dir(self.settings, "SAVED-EVIDENCE") / "context-001.md"
+        damaged = text.encode("utf-8") + b"\xff"
+        context.write_bytes(damaged)
+        with patch("brain.core._prepare_delivery", side_effect=OSError("write failed")), self.assertRaises(OSError):
+            deliver(self.settings, "SAVED-EVIDENCE", damaged.decode("utf-8", errors="replace"), "m365", copy=False)
+
     def test_resume_and_feedback_inherit_ticket_delivery_without_reset(self) -> None:
         self.post("/api/start", {"ticket": "CHAT-UI", "ticket_text": "Investigate hello", "sync": False, "target": "m365"})
         before = session_state(self.settings, "CHAT-UI")
@@ -583,6 +663,30 @@ class LocalUiTest(unittest.TestCase):
         job = self.server.operations.list()[0]
         self.assertEqual("Operation failed (BrainError).", job["error"])
         self.assertNotIn(str(self.root), json.dumps(job))
+
+    def test_indexed_non_git_snapshot_is_ready_without_false_attention(self) -> None:
+        refresh_brain(self.settings, fetch=False, discover=False)
+        _, status, _ = self.get("/api/status")
+        self.assertEqual(1, status["data"]["summary"]["current"])
+        self.assertEqual(0, status["data"]["summary"]["warnings"])
+        repository = status["data"]["repositories"][0]
+        self.assertEqual("non-git-snapshot", repository["status"])
+        self.assertTrue(repository["indexed"])
+        self.assertIn("no remote freshness check", repository["warning"])
+
+    def test_preview_handles_copilot_transport_and_bad_types_without_disconnect(self) -> None:
+        for version in ([], {}, True):
+            text = json.dumps({"INVESTIGATION_REQUEST": {"version": version, "objective": "Find HelloService"}})
+            code, preview, _ = self.post("/api/preview", {"text": text})
+            self.assertEqual(200, code)
+            self.assertFalse(preview["data"]["valid"])
+            self.assertIn("version", preview["data"]["error"])
+        text = 'Here is the request:\n```json\n' + json.dumps({"INVESTIGATION_REQUEST": {
+            "version": 5, "mode": "root_cause", "objective": "Find HelloService"}}) + '\n```\nPaste it into Brain.'
+        _, preview, _ = self.post("/api/preview", {"text": text})
+        self.assertTrue(preview["data"]["valid"])
+        self.assertEqual("context_request", preview["data"]["kind"])
+        self.assertEqual("ready", self.get("/api/health")[1]["data"]["status"])
 
     def test_request_preview_start_context_feedback_and_artifacts(self) -> None:
         request_text = """The next evidence I need is:
@@ -1043,11 +1147,6 @@ None beyond the stated boundary.
         state["investigation_runtime"]["wave"] = 4
         path.write_text(json.dumps(state), encoding="utf-8")
         body = {"ticket": "UI-PAUSED", "text": request(5), "target": "m365"}
-        _, unapproved, _ = self.post("/api/retrieval", body)
-        failed = self.job(unapproved["data"]["id"])
-        self.assertEqual("failed", failed["status"])
-        self.assertEqual("continue_investigation", failed["recovery"]["action"])
-        self.assertEqual(4, session_state(self.settings, "UI-PAUSED")["investigation_runtime"]["wave"])
         with self.assertRaises(HTTPError) as denied:
             self.post("/api/context", {**body, "continue_investigation": True})
         with denied.exception as response:
@@ -1058,9 +1157,8 @@ None beyond the stated boundary.
                 body["text"] = request(wave)
                 _, preview, _ = self.post("/api/preview", body)
                 approval = preview["data"]["continuation"]
-                self.assertTrue(approval["required"])
+                self.assertFalse(approval["required"])
                 self.assertEqual(wave, approval["next_wave"])
-                body.update(continue_investigation=True, continuation_token=approval["token"])
                 _, result, _ = self.post(endpoint, body)
                 if endpoint == "/api/retrieval":
                     self.assertEqual("succeeded", self.job(result["data"]["id"])["status"])
@@ -1068,7 +1166,8 @@ None beyond the stated boundary.
                 self.assertEqual(wave, current["investigation_runtime"]["wave"])
                 self.assertEqual(generation, current["atlas_generation_id"])
                 with self.assertRaises(HTTPError) as stale:
-                    self.post("/api/context", {**body, "text": request(wave + 1)})
+                    self.post("/api/context", {**body, "text": request(wave + 1),
+                                              "continue_investigation": True, "continuation_token": approval["token"]})
                 with stale.exception as response:
                     self.assertIn("changed after approval", json.load(response)["error"])
 

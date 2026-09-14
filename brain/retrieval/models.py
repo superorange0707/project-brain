@@ -108,6 +108,7 @@ class RetrievalTrace:
     semantic_repo_scope: list[str] = field(default_factory=list)
     stop_reason: str = "coverage_satisfied"
     fallback_reasons: list[str] = field(default_factory=list)
+    _backend_headroom: int = field(default=0, repr=False)
     _lock: Lock = field(default_factory=Lock, repr=False)
 
     def add_backend(self, name: str, elapsed_ms: float, *, subprocesses: int = 0, bytes_scanned: int = 0, files: int = 0, raw_hits: int = 0, cache_hit: bool = False) -> None:
@@ -122,11 +123,18 @@ class RetrievalTrace:
     def try_reserve_backend(self) -> bool:
         """Atomically reserve one physical operation before parallel work starts."""
         with self._lock:
-            if self.physical_backend_operations >= self.max_physical_backend_operations:
+            if self.physical_backend_operations >= self.max_physical_backend_operations - self._backend_headroom:
                 return False
             self.physical_backend_operations += 1
             self.operation_count = self.physical_backend_operations
             return True
+
+    def _set_backend_headroom(self, operations: int) -> None:
+        """Protect later source work without counting it as already executed."""
+        with self._lock:
+            self._backend_headroom = max(0, min(
+                operations, self.max_physical_backend_operations - self.physical_backend_operations,
+            ))
 
     def complete_reserved_backend(self, name: str, elapsed_ms: float, *, subprocesses: int = 0, bytes_scanned: int = 0, files: int = 0, raw_hits: int = 0, cache_hit: bool = False) -> None:
         with self._lock:
@@ -153,7 +161,8 @@ class RetrievalTrace:
 
     @property
     def physical_budget_remaining(self) -> int:
-        return max(0, self.max_physical_backend_operations - self.physical_backend_operations)
+        with self._lock:
+            return max(0, self.max_physical_backend_operations - self._backend_headroom - self.physical_backend_operations)
 
     def as_dict(self) -> dict[str, Any]:
         wall_ms = round((perf_counter() - self.started) * 1000, 3)

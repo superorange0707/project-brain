@@ -251,7 +251,6 @@ class AutoRefreshService:
         self._refresh_due = 0.0
         self._next_check = 0.0
         self._failures = 0
-        self._blocked_signature: tuple[str, ...] = ()
         self._status = "ready" if self._mode == "when_idle" else "off"
         self._lock = threading.RLock()
         self._poll_lock = threading.Lock()
@@ -309,7 +308,7 @@ class AutoRefreshService:
             self._pending = False
             self._pending_reason = None
             self._pending_signature = ()
-            self._blocked_signature = ()
+            self._failures = 0
             self._next_check = 0.0
             self._status = "ready" if mode == "when_idle" else "off"
             self._save()
@@ -327,15 +326,14 @@ class AutoRefreshService:
                 "status": self._status,
             }
 
-    def _mark_failure(self, now: float, signature: tuple[str, ...]) -> None:
+    def _mark_failure(self, now: float) -> None:
         self._failures += 1
-        delay = min(self._max_backoff, self._backoff * (2 ** (self._failures - 1)))
+        delay = min(self._max_backoff, self._backoff * (2 ** min(self._failures - 1, 30)))
         self._pending = False
-        self._pending_reason = "Action Required: automatic refresh failed."
+        self._pending_reason = "Automatic refresh failed; retrying after backoff when idle."
         self._pending_signature = ()
-        self._blocked_signature = signature
         self._next_check = now + delay
-        self._status = "action_required"
+        self._status = "unverified"
         self._save()
 
     def _attempt_pending(self, now: float) -> bool:
@@ -345,7 +343,6 @@ class AutoRefreshService:
             if not self._is_idle():
                 self._status = "waiting_for_idle"
                 return True
-            signature = self._pending_signature
             self._status = "refreshing"
         try:
             result = self._refresher()
@@ -357,13 +354,13 @@ class AutoRefreshService:
             return True
         except Exception:
             with self._lock:
-                self._mark_failure(now, signature)
+                self._mark_failure(self._clock())
             return True
+        now = self._clock()
         with self._lock:
             self._pending = False
             self._pending_reason = None
             self._pending_signature = ()
-            self._blocked_signature = ()
             self._last_refresh = _iso(now)
             self._next_check = now + self._cooldown
             self._failures = 0
@@ -381,22 +378,21 @@ class AutoRefreshService:
             if self._attempt_pending(now):
                 return self.status()
             with self._lock:
-                if self._pending or (not force_check and now < self._next_check):
+                if self._pending or (now < self._next_check and (not force_check or self._failures)):
                     return self.status()
-            decision = self._detector(self.settings)
+            try:
+                decision = self._detector(self.settings)
+            except Exception:
+                decision = FreshnessDecision("unverified", ("Freshness check failed; retrying after backoff.",), True)
+            now = self._clock()
             with self._lock:
                 self._last_check = _iso(now)
                 if decision.kind == "refresh":
-                    if self._blocked_signature:
-                        self._status = "action_required"
-                        self._pending_reason = "Action Required: automatic refresh is paused."
-                        self._next_check = now + self._interval
-                    else:
-                        self._pending = True
-                        self._pending_signature = decision.reasons
-                        self._pending_reason = "Repository freshness changes were coalesced."
-                        self._refresh_due = now + self._debounce
-                        self._status = "debouncing" if self._debounce else "pending"
+                    self._pending = True
+                    self._pending_signature = decision.reasons
+                    self._pending_reason = "Repository freshness changes were coalesced."
+                    self._refresh_due = now + self._debounce
+                    self._status = "debouncing" if self._debounce else "pending"
                 elif decision.kind in {"action_required", "unverified"}:
                     self._pending = False
                     self._pending_signature = ()
@@ -404,7 +400,7 @@ class AutoRefreshService:
                     self._status = decision.kind
                     if decision.check_failed:
                         self._failures += 1
-                        delay = min(self._max_backoff, self._backoff * (2 ** (self._failures - 1)))
+                        delay = min(self._max_backoff, self._backoff * (2 ** min(self._failures - 1, 30)))
                         self._next_check = now + delay
                     else:
                         self._next_check = now + self._interval
@@ -412,7 +408,6 @@ class AutoRefreshService:
                     self._pending = False
                     self._pending_reason = None
                     self._pending_signature = ()
-                    self._blocked_signature = ()
                     self._failures = 0
                     self._next_check = now + self._interval
                     self._status = "ready"
@@ -423,6 +418,7 @@ class AutoRefreshService:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        self._stop.clear()
 
         def run() -> None:
             while not self._stop.is_set():

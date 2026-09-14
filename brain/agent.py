@@ -12,7 +12,7 @@ from . import __version__
 from .core import (
     BrainError,
     Settings,
-    _unwrap_request_fence,
+    _request_document,
     investigation_continuation,
     mark_active_artifacts,
     protocol_request_signature,
@@ -95,7 +95,6 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
     stripped = text.strip()
     if not stripped:
         raise BrainError("The AI response is empty")
-    request_position = max(text.rfind("CONTEXT_REQUEST:"), text.rfind("INVESTIGATION_REQUEST:"))
     final, _ = final_solution_contract(text)
     if final:
         return {
@@ -106,11 +105,7 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
             "operation_count": 0,
             "actions": [],
         }
-    request_text = _unwrap_request_fence(text)
-    looks_like_request = request_position >= 0 or (
-        request_text.startswith("{") and ("CONTEXT_REQUEST" in request_text or "INVESTIGATION_REQUEST" in request_text or '"objective"' in request_text)
-    )
-    if looks_like_request:
+    if _request_document(text) is not None:
         result = request_preview(text, settings)
         result["kind"] = "context_request"
         result["label"] = "Repository retrieval required"
@@ -223,11 +218,11 @@ def create_m365_agent_kit(settings: Settings) -> dict[str, Any]:
 
 ## Investigate a ticket
 
-Investigate this ticket as a read-only coding agent. I will attach the latest Project Brain handoff. Reconstruct the relevant multi-repository flow, identify blocking unknowns, and decide what evidence is needed next.
+Investigate this ticket as a read-only coding agent. I will attach the latest Project Brain handoff. Reconstruct the relevant multi-repository flow, identify blocking unknowns, and decide what evidence is needed next. If repository evidence is needed, return one valid fenced JSON request using the handoff's protocol; omit wave and never invent a context ID.
 
 ## Continue with Brain evidence
 
-Continue using the latest Project Brain handoff and context_id. Update VERIFIED, INFERRED, BLOCKING UNKNOWN, and NON-BLOCKING UNKNOWN from the delta. Request at most one focused follow-up for one fact that can materially change the implementation; otherwise return FINAL_SOLUTION.
+Continue using the latest Project Brain handoff and context_id. Update VERIFIED, INFERRED, BLOCKING UNKNOWN, and NON-BLOCKING UNKNOWN from the delta. Continue requesting focused evidence while a material repository fact remains unresolved; there is no fixed investigation-round limit. Return FINAL_SOLUTION only when the evidence is sufficient, and report an external blocker explicitly if Brain cannot resolve it.
 
 ## Read internal documentation
 
@@ -266,6 +261,8 @@ For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365`
 
 Use exactly one `INVESTIGATION_REQUEST` mapping. Required fields are `version: 5`, `mode`, and `objective`. Supported modes are `root_cause`, `implementation_plan`, `impact_analysis`, `test_surface`, `flow_trace`, and `history`. Optional bounded fields are `runtime_facts`, `hypotheses`, `required`, `resolve`, `anchors`, `files`, `base_context_id`, `checkpoint`, and `wave`.
 
+Emit a valid JSON object in one fenced `json` block, using ordinary double quotes, escaped strings, no comments and no trailing commas. JSON is valid YAML and can be pasted into Brain unchanged. Keep reasoning outside the block. Omit `wave` and copy `base_context_id` only from the actual latest handoff; omit it when none was supplied. Never invent a context ID or copy a sample counter. Existing YAML requests remain accepted.
+
 For an established file, `files: [{repo: VERIFIED_REPO, path: VERIFIED_RELATIVE_PATH}]` requests full pinned source, not another search. Optional `lines: "start-end"` requests an exact range. Large requests return whole-line byte-bounded pages with total lines, returned range and `next lines`; request the remaining range on the same ticket. Only advance after that page's evidence is actually embedded. File-only requests skip optional discovery/models. Missing handoff content does not prove the source file is absent; never ask the user to fetch configured repository code manually.
 
 ## State and lineage
@@ -274,7 +271,7 @@ Treat Atlas cards, anchors, flow candidates, Program Slice Lite, history, and se
 
 ## Investigation state machine
 
-Proceed through `INTAKE → ORIENT → INVESTIGATE → CHALLENGE → SYNTHESIZE → STOP`. The automatic allowance is three normal waves and a justified fourth, not a lifetime ticket limit. Challenge the leading hypothesis with disconfirming evidence before synthesis. Pause on sufficient coverage, no progress, an external blocker, or the automatic allowance. A pause is not proof of completion. The user may approve one additional bounded wave on the same ticket with Continue gathering evidence or `--continue-investigation`. Preserve the pinned generation and all evidence/context identities. Omit `wave` or continue the ticket's sequential count beyond four; never restart the counter. Approval belongs to the user action, not the AI request envelope. Never switch protocols to bypass the pause.
+Proceed through `INTAKE → ORIENT → INVESTIGATE → CHALLENGE → SYNTHESIZE → STOP`. There is no fixed investigation round limit or extra continuation approval. Each submitted request has its own resource budget. Challenge the leading hypothesis with disconfirming evidence before synthesis. Continue for a material missing repository fact; change the anchor or read the missing source when a search makes no progress. Synthesize on sufficient evidence, or ask for a genuinely external blocker. A pause or coverage label is not proof of completion. Preserve the pinned generation and all evidence/context identities. Omit `wave` or continue the ticket's sequential count; never restart the counter or add approval fields to the AI request envelope.
 
 ## Final response
 
