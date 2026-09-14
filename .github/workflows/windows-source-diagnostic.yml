@@ -40,7 +40,7 @@ jobs:
           ]
           print(sys.version, sqlite3.sqlite_version)
           with mock.patch.object(core, "retrieve_context", traced):
-              result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames(names))
+              result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromName("test_symbol_scope"))
           for record in records:
               if "Investigation failed" in record["objective"]:
                   print(json.dumps(record, default=str))
