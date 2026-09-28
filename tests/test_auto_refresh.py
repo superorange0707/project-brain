@@ -18,6 +18,7 @@ from brain.auto_refresh import (
 )
 from brain.cli import main
 from brain.core import load_settings, session_state, start_session
+from brain.ops import freshness, refresh_brain
 from brain.ui import _OperationCoordinator
 
 
@@ -298,13 +299,38 @@ class AutoRefreshServiceTests(unittest.TestCase):
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=self.repository, check=True, capture_output=True, text=True,
         ).stdout.strip()
-        (self.settings.state_dir / "sources.json").write_text(json.dumps({
-            "service-a": {"status": "current", "ref": "HEAD", "sha": sha},
-        }), encoding="utf-8")
-        (self.settings.state_dir / "indexes.json").write_text(json.dumps({
-            "service-a": {"sha": sha},
-        }), encoding="utf-8")
+        refresh_brain(self.settings, fetch=False, discover=False)
         return sha
+
+    def test_matching_legacy_indexes_do_not_hide_a_missing_generation(self) -> None:
+        self._initialize_git_state()
+        with patch("brain.catalog.current_generation_ref", return_value=None):
+            decision = detect_auto_refresh(self.settings)
+        self.assertEqual("refresh", decision.kind)
+        self.assertIn("Core indexes are stale.", decision.reasons)
+
+    def test_unpublished_snapshot_is_refreshed_when_idle(self) -> None:
+        from brain.core import load_source_state, snapshot_indexes
+        from brain.sync import sync_repositories
+
+        self._initialize_git_state()
+        (self.repository / "tracked.txt").write_text("two\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=self.repository, check=True)
+        subprocess.run(["git", "commit", "-qm", "second"], cwd=self.repository, check=True)
+        sync_repositories(self.settings, fetch=False)
+        indexes, _ = snapshot_indexes(self.settings, changed_only=True, publish=False)
+        (self.settings.state_dir / "indexes.json").write_text(json.dumps(indexes), encoding="utf-8")
+        self.assertEqual(load_source_state(self.settings)["service-a"]["sha"], indexes["service-a"]["sha"])
+        self.assertFalse(freshness(self.settings)["repositories"][0]["current"])
+
+        refresh = Mock(side_effect=lambda: refresh_brain(self.settings, fetch=False, discover=False))
+        service = self.service(detect_auto_refresh, refresh, debounce=0)
+        self.assertEqual("ready", service.poll()["status"])
+        refresh.assert_called_once_with()
+        self.assertTrue(freshness(self.settings)["repositories"][0]["current"])
+        self.clock.advance(30)
+        service.poll(force_check=True)
+        refresh.assert_called_once_with()
 
     def test_normal_working_tree_edits_do_not_trigger_refresh(self) -> None:
         self._initialize_git_state()

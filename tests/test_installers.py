@@ -93,7 +93,7 @@ class InstallerTests(unittest.TestCase):
     def test_homebrew_release_verification_uses_the_installed_tap_path(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         job = release.split("  homebrew-tap:\n", 1)[1].split("  pypi:\n", 1)[0]
-        self.assertIn("brew tap superorange0707/tap", job)
+        self.assertIn('brew trust --formula "$VERIFICATION_NAME"', job)
         self.assertIn(
             'VERIFICATION_FORMULA="$(brew --repository superorange0707/tap)/Formula/$(basename "$FORMULA")"',
             job,
@@ -101,6 +101,8 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('cp "$FORMULA" "$VERIFICATION_FORMULA"', job)
         self.assertIn('VERIFICATION_NAME="superorange0707/tap/$(basename "$FORMULA" .rb)"', job)
         self.assertIn('brew install --formula "$VERIFICATION_NAME"', job)
+        self.assertLess(job.index('brew trust --formula "$VERIFICATION_NAME"'), job.index('brew install --formula "$VERIFICATION_NAME"'))
+        self.assertLess(job.index('cp "$FORMULA" "$VERIFICATION_FORMULA"'), job.index('brew upgrade --formula "$VERIFICATION_NAME"'))
         self.assertIn('brew test "$VERIFICATION_NAME"', job)
         self.assertNotIn("HOMEBREW_NO_REQUIRE_TAP_TRUST", job)
         self.assertNotIn("brew trust superorange0707/tap", job)

@@ -10,6 +10,79 @@ UI_HTML = Path(__file__).resolve().parents[1] / "brain" / "ui.html"
 
 @unittest.skipUnless(shutil.which("node"), "UI JavaScript regression requires Node.js")
 class UiInteractionTest(unittest.TestCase):
+    def test_status_polling_updates_idle_page_and_resumes_without_resetting_forms(self):
+        result = subprocess.run(
+            [shutil.which("node"), "-e", r'''
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const html = fs.readFileSync(process.argv[1], "utf8");
+const elements = new Map(), listeners = {}, timers = new Map();
+const document = {hidden:false,
+  getElementById(id) {
+    if (!elements.has(id)) elements.set(id, {value:"", textContent:"", innerHTML:""});
+    return elements.get(id);
+  },
+  querySelectorAll() { return []; },
+  addEventListener(name, callback) { listeners[name] = callback; }
+};
+let calls = 0, timerId = 0, errors = 0, response;
+const data = {project:{name:"test", config:"brain.toml"}, summary:{}, repositories:[], sessions:[],
+  brain:{health:"Refresh available", edition:"core", core:{ready:true}, capabilities:{}},
+  auto_refresh:{mode:"when_idle", status:"pending"}};
+const context = {document, token:"local-token", state:{ticket:""}, esc:String,
+  api() { calls++; return response || Promise.resolve(data); },
+  renderStorage() {}, renderModels() {}, resumeActiveRefresh() {}, resumeActiveJobs() {},
+  report() { errors++; },
+  setTimeout(callback, delay) { assert.equal(delay, 5000); timers.set(++timerId, callback); return timerId; },
+  clearTimeout(id) { timers.delete(id); }
+};
+vm.createContext(context);
+vm.runInContext(html.slice(html.indexOf('async function loadStatus('), html.indexOf('function renderModels(')), context);
+vm.runInContext(html.slice(html.indexOf('async function pollStatus()'), html.indexOf('</script>')), context);
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const tick = () => { const [id, callback] = timers.entries().next().value; timers.delete(id); return callback(); };
+(async () => {
+  await flush();
+  assert.equal(calls, 1);
+  assert.equal(document.getElementById("brain-health").textContent, "Refresh available");
+  assert.equal(timers.size, 1);
+  const drafts = {"edition-select":"precision", "session-select":"B", "request-ticket":"B",
+    "review-ticket":"B", "request-text":"unsent question", "auto-refresh-mode":"when_idle"};
+  Object.entries(drafts).forEach(([id, value]) => { document.getElementById(id).value = value; });
+  let finish;
+  response = new Promise(resolve => { finish = resolve; });
+  const pending = tick();
+  await listeners.visibilitychange();
+  assert.equal(calls, 2, "Visibility events must not overlap an in-flight poll");
+  data.brain.health = "Healthy";
+  data.auto_refresh.status = "ready";
+  finish(data); await pending;
+  assert.equal(document.getElementById("brain-health").textContent, "Healthy");
+  assert.equal(document.getElementById("auto-refresh-status").textContent, "ready");
+  Object.entries(drafts).forEach(([id, value]) => assert.equal(document.getElementById(id).value, value, id));
+  document.hidden = true;
+  await listeners.visibilitychange();
+  assert.equal(timers.size, 0);
+  assert.equal(calls, 2, "Hidden tabs must stop polling");
+  document.hidden = false; response = null;
+  await listeners.visibilitychange();
+  assert.equal(calls, 3, "Returning to the tab must immediately load current status");
+  response = Promise.reject(new Error("temporary disconnect"));
+  await tick();
+  assert.equal(errors, 1);
+  assert.equal(timers.size, 1, "A failed request must leave a retry scheduled");
+  response = null; await tick();
+  assert.equal(calls, 5);
+  context.token = ""; await tick();
+  assert.equal(calls, 5, "Do not poll without a session token");
+  assert.equal(timers.size, 0);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+''', str(UI_HTML)],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_pending_retrieval_preserves_edits_and_prevents_double_submit(self):
         result = subprocess.run(
             [shutil.which("node"), "-e", r'''

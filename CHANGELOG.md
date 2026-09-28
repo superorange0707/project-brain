@@ -2,6 +2,20 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.28] - 2026-09-28
+
+- Detect idle-refresh drift against the published Atlas generation and lexical
+  readiness. Matching legacy index metadata no longer hides missing or outdated
+  published snapshots.
+- Update visible web status every five seconds and immediately on returning to
+  the tab. Preserve drafts and pending form choices, pause polling while hidden,
+  and retry temporary status failures without overlapping automatic requests.
+- Align the Homebrew release regression with the existing formula-specific trust
+  and installed-tap upgrade sequence.
+- No Atlas/Semantic schema, model-pack, embedding-input or Agent Kit changes.
+  Existing generations and caches remain reusable; upgrading alone requires no
+  manual refresh, re-embedding or workspace reset.
+
 ## [1.0.27] - 2026-09-14
 
 - Fix symbol-reference fallback without the optional Zoekt backend by querying

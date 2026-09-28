@@ -277,17 +277,21 @@ re-parses the published config before indexing. Use `--no-discover`, or clear
 Git repos below the same parent folder.
 
 The cockpit's opt-in **Auto Refresh: When idle** mode checks selected commit refs,
-Core index alignment, required Semantic generation alignment, and newly cloned
-repositories. A newly cloned repository becomes **Action Required** until an
+published Atlas/Core readiness, required Semantic generation alignment, and newly
+cloned repositories. A newly cloned repository becomes **Action Required** until an
 explicit manual refresh approves adding it; it is not silently added by the
 background scheduler or placed in a failing refresh loop.
 Ordinary working-tree edits are ignored. Recoverable changes are debounced into
 one call to the same `refresh_brain()` pipeline used by manual refresh. Active
 ticket retrievals leave that refresh pending; new tickets may
 still pin the current ready snapshot, and existing tickets retain their original
-snapshots. Missing/incompatible model packs, storage guards, invalid config,
-Git/network failures, and runtime failures require explicit action and are not
-continually retried. The Off/When idle preference and safe timestamps are stored
+snapshots. Missing/incompatible model packs, storage guards and invalid config
+require attention. Git/network checks and temporary refresh failures retry with
+backoff. The visible page reads current status every five seconds and immediately
+when returning to its tab, without resetting drafts or pending form choices.
+Repository checks use the configured interval (180 seconds by default) while
+the UI service runs, including when the browser tab is closed.
+The Off/When idle preference and safe timestamps are stored
 only under the Brain-owned state directory. `brain watch` uses this same detector
 and scheduler rather than a separate unconditional polling implementation.
 

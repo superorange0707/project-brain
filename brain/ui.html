@@ -780,7 +780,7 @@
       catch (error) { report(error); } finally { busy(this, false); }
     });
 
-    async function loadStatus() {
+    async function loadStatus(background) {
       var data = await api("/api/status");
       state.status = data;
       var brain = data.brain || {};
@@ -800,13 +800,13 @@
       document.getElementById("overview-effective").textContent = brain.effective || "Core";
       document.getElementById("overview-semantic").textContent = semantic.chunks == null ? "—" : semantic.chunks.toLocaleString();
       document.getElementById("overview-alignment").textContent = semantic.aligned ? "Current snapshots" : (semantic.reason || "Not aligned");
-      document.getElementById("auto-refresh-mode").value = autoRefresh.mode || "off";
+      if (!background) document.getElementById("auto-refresh-mode").value = autoRefresh.mode || "off";
       document.getElementById("auto-refresh-last-check").textContent = autoRefresh.last_check ? new Date(autoRefresh.last_check).toLocaleString() : "Never";
       document.getElementById("auto-refresh-last-refresh").textContent = autoRefresh.last_refresh ? new Date(autoRefresh.last_refresh).toLocaleString() : "Never";
       document.getElementById("auto-refresh-status").textContent = autoRefresh.pending_reason || String(autoRefresh.status || "off").replaceAll("_", " ");
-      renderBrain(brain);
+      renderBrain(brain, background);
       renderStorage(data.retrieval && data.retrieval.storage);
-      renderModels(brain.models || {official:[],installed:[]});
+      if (!background) renderModels(brain.models || {official:[],installed:[]});
       var rows = data.repositories.map(function (repo) {
         var healthy = ["current", "non-git", "non-git-snapshot"].includes(repo.status) && repo.indexed;
         var indexLabel = !repo.indexed ? '<span class="warn">Stale</span>' : (repo.structural ? '<span class="good">Structural</span>' : '<span>Lexical</span>');
@@ -823,7 +823,7 @@
       document.querySelectorAll("[data-board-ticket]").forEach(function (button) {
         button.addEventListener("click", function () { document.getElementById("session-select").value = button.dataset.boardTicket; openSession().catch(report); });
       });
-      ["session-select", "request-ticket", "review-ticket"].forEach(function (id) {
+      if (!background) ["session-select", "request-ticket", "review-ticket"].forEach(function (id) {
         var select = document.getElementById(id);
         var selected = state.ticket || select.value || (data.sessions[0] && data.sessions[0].ticket) || "";
         var first = id === "session-select" ? "Select an investigation" : "Select a ticket";
@@ -845,7 +845,7 @@
       resumeActiveJobs(data);
       return data;
     }
-    function renderBrain(brain) {
+    function renderBrain(brain, background) {
       var semantic = brain.semantic || {};
       document.getElementById("recovery-guidance").textContent = brain.health === "Healthy" ?
         "No readiness issue detected. Diagnostics and safe storage cleanup remain available." :
@@ -853,7 +853,7 @@
       document.getElementById("brain-health").textContent = brain.health || "—";
       document.getElementById("brain-effective").textContent = brain.effective + (brain.reason ? " — " + brain.reason : "");
       document.getElementById("runtime-status").textContent = brain.managed_runtime || "Loopback direct transport enforced.";
-      document.getElementById("edition-select").value = brain.edition || "core";
+      if (!background) document.getElementById("edition-select").value = brain.edition || "core";
       document.getElementById("semantic-chunks").textContent = (semantic.chunks || 0).toLocaleString();
       document.getElementById("semantic-status").textContent = semantic.aligned ? "Current · " + (semantic.generation || "generation") : (semantic.reason || "Semantic generation is not aligned.");
       document.getElementById("brain-status").innerHTML = [
@@ -1409,12 +1409,27 @@
       document.getElementById("explain-output").textContent = JSON.stringify(explanation, null, 2);
     });
 
+    async function pollStatus() {
+      clearTimeout(pollStatus.timer);
+      if (!token || document.hidden || pollStatus.pending) return;
+      pollStatus.pending = true;
+      try { await loadStatus(true); }
+      catch (error) { report(error); }
+      finally {
+        pollStatus.pending = false;
+        pollStatus.timer = setTimeout(pollStatus, 5000);
+      }
+    }
+
     if (!token) {
       document.getElementById("project-name").textContent = "Missing local session token. Reopen the URL printed by brain ui.";
     } else {
       loadStatus().then(function (data) {
         if (state.ticket) openSession().catch(report);
-      }).catch(report);
+      }).catch(report).finally(function () {
+        pollStatus.timer = setTimeout(pollStatus, 5000);
+        document.addEventListener("visibilitychange", pollStatus);
+      });
     }
   </script>
 </body>

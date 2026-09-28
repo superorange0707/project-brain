@@ -1,3 +1,45 @@
+# Project Brain v1.0.28 — Reliable Idle Refresh
+
+Auto Refresh now checks the published Atlas generation and lexical readiness.
+Matching legacy index metadata can no longer hide a missing or outdated
+generation while the web UI says a refresh is needed.
+
+The visible web UI updates status every five seconds and immediately when you
+return to its tab. Background status updates preserve drafts and pending form
+choices, stop while the tab is hidden, and retry temporary connection failures.
+
+## Upgrade
+
+Finish active refresh/retrieval work before upgrading. On macOS:
+
+```sh
+brain ui stop
+brew update
+brew trust --formula superorange0707/tap/project-brain
+brew upgrade superorange0707/tap/project-brain
+brain --version
+brain ui
+```
+
+The version must be `brain 1.0.28`. Windows and Linux users can use the matching
+native release archive and the existing checksum-verifying installers.
+
+No Atlas/Semantic schema, model-pack, embedding-input or Agent Kit changes.
+Published generations, caches and ticket history remain reusable. Upgrading
+alone does not require a manual refresh, re-embedding, model reinstall or reset.
+
+Keep **Auto Refresh: When idle** enabled and the `brain ui` service running.
+Repository checks use the configured interval (180 seconds by default); the
+five-second UI poll only reads status. Existing tickets retain their pinned
+generations. Adding newly discovered repositories still requires an explicit
+refresh, and source working trees are never merged or checked out by Refresh.
+
+Publication is gated by the native test/build matrix, model-pack qualification,
+installer checks, checksums and provenance verification. These checks do not
+promise a fixed refresh duration for every workspace.
+
+---
+
 # Project Brain v1.0.27 — Reliable Investigations and Source Retrieval
 
 This release improves investigation continuation, source retrieval and the local

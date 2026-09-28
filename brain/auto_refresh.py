@@ -135,7 +135,8 @@ def _probe_repository(
 
 def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
     """Detect only drift that the authoritative refresh pipeline can recover."""
-    from .core import discover_git_repositories, load_index_state, load_source_state
+    from .catalog import current_generation_ref
+    from .core import discover_git_repositories, load_source_state
     from .editions import capabilities, current_edition
     from .ops import StateCapacityError, ensure_write_capacity, semantic_status
 
@@ -156,7 +157,8 @@ def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
             return FreshnessDecision.action_required("Model capability requires attention.")
 
         sources = load_source_state(settings)
-        indexes = load_index_state(settings)
+        atlas = current_generation_ref(settings)
+        snapshots = atlas.snapshots if atlas is not None else {}
         configured_paths = {repo.path.resolve() for repo in settings.repositories}
         discovered = set(discover_git_repositories([settings.root])) - configured_paths
         if discovered:
@@ -164,15 +166,17 @@ def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
                 "New repositories are ready to add with an explicit refresh."
             )
         reasons: set[str] = set()
+        if not available.get("lexical_index"):
+            reasons.add("Core indexes are stale.")
 
         for repo in settings.repositories:
             source = sources.get(repo.name) or {}
             if str(source.get("status") or "") == "non-git":
-                if repo.name not in indexes:
+                if repo.name not in snapshots:
                     reasons.add("Core indexes are stale.")
                 continue
             source_sha = str(source.get("sha") or repo.source_sha or "")
-            index_sha = str((indexes.get(repo.name) or {}).get("sha") or "")
+            index_sha = str(snapshots.get(repo.name) or "")
             if not source_sha or index_sha != source_sha:
                 reasons.add("Core indexes are stale.")
 
