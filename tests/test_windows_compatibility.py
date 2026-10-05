@@ -26,6 +26,7 @@ from brain.platforms import (
     _close_windows_handles,
     _lock_windows_managed_directories,
     adjacent_executable,
+    atomic_managed_text_write,
     connect_managed_sqlite,
     logical_path,
     normalize_platform_id,
@@ -193,6 +194,37 @@ class WindowsCompatibilityTest(unittest.TestCase):
                     detached.rename(state)
             self.assertFalse((outside / "search.sqlite3").exists())
             self.assertTrue((state / "search.sqlite3").is_file())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows file sharing behavior")
+    def test_windows_atomic_publication_retries_only_bounded_sharing_violations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "state.json"
+            path.write_text("old", encoding="utf-8")
+            replace_file = Path.replace
+            shared = PermissionError("reader temporarily denies replacement")
+            shared.winerror = 32
+            attempts = 0
+
+            def replace_after_reader_closes(source, target):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise shared
+                return replace_file(source, target)
+
+            with mock.patch.object(Path, "replace", autospec=True, side_effect=replace_after_reader_closes):
+                atomic_managed_text_write(root, path, "new")
+            self.assertEqual(2, attempts)
+            self.assertEqual("new", path.read_text(encoding="utf-8"))
+
+            for error, expected_calls in ((shared, 6), (PermissionError("access denied"), 1)):
+                with self.subTest(error=str(error)), mock.patch.object(Path, "replace", side_effect=error) as replaced, \
+                        mock.patch("brain.platforms.time.sleep"), self.assertRaises(PermissionError):
+                    atomic_managed_text_write(root, path, "unpublished")
+                self.assertEqual(expected_calls, replaced.call_count)
+                self.assertEqual("new", path.read_text(encoding="utf-8"))
+                self.assertFalse(list(root.glob("*.writing")))
 
     @unittest.skipUnless(os.name == "nt", "native Windows directory-handle behavior")
     def test_windows_managed_directory_handles_deny_root_rename(self) -> None:

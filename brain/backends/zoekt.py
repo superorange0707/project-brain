@@ -438,6 +438,8 @@ def search(
     reserve: Callable[[], bool] | None = None,
 ) -> tuple[list[tuple[str, int, str, float]], dict[str, object]] | None:
     """Use an immutable local shard, or return None so Core can use its fallback."""
+    if not immutable_snapshot_available(repo):
+        return None
     available = status()
     sha = repo.source_sha or "working-tree"
     target = shard_path(settings.state_dir, repo.name, sha)
@@ -449,7 +451,6 @@ def search(
     if (
         not available.available
         or not available.executable
-        or not immutable_snapshot_available(repo)
         or not manifest_valid
     ):
         return None

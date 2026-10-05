@@ -3951,8 +3951,11 @@ class SyntheticFanoutTest(unittest.TestCase):
                 }
             }
             request = parse_context_request(json.dumps(payload))
-            with mock.patch.object(core_module, "read_source", wraps=read_source) as reads:
+            # Unindexed repositories cannot use Zoekt, so do not probe its tools.
+            with mock.patch("brain.backends.zoekt.status", side_effect=AssertionError("unexpected optional-tool probe")) as availability, \
+                    mock.patch.object(core_module, "read_source", wraps=read_source) as reads:
                 bundle = retrieve_context(settings, request)
+            availability.assert_not_called()
             verified_reads = [call for call in reads.call_args_list if call.kwargs.get("full")]
             self.assertEqual(2, len(verified_reads), bundle.trace)
             self.assertTrue(all(call.args[1].path == "Needle.java" for call in verified_reads))

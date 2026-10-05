@@ -356,11 +356,19 @@ def atomic_managed_bytes_write(root: Path, path: Path, payload: bytes) -> None:
         ) as output:
             temporary = Path(output.name)
             output.write(payload)
-        for directory, identity in identities:
-            metadata = directory.lstat()
-            if not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != identity:
-                raise ValueError("managed state directory changed during publication")
-        temporary.replace(path_value)
+        for attempt in range(6):
+            for directory, identity in identities:
+                metadata = directory.lstat()
+                if not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != identity:
+                    raise ValueError("managed state directory changed during publication")
+            try:
+                temporary.replace(path_value)
+                break
+            except PermissionError as error:
+                # A short-lived Windows reader can temporarily deny replacement.
+                if getattr(error, "winerror", None) != 32 or attempt == 5:
+                    raise
+                time.sleep(0.02 * (2 ** attempt))
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

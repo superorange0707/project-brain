@@ -60,6 +60,8 @@ jobs:
         env:
           PYTHONWARNINGS: error::ResourceWarning
         run: |
+          python -m unittest discover -s tests -p test_windows_compatibility.py -k test_windows_atomic_publication_retries_only_bounded_sharing_violations -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_ui_background.py -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_brain.py -k test_fifty_repository_repetitive_request_is_fused_routed_and_bounded -v

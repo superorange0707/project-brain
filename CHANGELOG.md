@@ -2,7 +2,12 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.31] - 2026-10-05
+## [1.0.32] - 2026-10-05
+
+- Retry transient Windows sharing violations during atomic state publication,
+  with a bounded wait and unchanged managed-path identity checks. Skip optional
+  search-tool probes for repositories without an immutable source snapshot,
+  preserving the real request deadline in the fallback fanout regression.
 
 - Build the optional MPS projection once per full refresh instead of repeating
   its source scan before final publication.
@@ -34,16 +39,22 @@ All notable changes are documented here. This project follows Semantic Versionin
   neither claims that changes were applied or tests passed. Regenerate the M365
   Agent Kit to receive the updated instructions.
 
+## [1.0.31] - Unpublished candidate
+
+- Withheld after Windows validation found a state-file sharing race and
+  runner-dependent optional-backend probing in the fallback fanout fixture.
+  v1.0.32 includes the corrections.
+
 ## [1.0.30] - Unpublished candidate
 
 - Withheld after native Windows validation found an MPS artifact-reference path
-  mismatch and portable fixture/connection cleanup issues. v1.0.31 corrects them
+  mismatch and portable fixture/connection cleanup issues. v1.0.32 corrects them
   and preserves unsafe ZIP member names through validation.
 
 ## [1.0.29] - Unpublished candidate
 
 - Withheld after remote release validation exposed asynchronous launchd removal
-  and an initial idle-refresh startup race. v1.0.31 includes the corrections.
+  and an initial idle-refresh startup race. v1.0.32 includes the corrections.
 
 ## [1.0.28] - 2026-09-28
 
