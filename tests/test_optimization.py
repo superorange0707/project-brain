@@ -1442,7 +1442,7 @@ class Routes {
             self.assertLessEqual(flow["database_operations"], MAX_FLOW_DB_QUERIES)
             self.assertLessEqual(flow["database_operations"], 15)
             self.assertEqual(2 * MAX_FLOW_SEEDS, len(flow["steps"]))
-            self.assertTrue(all(step["state"] == "verified" for step in flow["steps"]))
+            self.assertTrue(all(step["state"] == "verified" for step in flow["steps"]), flow)
             self.assertEqual([0] * MAX_FLOW_SEEDS + [1] * MAX_FLOW_SEEDS, [step["depth"] for step in flow["steps"]])
             self.assertEqual(set(seeds), {step["source_id"] for step in flow["steps"] if step["depth"] == 0})
             self.assertEqual(flow, _execution_flow(settings, generation, seeds, bundle))

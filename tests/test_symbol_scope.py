@@ -2007,11 +2007,13 @@ class SymbolScopeTests(unittest.TestCase):
     def test_exact_error_requested_relations_deliver_bodies_without_a_symbol_followup(self):
         self.source.unlink()
         path = self.root / 'service/recovery.py'
-        source = ('def recover(error):\n' + '    value = 1\n' * 100 +
+        # Long source ranges exercise body delivery, without spending the binding
+        # parser's CPU budget on hundreds of unrelated executable assignments.
+        source = ('def recover(error):\n' + '    # body padding\n' * 100 +
             '    message = "LEASE PIN MISSING"\n    return validate(error), message\n' + '# spacer\n' * 200 +
-            'def retry_job():\n    result = recover("checkpoint")\n' + '    value = 1\n' * 180 +
+            'def retry_job():\n    result = recover("checkpoint")\n' + '    # body padding\n' * 180 +
             '    return "OLD_RETRY", result\n' + '# spacer\n' * 200 +
-            'def validate(error):\n' + '    value = 1\n' * 180 + '    return "OLD_VALIDATOR", error\n')
+            'def validate(error):\n' + '    # body padding\n' * 180 + '    return "OLD_VALIDATOR", error\n')
         path.write_text(source, encoding='utf-8')
         for number in range(10):
             (self.root / f'service/noise{number}.py').write_text(
