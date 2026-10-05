@@ -176,8 +176,15 @@ class BackgroundUiTest(unittest.TestCase):
                 self.assertEqual(0o600, (state / "ui.log").stat().st_mode & 0o777)
             # No browser or launcher remains. Observe the scheduler using files only.
             deadline = time.monotonic() + 30
+            saved = {}
             while time.monotonic() < deadline:
-                saved = json.loads((state / "auto-refresh.json").read_text(encoding="utf-8"))
+                try:
+                    saved = json.loads((state / "auto-refresh.json").read_text(encoding="utf-8"))
+                except PermissionError:
+                    if os.name != "nt":
+                        raise
+                    time.sleep(0.1)  # The Windows writer may be replacing the file.
+                    continue
                 if saved.get("last_refresh"):
                     break
                 time.sleep(0.1)
