@@ -1,1 +1,4 @@
 *.patch -whitespace
+# Preserve the byte identities and formatting of pinned upstream model fixtures.
+tests/fixtures/mps/*.mps -text -whitespace
+tests/fixtures/mps/*.mpl -text -whitespace

@@ -7,9 +7,12 @@ import re
 import secrets
 import shutil
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 import webbrowser
+from contextlib import contextmanager
 from dataclasses import asdict, fields
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -21,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from .platforms import atomic_managed_text_write, read_managed_text
+from .platforms import atomic_managed_text_write, open_managed_lock, process_group_kwargs, read_managed_text
 
 from .agent import archive_final_solution, create_m365_agent_kit, response_preview
 from .core import (
@@ -50,7 +53,7 @@ from .core import (
     start_session,
 )
 from .experience import load_experience_index
-from .locks import WorkspaceOperationBusy, retrieval_session, ticket_exclusive
+from .locks import WorkspaceOperationBusy, _acquire, _release, retrieval_session, ticket_exclusive
 from .ops import StateCapacityError, progress_event
 from .atlas import AtlasCapacityError
 
@@ -1330,15 +1333,108 @@ def ui_instance(settings: Settings, action: str) -> dict[str, Any]:
     }
 
 
+def _open_ui(instance: dict[str, Any], *, open_browser: bool, existing: bool = False) -> None:
+    url = f"http://127.0.0.1:{instance['port']}/?token={instance['token']}"
+    print(f"Project Brain UI{' already running' if existing else ''}: {url}", flush=True)
+    if open_browser:
+        webbrowser.open(url)
+
+
+@contextmanager
+def _ui_lock(settings: Settings, name: str):
+    with open_managed_lock(settings.state_dir, settings.state_dir / name) as handle:
+        try:
+            _acquire(handle)
+        except OSError as error:
+            raise BrainError("The UI is already starting or stopping; retry brain ui shortly.") from error
+        try:
+            yield
+        finally:
+            _release(handle)
+
+
+def _ui_command(settings: Settings, port: int) -> tuple[list[str], dict[str, str]]:
+    command = [sys.executable]
+    environment = dict(os.environ)
+    if getattr(sys, "frozen", False):
+        # A onefile child must own its extraction directory after the launcher exits.
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    else:
+        # Do not import a same-named package from the workspace working directory.
+        command += ["-P", "-m", "brain.cli"]
+        # Keep source checkouts importable after switching to the user's workspace.
+        environment["PYTHONPATH"] = os.pathsep.join(
+            [str(Path(__file__).resolve().parent.parent), environment.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
+    command += ["-c", str(settings.config_path.resolve()), "ui", "--foreground", "--no-open", "--port", str(port)]
+    return command, environment
+
+
+@contextmanager
+def _ui_log(settings: Settings):
+    # Reuse the managed direct-file opener; never follow a log symlink/hard link.
+    with open_managed_lock(settings.state_dir, settings.state_dir / "ui.log") as log:
+        if os.fstat(log.fileno()).st_nlink != 1:
+            raise ValueError("UI log must not be a hard link")
+        if os.name != "nt":
+            os.fchmod(log.fileno(), 0o600)
+        yield log
+
+
+def start_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True) -> None:
+    """Start a private UI that survives its launching terminal, or reopen it."""
+    if sys.platform == "darwin":
+        from .mac_service import installed, service
+
+        if installed(settings):
+            service(settings, "start")
+            _open_ui(_load_ui_instance(settings), open_browser=open_browser)
+            return
+    with _ui_lock(settings, "ui-launch.lock"):
+        existing = _load_ui_instance(settings)
+        if existing and _probe_ui_instance(existing):
+            _open_ui(existing, open_browser=open_browser, existing=True)
+            return
+        _forget_ui_instance(settings, existing)
+        command, environment = _ui_command(settings, port)
+        log_path = settings.state_dir / "ui.log"
+        with _ui_log(settings) as log:
+            log.seek(0)
+            log.truncate()
+            process = subprocess.Popen(
+                command, cwd=settings.root, env=environment, stdin=subprocess.DEVNULL,
+                stdout=log, stderr=subprocess.STDOUT, close_fds=True, **process_group_kwargs(detached=True),
+            )
+        # Keep ownership until exit when start_ui is called from a longer-lived host.
+        threading.Thread(target=process.wait, name="project-brain-ui-reaper", daemon=True).start()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            instance = _load_ui_instance(settings)
+            if instance and _probe_ui_instance(instance):
+                _open_ui(instance, open_browser=open_browser)
+                print("Running in the background; you can close this terminal. Stop with: brain ui stop", flush=True)
+                return
+            if process.poll() is not None:
+                raise BrainError(f"The background UI exited during startup. See {log_path}, or run brain ui --foreground.")
+            time.sleep(0.1)
+        raise BrainError(
+            f"The background UI has not confirmed readiness yet. See {log_path}; "
+            "retry brain ui status before starting again."
+        )
+
+
 def serve_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True) -> None:
     existing = _load_ui_instance(settings)
     if existing and _probe_ui_instance(existing):
-        url = f"http://127.0.0.1:{existing['port']}/?token={existing['token']}"
-        print(f"Project Brain UI already running: {url}", flush=True)
-        if open_browser:
-            webbrowser.open(url)
+        _open_ui(existing, open_browser=open_browser, existing=True)
         return
-    _forget_ui_instance(settings, existing)
+    # A lifetime lease also prevents competing servers when --port 0 is used.
+    with _ui_lock(settings, "ui-server.lock"):
+        _serve_ui(settings, port=port, open_browser=open_browser)
+
+
+def _serve_ui(settings: Settings, *, port: int, open_browser: bool) -> None:
+    _forget_ui_instance(settings)
     token = secrets.token_urlsafe(32)
     try:
         server = _Server(("127.0.0.1", port), settings, token)
@@ -1353,6 +1449,8 @@ def serve_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True)
         "token": token,
         "started_at": datetime.now(UTC).isoformat(),
     }
+    if os.environ.get("PROJECT_BRAIN_SERVICE"):
+        instance["service"] = os.environ["PROJECT_BRAIN_SERVICE"]
     try:
         atomic_managed_text_write(
             settings.state_dir,

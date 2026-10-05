@@ -1,3 +1,77 @@
+# Project Brain v1.0.29 — Mac Background Service and MPS Ticket Delivery
+
+Brain can now run independently of Terminal and the browser. On macOS, an
+optional per-workspace login service starts Brain when you sign in and restarts
+it after an unexpected exit. This release also brings the MPS model/navigation
+and concrete implementation-delivery changes into the same package.
+
+## What changed
+
+- `brain ui` starts a detached local process, waits for authenticated readiness
+  and reuses an existing instance. `--foreground` remains available for diagnosis.
+- `brain service install` enables a macOS user LaunchAgent with safe
+  start/stop/status/uninstall commands, private logs and stable Homebrew links.
+  Existing idle-refresh preferences are preserved. No administrator service or
+  extra runtime is required; company background and folder-access policies apply.
+- Read bounded MPS persistence-v9 models and descriptors from repositories or
+  local attachments. Retrieve exact pinned source/node anchors, follow static
+  cross-model references and inspect reverse impact. Model names in request
+  objectives can start navigation without a known file path.
+- Keep optional MPS source projections immutable and generation-scoped. Exact
+  project-declared flow mappings require source evidence; structural references
+  alone do not establish execution order or private IPF business meaning.
+- Ask AI for per-file production diffs/snippets, exact model editor operations,
+  acceptance criteria and test assertions. The UI distinguishes a saved plan
+  from a supplied change block without claiming that either is validated work.
+
+## Upgrade on macOS
+
+Finish active refresh/retrieval work, then run:
+
+```sh
+brain ui stop
+brew update
+brew trust --formula superorange0707/tap/project-brain
+brew upgrade superorange0707/tap/project-brain
+brain --version
+brain service install
+brain service status
+brain ui
+```
+
+The version must be `brain 1.0.29`. Run the service commands from your initialized
+Brain workspace. Keep **Auto Refresh: When idle** enabled. Terminal and browser
+can then be closed; sleep pauses processing and logout stops the user service.
+`brain service stop` stops safely while idle and preserves login startup;
+`brain service uninstall` also removes login startup without deleting workspace
+data. Private startup logs are in the configured state's `ui.log`.
+
+Windows and Linux users receive the detached UI and MPS/delivery changes through
+their native archives and checksum-verifying installers. The login-service
+commands in this release are specific to macOS.
+
+## Existing workspaces and AI agents
+
+Run **Refresh Brain** to build the optional MPS projection for new tickets.
+Existing tickets retain their original generations and cannot silently read
+newer model source. No deletion of indexes, caches, model packs or ticket history
+is required. Semantic model weights and input contracts remain unchanged.
+
+Regenerate the M365 Agent Kit with `brain agent-kit m365 --json` and replace the
+existing Agent Builder instructions and project knowledge to receive the new
+delivery guidance. Request Protocol v5 remains compatible. Brain provides
+evidence and proposals; applying model edits, generation and project-specific
+validation remain developer steps.
+
+## Validation
+
+Publication requires the remote Python/native build and test matrix, model-pack
+qualification, installer checks, checksums and provenance verification. The Mac
+service lifecycle check runs on a macOS runner with a GUI login domain. Local
+runtime experiments are not part of this release's acceptance evidence.
+
+---
+
 # Project Brain v1.0.28 — Reliable Idle Refresh
 
 Auto Refresh now checks the published Atlas generation and lexical readiness.

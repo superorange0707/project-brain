@@ -2,6 +2,32 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.29] - 2026-10-05
+
+- Start `brain ui` in a detached local process so closing the terminal or browser
+  does not stop idle refresh. Reuse the existing status/reopen/safe-stop commands;
+  retain `--foreground` for diagnostics and save background output to `state/ui.log`.
+  Startup waits for authenticated health, prevents duplicate workspace servers,
+  and gives standalone children their own extracted runtime. Reboot/login startup
+  is not installed automatically.
+- Add opt-in macOS user LaunchAgents through `brain service install`, with login
+  startup, recovery after abnormal exits, safe stop/start/status/uninstall, private
+  logs, per-workspace identities and stable Homebrew executable links. Managed
+  `brain ui` launches reuse this service. Preserve idle-refresh preferences and
+  workspace data; no administrator privileges or system service installation.
+- Add bounded MPS persistence-v9 model and descriptor reading for attachments
+  and configured repositories, including pinned source, exact node/reference
+  navigation, forward connections, reverse impact and evidence-backed project
+  flow mappings. Preserve old ticket snapshots and lexical membership through
+  an optional generation-scoped `mps_models` component.
+- Connect model names in request objectives to MPS navigation, and deliver
+  source-backed model/editor targets to implementation plans. Structural links
+  remain distinct from verified execution or private IPF business semantics.
+- Require concrete production code/configuration or model editor operations in
+  AI delivery guidance. Distinguish saved plans from supplied change blocks;
+  neither claims that changes were applied or tests passed. Regenerate the M365
+  Agent Kit to receive the updated instructions.
+
 ## [1.0.28] - 2026-09-28
 
 - Detect idle-refresh drift against the published Atlas generation and lexical

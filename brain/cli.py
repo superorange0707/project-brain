@@ -256,6 +256,12 @@ def _parser() -> argparse.ArgumentParser:
     ui.add_argument("action", nargs="?", choices=("start", "status", "stop"), default="start")
     ui.add_argument("--port", type=int, default=8765, help="loopback port; use 0 for any free port")
     ui.add_argument("--no-open", action="store_true", help="do not open the browser automatically")
+    ui.add_argument("--foreground", action="store_true", help="keep the UI attached to this terminal for diagnostics")
+
+    service = commands.add_parser("service", help="manage this workspace's macOS login/background service")
+    service.add_argument("action", choices=("install", "start", "status", "stop", "uninstall"))
+    service.add_argument("--port", type=int, help="install with this loopback port; 0 chooses a free port")
+    service.add_argument("--json", action="store_true", help="print service status as JSON")
 
     for name, help_text in (("next", "copy the next Claude chunk"), ("prev", "copy the previous Claude chunk")):
         command = commands.add_parser(name, help=help_text)
@@ -861,7 +867,7 @@ def execute(args: argparse.Namespace) -> int:
             path = archive_final_solution(settings, args.ticket, text)
             deliver(settings, args.ticket, text, args.target, copy=False)
             result = {"ticket": args.ticket, "kind": kind, "path": str(path)}
-            print(json.dumps(result, indent=2) if args.json else f"Ready to implement: {path}")
+            print(json.dumps(result, indent=2) if args.json else f"Implementation plan saved: {path}\n{preview['message']}")
             return 0
         def checkpoint_progress(event: dict[str, object]) -> None:
             if event.get("phase") != "first_useful_checkpoint":
@@ -923,7 +929,7 @@ def execute(args: argparse.Namespace) -> int:
         elif plan["kind"] == "conversation":
             print(plan["message"])
         elif plan["kind"] == "final_solution":
-            print("Ready to implement; no repository retrieval required.")
+            print(f"{plan['label']}: {plan['message']}")
         else:
             label = "INVESTIGATION_REQUEST" if plan["protocol_version"] in {4, 5} else "CONTEXT_REQUEST"
             print(f"Valid {label} v{plan['protocol_version']}: {plan['operation_count']} operations")
@@ -1006,19 +1012,36 @@ def execute(args: argparse.Namespace) -> int:
             print(f"Ticket memory: {status['summary']['experience_cases']} committed cases")
             print(f"Investigations: {len(status['sessions'])}")
         return 0
+    if args.command == "service":
+        from .mac_service import service
+
+        status = service(settings, args.action, port=args.port)
+        if args.json:
+            print(json.dumps(status, indent=2))
+        else:
+            print("macOS login service: " + ("installed" if status["installed"] else "not installed"))
+            print(f"Brain UI: running on 127.0.0.1:{status['port']}" if status["running"] else "Brain UI: stopped")
+            print(f"Log: {status['log']}")
+        return 0
     if args.command == "ui":
         if not 0 <= args.port <= 65535:
             raise BrainError("--port must be between 0 and 65535")
-        from .ui import serve_ui, ui_instance
+        from .ui import serve_ui, start_ui, ui_instance
 
         if args.action == "status":
             status = ui_instance(settings, "status")
             print(f"Project Brain UI is running on 127.0.0.1:{status['port']}." if status["running"] else "Project Brain UI is not running.")
         elif args.action == "stop":
+            from .mac_service import installed, service
+
+            if sys.platform == "darwin" and installed(settings):
+                service(settings, "stop")
+                print("Project Brain UI is stopped; login startup remains installed.")
+                return 0
             status = ui_instance(settings, "stop")
             print("Project Brain UI is stopping." if status["stopping"] else "Project Brain UI is not running.")
         else:
-            serve_ui(settings, port=args.port, open_browser=not args.no_open)
+            (serve_ui if args.foreground else start_ui)(settings, port=args.port, open_browser=not args.no_open)
         return 0
     if args.command in {"next", "prev"}:
         path, current, total = move_delivery(settings, args.ticket, 1 if args.command == "next" else -1)

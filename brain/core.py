@@ -19,6 +19,7 @@ import tomllib
 import xml.etree.ElementTree as ET
 from array import array
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from importlib.resources import files as package_files
@@ -490,6 +491,7 @@ class ContextBundle:
     metrics: dict[str, int | float] = field(default_factory=dict)
     trace: dict[str, Any] = field(default_factory=dict)
     atlas_generation: Any | None = None
+    mps_navigation: dict[str, Any] = field(default_factory=dict)
     # Transient query resolutions, never loaded from ticket state or used as
     # evidence authority. Runtime revalidates their pinned entities and edges.
     _resolved_relation_seeds: dict[str, str] = field(default_factory=dict, repr=False)
@@ -520,6 +522,16 @@ def run(
 
 _ACTIVE_RETRIEVAL_TRACE: contextvars.ContextVar[Any | None] = contextvars.ContextVar("brain_retrieval_trace", default=None)
 _ACTIVE_RETRIEVAL_CACHE: contextvars.ContextVar[dict[tuple[Any, ...], Any] | None] = contextvars.ContextVar("brain_retrieval_cache", default=None)
+
+
+@contextmanager
+def _pinned_source_cache_scope():
+    token = _ACTIVE_RETRIEVAL_CACHE.set({}) if _ACTIVE_RETRIEVAL_CACHE.get() is None else None
+    try:
+        yield
+    finally:
+        if token is not None:
+            _ACTIVE_RETRIEVAL_CACHE.reset(token)
 _REPO_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="brain-repo")
 
 
@@ -1897,6 +1909,19 @@ def test_hits(settings: Settings, name: str, repos: Iterable[str] | None = None)
 _INDEXED_SOURCE_UNSET = object()
 
 
+def _read_pinned_source_text(settings: Settings, repo: Repository, relative: str, generation: Any | None = None) -> str | None:
+    """Read one registered source component, with no working-tree fallback."""
+    from .mps_index import is_model_path, read_source as read_model_source, MAPPING_PATH
+    generation = generation or settings.atlas_generation
+    if is_model_path(relative) or relative == MAPPING_PATH:
+        return read_model_source(settings, repo.name, relative, generation)
+    from .index import read_indexed_file
+
+    source = (read_indexed_file(settings, repo, relative, snapshot_sha=generation.snapshots.get(repo.name) if generation else repo.source_sha)
+              if _lexical_generation_ready(settings, repo) else None)
+    return source if source is not None else read_model_source(settings, repo.name, relative, generation)
+
+
 def _retrieval_source_path(repo: Repository, relative: str) -> Path:
     root = repo.scan_path.resolve()
     path = (root / relative).resolve()
@@ -1918,16 +1943,17 @@ def read_source(
     repo = settings.repo(hit.repo)
     path = _retrieval_source_path(repo, hit.path)
     indexed_only = settings.atlas_generation_mode == "pinned"
-    if indexed_only:
+    from .mps_index import is_model_path, MAPPING_PATH
+
+    if is_model_path(hit.path) or hit.path == MAPPING_PATH:
+        source = _read_pinned_source_text(settings, repo, hit.path)
+        if source is None:
+            raise BrainError(f"Pinned MPS source is unavailable: {hit.repo}:{hit.path}; refresh the MPS component for a new ticket, without changing this ticket's pin")
+    elif indexed_only:
         if _indexed_source is not _INDEXED_SOURCE_UNSET:
             source = _indexed_source if isinstance(_indexed_source, str) else None
         else:
-            from .index import read_indexed_file
-
-            source = (
-                read_indexed_file(settings, repo, hit.path, snapshot_sha=repo.source_sha)
-                if _lexical_generation_ready(settings, repo) else None
-            )
+            source = _read_pinned_source_text(settings, repo, hit.path)
         if source is None:
             raise BrainError(f"Pinned indexed source is unavailable: {hit.repo}:{hit.path}")
     elif path.is_file():
@@ -3430,15 +3456,56 @@ def retrieve_context(
         if request.get("version") == 5 and files_incomplete and trace.stop_reason == "coverage_satisfied":
             trace.stop_reason = "requested_files_incomplete"
 
-        if request.get("version") == 5 and request["files"] and not any(
+        mps_queries = bool(request.get("resolve") or request.get("symbols") or request.get("paths") or request.get("searches") or any(
+            item.get("kind") in {"symbol", "file_hint"} for item in request.get("anchors") or []
+        ))
+        from .mps_index import may_match as models_may_match, is_model_path
+        if (mps_queries and bundle.atlas_generation is not None
+                and bundle.atlas_generation.component("mps_models").get("status") == "ready"
+                and bundle.atlas_generation.component("mps_models").get("details", {}).get("models", 0)
+                and models_may_match(bundle.atlas_generation, request)):
+            if not time_budget_exhausted() and trace.try_reserve_backend():
+                from .mps_index import navigation as model_navigation
+
+                model_started = time.perf_counter()
+                navigation, source_evidence = None, []
+                from .mps import MpsError
+
+                try:
+                    navigation, source_evidence = model_navigation(settings, request, deadline=deadline)
+                except MpsError as error:
+                    bundle.unresolved.append(str(error))
+                    time_budget_exhausted()
+                finally:
+                    details = bundle.atlas_generation.component("mps_models").get("details") or {}
+                    elapsed = (time.perf_counter() - model_started) * 1000
+                    trace.complete_reserved_backend("mps-navigation", elapsed, files=int(details.get("files") or 0),
+                                                    bytes_scanned=int(details.get("source_bytes") or 0), raw_hits=len(source_evidence))
+                if navigation is not None:
+                    bundle.mps_navigation = navigation
+                    bundle.evidence.extend(source_evidence)
+                    trace.bytes_read += sum(len(item.content.encode()) for item in source_evidence)
+                    if source_evidence and first_verified_evidence_ms is None:
+                        first_verified_evidence_ms = (time.perf_counter() - started) * 1000
+                trace.add_stage("mps_navigation_ms", (time.perf_counter() - model_started) * 1000)
+            else:
+                bundle.unresolved.append("MPS navigation deferred by this request's physical/time budget; repeat the exact model/node anchor in a focused request.")
+
+        explicit_model_anchor = any("#id:" in str(item.get("value") or "") or "#lines:" in str(item.get("value") or "")
+            or is_model_path(str(item.get("value") or "").partition("#")[0]) for item in request.get("anchors") or [])
+        model_only = request.get("version") == 5 and explicit_model_anchor and bundle.mps_navigation.get("route_status") == "structural" and not bundle.mps_navigation.get("unmatched_queries") and not any(
+            request.get(key) for key in ("history", "expand")
+        ) and all(item.get("kind") in {"symbol", "file_hint"} for item in request.get("anchors") or [])
+        files_only = bool(request["files"]) and not any(
             request.get(key) for key in ("searches", "paths", "symbols", "history", "expand")
-        ) and not include_diff:
+        )
+        if request.get("version") == 5 and (files_only or model_only) and not include_diff:
             # Keep ticket runtime/lineage in create_context; only bypass optional
             # discovery and models for an exact, already-addressed source read.
             trace.hydrated_regions = len(bundle.evidence)
             if trace.stop_reason == "coverage_satisfied":
                 trace.stop_reason = "requested_files_read"
-            scope = sorted({str(item["repo"]) for item in request["files"]})
+            scope = sorted({str(item["repo"]) for item in request["files"]} | {item.repo for item in bundle.evidence})
             trace.initial_repo_scope = trace.final_repo_scope = scope
             bundle.metrics = {
                 "total_ms": round((time.perf_counter() - started) * 1000, 3),
@@ -3448,7 +3515,9 @@ def retrieve_context(
                 "candidates": 0, "raw_candidates": 0, "rerank_input_count": 0,
                 "repo_scope_count": len(scope), "repo_scope_limit": len(scope), "semantic_repo_count": 0,
             }
-            bundle.trace = {**trace.as_dict(), "file_reads": file_reads, "direct_files_only": True}
+            bundle.trace = {**trace.as_dict(), "file_reads": file_reads, "direct_files_only": files_only,
+                            "mps_only": model_only,
+                            **({"mps_navigation": bundle.mps_navigation} if bundle.mps_navigation else {})}
             emit("complete", evidence_count=len(bundle.evidence), physical_operations_completed=trace.physical_backend_operations)
             return bundle
 
@@ -4449,6 +4518,8 @@ def retrieve_context(
         if relation_incomplete and trace.stop_reason == 'coverage_satisfied':
             trace.stop_reason = 'requested_symbols_incomplete'
         bundle.trace = trace.as_dict()
+        if bundle.mps_navigation:
+            bundle.trace["mps_navigation"] = bundle.mps_navigation
         if exact_symbol_scope:
             bundle.trace["qualified_symbols_only"] = True
         if file_reads:
@@ -4710,6 +4781,10 @@ def pack_delta_context(
         output.append("- Explicitly requested file pages are re-emitted even when their stable evidence IDs are already known.")
     if bundle.trace.get("symbol_reads"):
         output.append("- Explicitly requested symbol pages are re-emitted even when their stable evidence IDs are already known.")
+    if bundle.mps_navigation:
+        output.extend(["", "## MPS structural navigation", "",
+                       "Model references and project-declared mappings do not establish observed execution chronology.", "",
+                       *_source_markdown_block(json.dumps(bundle.mps_navigation, ensure_ascii=True, indent=2), "json")])
     output.extend(["", "## New source evidence", ""])
     if progress.get("protocol_version") == 5 and progress.get("investigation_runtime"):
         from .investigation import render_protocol_v5
@@ -4864,10 +4939,7 @@ def _validate_checkpoint_artifacts(
                 try:
                     start = int(proof.get("line_start") or 0)
                     end = int(proof.get("line_end") or 0)
-                    pinned = read_indexed_file(
-                        settings, settings.repo(repo_name), path,
-                        snapshot_sha=generation.snapshots[repo_name],
-                    )
+                    pinned = _read_pinned_source_text(settings, settings.repo(repo_name), path, generation)
                 except (KeyError, TypeError, ValueError):
                     pinned = None
                     start = end = 0
@@ -5567,6 +5639,10 @@ def pack_context(
             "", "## Static execution relationships", "",
             *_source_markdown_block("\n".join(sorted(set(bundle.relationships))), "text"),
         ])
+    if bundle.mps_navigation:
+        output.extend(["", "## MPS structural navigation", "",
+                       "Model references and project-declared mappings do not establish observed execution chronology.", "",
+                       *_source_markdown_block(json.dumps(bundle.mps_navigation, ensure_ascii=True, indent=2), "json")])
     if bundle.experience:
         output.extend(["", "## Similar ticket history (navigation only)", "",
                        *_source_markdown_block(bundle.experience.rstrip(), "text"), ""])
@@ -5640,7 +5716,9 @@ def snapshot_indexes(
     from .ops import ensure_write_capacity
 
     ensure_write_capacity(settings)
-    prepare_working_tree_snapshots(settings, suffixes=CODE_SUFFIXES, ignored_dirs=IGNORED_DIRS)
+    from .mps import MODEL_SUFFIXES
+
+    prepare_working_tree_snapshots(settings, suffixes=CODE_SUFFIXES | MODEL_SUFFIXES, ignored_dirs=IGNORED_DIRS)
     started = time.perf_counter()
     try:
         state, updated = build_index_generation(
@@ -5701,12 +5779,21 @@ def snapshot_indexes(
         from .catalog import record_index_catalog
 
         existing_generation = current_generation_ref(settings)
+        from .mps_index import build_component, load_component, retain_aligned_component
+
+        mps_component = build_component(settings, state)
         backends = ["sqlite-fts5"] + (["zoekt"] if zoekt else [])
         snapshots = {
             name: str(item.get("sha") or "working-tree")
             for name, item in state.items()
             if isinstance(item, dict)
         }
+        mps_changed = mps_component.get("status") == "ready" and (
+            existing_generation is None
+            or existing_generation.component("mps_models").get("content_hash") != mps_component.get("content_hash")
+            or load_component(settings, existing_generation) is None
+        )
+        mps_component = retain_aligned_component(settings, state, mps_component, existing_generation)
         should_publish = publish and (
             updated
             or existing_generation is None
@@ -5714,6 +5801,7 @@ def snapshot_indexes(
             or existing_generation.snapshots != snapshots
             or existing_generation.component("lexical").get("status") != "ready"
             or zoekt_repaired
+            or mps_changed
         )
         # A previous process may have committed the lexical generation and
         # crashed before mirroring it into the Atlas catalog.  Any refresh that
@@ -5729,7 +5817,7 @@ def snapshot_indexes(
                 settings,
                 state,
                 backends=backends,
-                components=collect_generation_components(settings, state, atlas_payload=atlas_payload),
+                components=collect_generation_components(settings, state, atlas_payload=atlas_payload, mps_component=mps_component),
                 atlas_payload=atlas_payload,
             )
         else:
@@ -6496,6 +6584,7 @@ def investigation_continuation(settings: Settings, state: dict[str, Any]) -> dic
 
 @ticket_retrieval_exclusive
 @source_verification_scope()
+@_pinned_source_cache_scope()
 def create_context(
     settings: Settings,
     ticket: str,
@@ -6669,7 +6758,7 @@ def create_context(
             raise BrainError("Protocol v5 request exceeded its per-request physical-operation budget")
         from .query import merge_evidence
 
-        bundle.evidence = merge_evidence(bundle.evidence + _external_evidence(settings, ticket))
+        bundle.evidence = merge_evidence(bundle.evidence + _external_evidence(settings, ticket, request=request))
         checkpoint_restore_missed = 0
         if full_checkpoint and state.get("evidence_records"):
             checkpoint_source_budget = max(
@@ -7339,7 +7428,7 @@ def add_external_evidence(
     *,
     kind: str = "document",
 ) -> tuple[str, Path, int, Path]:
-    """Archive user-supplied evidence locally; include text verbatim and never claim to parse binaries."""
+    """Archive supplied bytes and render text or bounded standard MPS navigation."""
     directory = session_dir(settings, ticket)
     if not directory.is_dir():
         raise BrainError(f"Session {ticket} does not exist. Run `brain start {ticket}` first.")
@@ -7388,7 +7477,44 @@ def add_external_evidence(
         "This evidence was explicitly supplied by the user. It is not repository proof and may describe runtime or external state.",
         "",
     ]
-    if source.suffix.lower() in text_suffixes:
+    from .mps import MpsError, project_from_attachment, render_navigation
+
+    try:
+        mps_project = project_from_attachment(source.name, supplied_bytes)
+        mps_error = None
+    except MpsError as error:
+        mps_project = None
+        mps_error = str(error)
+    if mps_project is not None and not any(item["kind"] in {"model", "descriptor"} for item in mps_project["files"]):
+        mps_error = "No supplied model or descriptor could be decoded.\n" + render_navigation(mps_project)
+        mps_project = None
+    if mps_project is not None:
+        sections.extend([
+            "## MPS structural navigation", "",
+            "Derived from the supplied attachment only. Model/node identities, decoded concepts and roles, "
+            "containment, properties and explicit references are navigation evidence. Business behavior requires "
+            "the corresponding language aspects, constraints, behavior, generators and tests; AST order alone "
+            "does not establish execution order. Omission counts describe the bounded summary.", "",
+        ])
+        sections.extend(_source_markdown_block(render_navigation(mps_project), "json"))
+        sections.extend(["", f"Original attachment preserved: `{stored.relative_to(settings.root) if stored.is_relative_to(settings.root) else stored.name}`", ""])
+        if source.suffix.lower() != ".zip" and len(supplied_bytes) <= 128 * 1024:
+            sections.extend(["## Supplied model/descriptor source", ""])
+            sections.extend(_source_markdown_block(supplied_bytes.decode("utf-8", errors="replace").rstrip(), "xml"))
+            sections.append("")
+        else:
+            sections.extend([
+                "Full source is in the preserved attachment. Request a model/root name or exact "
+                "member-path#node-key through resolve or a symbol/file_hint anchor to retrieve bounded "
+                "connections and original member source. Use impact_analysis for incoming usages. "
+                "A ZIP summary does not supply all original member source.", "",
+            ])
+    elif mps_error is not None:
+        sections.extend(["## MPS decoding unavailable", ""])
+        sections.extend(_source_markdown_block(mps_error, "text"))
+        sections.extend(["", "The original attachment was preserved. No model structure or business logic was inferred.",
+                         f"Stored file: `{stored.relative_to(settings.root) if stored.is_relative_to(settings.root) else stored.name}`", ""])
+    elif source.suffix.lower() in text_suffixes:
         sections.extend(["## Content", "", "```text", supplied_bytes.decode("utf-8", errors="replace").rstrip(), "```", ""])
     else:
         sections.extend(
@@ -7410,13 +7536,47 @@ def add_external_evidence(
     return content, artifact, number, stored
 
 
-def _external_evidence(settings: Settings, ticket: str) -> list[Evidence]:
+def _external_mps_context(directory: Path, number: int, content: str, request: dict[str, Any], *, source_budget: int) -> tuple[str, int]:
+    """Read requested model regions from hash-checked, managed attachment bytes."""
+    if "## MPS structural navigation" not in content or source_budget <= 0:
+        return "", 0
+    queries = list(dict.fromkeys([
+        *(str(item.get("value") or "") for item in request.get("anchors") or []
+          if isinstance(item, dict) and item.get("kind") in {"symbol", "file_hint"}),
+        *(str(value) for value in request.get("resolve") or []),
+    ]))[:16]
+    if not any(queries):
+        return "", 0
+    filename = re.search(r"^Original filename: `([^`]+)`$", content, re.MULTILINE)
+    digest = re.search(r"^SHA-256: `([0-9a-f]{64})`$", content, re.MULTILINE)
+    if filename is None or digest is None:
+        return "\nMPS focused navigation unavailable: attachment identity is missing.\n", 0
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", filename.group(1)).strip(".-") or f"evidence-{number:03d}"
+    stored = directory / "external" / f"{number:03d}-{safe_name}"
+    from .mps import MpsError, documents_from_attachment, focused_navigation
+
+    source = b""
+    try:
+        source = read_managed_bytes(directory, stored, max_bytes=min(source_budget, MAX_EXTERNAL_EVIDENCE_SOURCE_BYTES))
+        if hashlib.sha256(source).hexdigest() != digest.group(1):
+            return "\nMPS focused navigation unavailable: original attachment SHA-256 does not match.\n", len(source)
+        documents = documents_from_attachment(filename.group(1), source)
+        rendered = focused_navigation(documents, queries, incoming=request.get("mode") == "impact_analysis") if documents is not None else None
+    except (OSError, ValueError, MpsError) as error:
+        return f"\nMPS focused navigation unavailable: {error}.\n", len(source) or source_budget
+    if rendered is None:
+        return "", len(source)
+    return "\n## Requested MPS connections and source\n\n" + "\n".join(_source_markdown_block(rendered, "json")) + "\n", len(source)
+
+
+def _external_evidence(settings: Settings, ticket: str, *, request: dict[str, Any] | None = None) -> list[Evidence]:
     directory = session_dir(settings, ticket)
     state = session_state(settings, ticket)
     baseline = max(0, int(state.get("external_evidence_baseline") or 0))
     current = max(baseline, int(state.get("external_evidence") or 0))
     evidence: list[Evidence] = []
     remaining = MAX_EXTERNAL_CONTEXT_TOTAL_BYTES
+    source_budget = MAX_EXTERNAL_EVIDENCE_SOURCE_BYTES
     omitted = current - baseline > MAX_EXTERNAL_CONTEXT_ITEMS
     end = min(current, baseline + MAX_EXTERNAL_CONTEXT_ITEMS)
     for number in range(baseline + 1, end + 1):
@@ -7432,6 +7592,14 @@ def _external_evidence(settings: Settings, ticket: str) -> list[Evidence]:
             continue
         remaining -= len(raw)
         content = raw.decode("utf-8", errors="replace")
+        if request is not None:
+            focused, consumed = _external_mps_context(directory, number, content, request, source_budget=source_budget)
+            source_budget = max(0, source_budget - consumed)
+            if len(focused.encode("utf-8")) <= min(remaining, MAX_EXTERNAL_CONTEXT_ITEM_BYTES - len(raw)):
+                content += focused
+                remaining -= len(focused.encode("utf-8"))
+            else:
+                omitted = True
         evidence.append(
             Evidence(
                 "external",

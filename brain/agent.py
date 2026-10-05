@@ -42,12 +42,11 @@ M365_KNOWLEDGE_TOTAL_BYTES = 2 * 1024 * 1024
 M365_REPOSITORY_METADATA_BYTES = 2 * 1024
 
 
-def final_solution_contract(text: str) -> tuple[bool, list[str]]:
-    """Validate the top-level Protocol v5 final marker and its minimum contract."""
+def _final_solution_sections(text: str, *, include_fences: bool = False) -> list[tuple[str, str]] | None:
     stripped = text.lstrip("\ufeff \t\r\n")
     marker = re.match(r"(?i)^(?:#{1,6}[ \t]+)?FINAL_SOLUTION[ \t]*(?:\r?\n|$)", stripped)
     if marker is None:
-        return False, ["top-level FINAL_SOLUTION marker"]
+        return None
     body = stripped[marker.end():]
     sections: list[tuple[str, str]] = []
     current_title: str | None = None
@@ -61,8 +60,12 @@ def final_solution_contract(text: str) -> tuple[bool, list[str]]:
                 fence = marker_value
             elif marker_value[0] == fence[0] and len(marker_value) >= len(fence):
                 fence = None
+            if include_fences and current_title is not None:
+                current_body.append(line)
             continue
         if fence is not None:
+            if include_fences and current_title is not None:
+                current_body.append(line)
             continue
         heading = re.match(r"^\s*#{2,3}\s+(.+?)\s*#*\s*$", line)
         if heading:
@@ -74,6 +77,14 @@ def final_solution_contract(text: str) -> tuple[bool, list[str]]:
             current_body.append(line)
     if current_title is not None:
         sections.append((current_title, "\n".join(current_body).strip()))
+    return sections
+
+
+def final_solution_contract(text: str) -> tuple[bool, list[str]]:
+    """Validate the top-level Protocol v5 final marker and its minimum contract."""
+    sections = _final_solution_sections(text)
+    if sections is None:
+        return False, ["top-level FINAL_SOLUTION marker"]
 
     placeholders = re.compile(
         r"(?i)^\s*(?:none|n/?a|not (?:provided|available|known)|unknown|todo|tbd|pending|see above)[.!\s-]*$"
@@ -87,7 +98,37 @@ def final_solution_contract(text: str) -> tuple[bool, list[str]]:
         for aliases in _FINAL_SOLUTION_SECTIONS
         if not any(any(alias in title for alias in aliases) for title in complete_titles)
     ]
+    production_section = " / ".join(_FINAL_SOLUTION_SECTIONS[5])
+    if production_section in missing and _has_production_change_block(text):
+        missing.remove(production_section)
     return not missing, missing
+
+
+def _has_production_change_block(text: str) -> bool:
+    """Detect payload presence, not applicability, completeness, or correctness."""
+    for title, content in _final_solution_sections(text, include_fences=True) or []:
+        if not any(alias in title for alias in _FINAL_SOLUTION_SECTIONS[5]):
+            continue
+        fence: str | None = None
+        language = ""
+        payload: list[str] = []
+        for line in content.splitlines():
+            if fence is None:
+                opening = re.fullmatch(r"\s*(`{3,}|~{3,})([^`~]*)", line)
+                if opening:
+                    fence = opening.group(1)
+                    language = opening.group(2).strip().casefold().split(" ")[0]
+                    payload = []
+            elif re.fullmatch(r"\s*" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}\s*", line):
+                block = "\n".join(payload).strip()
+                if (block and language not in {"text", "markdown", "md", "mermaid", "pseudo", "pseudocode"}
+                        and not re.fullmatch(r"(?i)(?:todo|tbd|pending|\.\.\.)[.!\s]*", block)
+                        and not re.search(r"(?i)\b(?:INVESTIGATION_REQUEST|CONTEXT_REQUEST)\b", block)):
+                    return True
+                fence = None
+            else:
+                payload.append(line)
+    return False
 
 
 def response_preview(text: str, settings: Settings | None = None, ticket: str | None = None) -> dict[str, Any]:
@@ -97,11 +138,21 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
         raise BrainError("The AI response is empty")
     final, _ = final_solution_contract(text)
     if final:
+        has_block = _has_production_change_block(text)
         return {
             "valid": True,
             "kind": "final_solution",
-            "label": "Ready to implement",
-            "message": "The AI returned a final implementation plan. No repository retrieval is required.",
+            "label": "Production change block supplied" if has_block else "Plan needs implementation details",
+            "message": (
+                "The suggested production changes include a code/configuration block. "
+                "Review its file targets, acceptance criteria and tests before applying it; "
+                "Brain has not evaluated the proposal's correctness or run the tests."
+                if has_block else
+                "No production code/configuration block was detected under Suggested production changes. "
+                "Ask the AI for per-file diffs or replacement snippets with exact insertion locations, "
+                "acceptance criteria and test assertions. For DSL/model changes, require precise editor steps; "
+                "if no source change is needed, require the reason. This plan can still be archived."
+            ),
             "operation_count": 0,
             "actions": [],
         }
@@ -230,7 +281,7 @@ Use the attached internal IPF documentation together with the ticket and reposit
 
 ## Produce the implementation plan
 
-Decide whether enough evidence now exists to implement safely. If yes, return FINAL_SOLUTION with exact repositories, files, methods, configuration, suggested changes, tests, validation commands, edge cases, and implementation order. Otherwise ask only the specific blocking question or return one focused INVESTIGATION_REQUEST v5 using the latest base_context_id.
+Decide whether enough evidence now exists to implement safely. If yes, return FINAL_SOLUTION with exact repositories, files, methods and configuration. Under Suggested production changes provide per-file fenced diffs or replacement code/configuration with exact edit locations and existing patterns. For projectional models provide precise editor steps at verified model/concept/node targets. Map each acceptance criterion to its edit and exact test/assertion; give dependency order, project-evidenced validation commands, risks and assumptions. Explain when no source edit is needed. Otherwise ask only the specific blocking question or return one focused INVESTIGATION_REQUEST v5 using the latest base_context_id. A plan is not proof of applied or validated delivery.
 """
     suggested_path = directory / "SUGGESTED_PROMPTS.md"
     _atomic_generated_text_write(settings, suggested_path, suggested)
@@ -275,7 +326,7 @@ Proceed through `INTAKE → ORIENT → INVESTIGATE → CHALLENGE → SYNTHESIZE 
 
 ## Final response
 
-Return `FINAL_SOLUTION` only when exact repositories, files, symbols/configuration, verified flow, implementation surface, tests, validation, compatibility risks, and remaining assumptions are explicit. Never present a candidate graph edge, slice statement, or historical analogue as final evidence.
+Return `FINAL_SOLUTION` only when exact repositories, files, symbols/configuration, verified flow, implementation surface, tests, validation, compatibility risks, and remaining assumptions are explicit. Under Suggested production changes provide per-file fenced diffs or replacement code/configuration and exact edit locations. For projectional models provide precise editor steps at verified model/concept/node targets. Map acceptance criteria to edits and exact test assertions. Use only project-evidenced commands; review developer diff/test feedback before claiming delivery. Never present a candidate graph edge, slice statement, or historical analogue as final evidence.
 """
     protocol_path = directory / "INVESTIGATION_PROTOCOL.md"
     _atomic_generated_text_write(settings, protocol_path, protocol)

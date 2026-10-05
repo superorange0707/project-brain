@@ -91,6 +91,18 @@ jobs:
           pyinstaller --clean --onefile --name brain --collect-data brain --collect-all truststore brain/standalone.py
           dist/brain --version
           dist/brain --help
+      - name: Verify detached UI survives the native launcher
+        env:
+          BRAIN_TEST_EXECUTABLE: ${{ github.workspace }}/dist/brain
+          PYTHONWARNINGS: error::ResourceWarning
+        run: python -m unittest discover -s tests -p test_ui_background.py -v
+
+      - name: Verify macOS login service lifecycle
+        env:
+          BRAIN_TEST_EXECUTABLE: ${{ github.workspace }}/dist/brain
+          BRAIN_TEST_LAUNCHD: "1"
+          PYTHONWARNINGS: error::ResourceWarning
+        run: python -m unittest discover -s tests -p test_mac_service.py -v
 
   windows-standalone-smoke:
     name: Standalone Windows amd64
@@ -108,3 +120,8 @@ jobs:
           pyinstaller --clean --onefile --name brain --collect-data brain --collect-all usearch --collect-all truststore brain/standalone.py
           .\dist\brain.exe --version
           .\dist\brain.exe --help
+      - name: Verify detached UI survives the native launcher
+        env:
+          BRAIN_TEST_EXECUTABLE: ${{ github.workspace }}/dist/brain.exe
+          PYTHONWARNINGS: error::ResourceWarning
+        run: python -m unittest discover -s tests -p test_ui_background.py -v

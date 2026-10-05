@@ -3321,6 +3321,7 @@ def _validated_prior_evidence_ids(
     for record in records:
         records_by_public.setdefault(str(record.get("public_id") or ""), []).append(record)
     fallback_files: list[tuple[str, str]] = []
+    from .mps_index import is_model_path, MAPPING_PATH
     fallback_seen: set[tuple[str, str]] = set()
     for public_id in wanted_order:
         for record in records_by_public.get(public_id, []):
@@ -3333,6 +3334,7 @@ def _validated_prior_evidence_ids(
                 and repo in generation.snapshots and path
                 and str(source.get("sha") or "") == generation.snapshots[repo]
                 and not str(source.get("snapshot") or "")
+                and not is_model_path(path) and path != MAPPING_PATH
             ):
                 fallback_seen.add(key)
                 fallback_files.append(key)
@@ -3366,7 +3368,15 @@ def _validated_prior_evidence_ids(
             if str(source.get("sha") or "") != generation.snapshots[repo]:
                 continue
             snapshot_value = str(source.get("snapshot") or "")
-            if snapshot_value:
+            from .mps_index import is_model_path, MAPPING_PATH
+
+            if is_model_path(path) or path == MAPPING_PATH:
+                from .core import _read_pinned_source_text
+
+                source_content = _read_pinned_source_text(settings, settings.repo(repo), path, generation)
+                if source_content is None or len(source_content.encode("utf-8")) > MAX_REFRESH_FILE_BYTES:
+                    continue
+            elif snapshot_value:
                 snapshot = Path(snapshot_value).resolve()
                 candidate = (snapshot / path).resolve()
                 if (

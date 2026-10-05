@@ -434,6 +434,7 @@ def prepare_working_tree_snapshots(
         byte_budget = min(_NONGIT_SNAPSHOT_MAX_BYTES, shared_capacity)
         copied_bytes = 0
         copied_items = 0
+        omitted_models = 0
         deadline = walk_budget.deadline
         try:
             for source in _walk_root(root, suffixes, ignored_dirs, budget=walk_budget):
@@ -447,11 +448,15 @@ def prepare_working_tree_snapshots(
                     continue
                 try:
                     if source.stat().st_size > 3_000_000:
+                        from .mps import MODEL_SUFFIXES
+                        omitted_models += int(source.suffix.lower() in MODEL_SUFFIXES)
                         continue
                     content = _read_source_bytes(source)
                 except OSError as error:
                     raise RuntimeError(f"Could not read authoritative non-Git source {repo.name}:{source.name}") from error
                 if len(content) > 3_000_000 or b"\0" in content[:8192]:
+                    from .mps import MODEL_SUFFIXES
+                    omitted_models += int(source.suffix.lower() in MODEL_SUFFIXES)
                     continue
                 if (
                     copied_bytes + len(content)
@@ -522,6 +527,8 @@ def prepare_working_tree_snapshots(
                 "immutable unborn-Git snapshot; no commit freshness check"
                 if is_unborn_git else "immutable local snapshot; no remote freshness check"
             )
+            if omitted_models:
+                repo.source_warning += f"; MPS discovery incomplete: {omitted_models} oversize or binary model file(s) excluded from the immutable source seal"
             prepared.append(repo)
         finally:
             if temporary.exists():
@@ -580,7 +587,7 @@ def _git_manifest(repo: Repository) -> dict[str, tuple[str, str]] | None:
     return blobs
 
 
-def _git_blob_contents(repo: Repository, blobs: set[str]) -> Iterable[tuple[str, bytes]]:
+def _git_blob_contents(repo: Repository, blobs: set[str], *, max_total_bytes: int | None = None) -> Iterable[tuple[str, bytes]]:
     """Yield changed Git objects in explicit item/byte-bounded subprocess batches."""
     if not blobs:
         return
@@ -628,7 +635,7 @@ def _git_blob_contents(repo: Repository, blobs: set[str]) -> Iterable[tuple[str,
         pending_bytes = 0
         # The caller already owns the missing-object set. Avoid a second full
         # sorted copy; Git object identity makes load order irrelevant.
-        for blob in blobs:
+        for blob in sorted(blobs) if max_total_bytes is not None else blobs:
             try:
                 encoded_size = len(blob.encode("ascii")) + 1
             except UnicodeEncodeError:
@@ -689,7 +696,11 @@ def _git_blob_contents(repo: Repository, blobs: set[str]) -> Iterable[tuple[str,
 
     current: list[str] = []
     current_bytes = 0
+    total_bytes = 0
     for blob, size in eligible_objects():
+        if max_total_bytes is not None and total_bytes + size > max_total_bytes:
+            continue
+        total_bytes += size
         if current and (
             len(current) >= _GIT_BLOB_BATCH_ITEMS or current_bytes + size > _GIT_BLOB_BATCH_BYTES
         ):

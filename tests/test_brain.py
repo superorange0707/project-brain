@@ -1757,6 +1757,46 @@ path = "batch-service"
         refreshed = response_preview(REQUEST, self.settings, "ABC-ROUTE")
         self.assertIsNone(refreshed["duplicate_of"])
 
+    def test_final_plan_advisory_distinguishes_production_blocks_from_other_fences(self) -> None:
+        preview = response_preview(FINAL_SOLUTION)
+        self.assertEqual("final_solution", preview["kind"])
+        self.assertEqual("Plan needs implementation details", preview["label"])
+        self.assertIn("per-file diffs", preview["message"])
+        production = "Update the existing branch using the local pattern."
+        for block in (
+            "```java\nreturn existingPolicy.evaluate(customer);\n```",
+            "~~~~diff\n-old\n+new\n~~~~",
+            "```yaml\nretries: 3\n```",
+            '```json\n{"retries": 3}\n```',
+            "```\nreturn existingPolicy.evaluate(customer)\n```",
+            "```python\n# ## Tests and assertions\nreturn existing_policy(customer)\n```",
+        ):
+            with self.subTest(block=block):
+                for section_body in (production + "\n" + block, block):
+                    result = response_preview(FINAL_SOLUTION.replace(production, section_body))
+                    self.assertEqual("final_solution", result["kind"])
+                    self.assertEqual("Production change block supplied", result["label"])
+                    self.assertIn("not evaluated", result["message"])
+        for block in (
+            "```java\n\n```", "```python\nTODO\n```", "```python\n...\n```",
+            "```text\nUpdate the handler.\n```", "```mermaid\nA --> B\n```",
+            '```json\n{"INVESTIGATION_REQUEST": {"version": 5}}\n```',
+            "```yaml\nCONTEXT_REQUEST:\n  version: 2\n```",
+        ):
+            with self.subTest(block=block):
+                result = response_preview(FINAL_SOLUTION.replace(production, production + "\n" + block))
+                self.assertEqual("final_solution", result["kind"])
+                self.assertEqual("Plan needs implementation details", result["label"])
+        for block in ("```java\nreturn incomplete;", "~~~~java\nreturn incomplete;\n~~~"):
+            with self.subTest(block=block):
+                result = response_preview(FINAL_SOLUTION.replace(production, production + "\n" + block))
+                self.assertEqual("conversation", result["kind"])
+        test_only = FINAL_SOLUTION.replace(
+            "The affected tests and exact assertions are listed.",
+            "The affected tests and exact assertions are listed.\n```python\nassert result == expected\n```",
+        )
+        self.assertEqual("Plan needs implementation details", response_preview(test_only)["label"])
+
     def test_complete_ai_reply_uses_the_latest_directive(self) -> None:
         start_session(self.settings, "ABC-LATEST", "Investigate eligibility.")
         create_context(self.settings, "ABC-LATEST", REQUEST)

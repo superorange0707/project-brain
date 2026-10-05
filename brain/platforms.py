@@ -804,11 +804,14 @@ def windows_system_executable(name: str, *subdirectories: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def process_group_kwargs(*, windows: bool | None = None) -> dict[str, Any]:
+def process_group_kwargs(*, windows: bool | None = None, detached: bool = False) -> dict[str, Any]:
     """Create an independently terminable native process group without a shell."""
     is_windows = os.name == "nt" if windows is None else windows
     if is_windows:
-        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)}
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        if detached:
+            flags |= getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        return {"creationflags": flags}
     return {"start_new_session": True}
 
 

@@ -137,6 +137,13 @@ function setup() {
     run:() => button.listeners.click.call(button)};
 }
 (async () => {
+  const advisory = setup();
+  advisory.context.renderPreview({...plan, kind:"final_solution",
+    label:"Plan needs implementation details", message:"Ask the AI for per-file diffs."});
+  const previewMessage = advisory.document.getElementById("request-message").innerHTML;
+  assert.ok(previewMessage.includes("Plan needs implementation details"));
+  assert.ok(previewMessage.includes("per-file diffs"));
+  assert.ok(!previewMessage.includes("Ready to implement"));
   // A late completion must not erase a newly typed reply, even if its text is identical.
   for (const draft of ["new reply", "submitted request"]) {
     const app = setup();

@@ -816,7 +816,7 @@
       document.getElementById("investigation-board").innerHTML = data.sessions.map(function (session) {
         var job = session.job || {};
         var progress = job.progress || {};
-        var status = session.status === "retrieving" ? "● Retrieving · " + elapsed(progress.elapsed_ms || (Date.now() - (job.started_at_ms || Date.now()))) : (session.status === "ready_to_implement" ? "✓ Ready to implement" : "Waiting for AI");
+        var status = session.status === "retrieving" ? "● Retrieving · " + elapsed(progress.elapsed_ms || (Date.now() - (job.started_at_ms || Date.now()))) : (session.status === "ready_to_implement" ? "Implementation plan saved" : "Waiting for AI");
         var details = session.status === "retrieving" ? (progress.phase_label || "Queued") + " · ops " + String(progress.effective_operations || 0) + " · candidates " + String(progress.candidate_count || 0) : String(session.requests || 0) + " retrieval rounds";
         return '<button class="artifact" data-board-ticket="' + esc(session.ticket) + '"><span><strong>' + esc(session.ticket) + '</strong><br><small>' + esc(status) + '</small></span><small>' + esc(details) + ' · Wave ' + esc(session.wave || 0) + '<br>Generation ' + esc(session.atlas_generation == null ? "legacy" : session.atlas_generation) + '</small></button>';
       }).join("") || '<div class="empty">No investigations yet.</div>';
@@ -831,7 +831,7 @@
         data.sessions.forEach(function (session) {
           var option = document.createElement("option");
           option.value = session.ticket;
-          var status = session.status === "ready_to_implement" ? "ready to implement" : session.requests + " retrievals";
+          var status = session.status === "ready_to_implement" ? "plan saved" : session.requests + " retrievals";
           option.textContent = session.ticket + " · " + status;
           select.appendChild(option);
         });
@@ -1149,7 +1149,7 @@
       if (plan.kind === "conversation") {
         message.innerHTML = '<div class="success"><strong>No executable request in this reply.</strong><br>If this is a repository question, choose Create request from text and review it here. For business or runtime questions, reply directly in the AI chat.</div>';
       } else if (plan.kind === "final_solution") {
-        message.innerHTML = '<div class="success"><strong>Ready to implement.</strong><br>' + esc(plan.message) + '</div>';
+        message.innerHTML = '<div class="success"><strong>' + esc(plan.label) + '</strong><br>' + esc(plan.message) + '</div>';
       } else if (plan.duplicate_of) {
         message.innerHTML = '<div class="error">This retrieval already ran as request ' + String(plan.duplicate_of).padStart(3, "0") + '. Clear the old reply and paste only the AI’s latest complete response. If the AI asked you a human question, answer it directly in that chat; Brain should not create another request.</div>';
       } else {
@@ -1243,8 +1243,8 @@
         }
         state.contextRecovery = null;
         document.getElementById("global-error").hidden = true;
-        document.getElementById("request-message").textContent = "";
-        showToast(data.kind === "final_solution" ? "Final plan archived — ready to implement" : "Evidence ready — return it to the same AI chat");
+        document.getElementById("request-message").textContent = data.kind === "final_solution" ? data.message : "";
+        showToast(data.kind === "final_solution" ? "Implementation plan saved — review the proposal and validation" : "Evidence ready — return it to the same AI chat");
         return true;
     }
     document.getElementById("run-request").addEventListener("click", async function () {

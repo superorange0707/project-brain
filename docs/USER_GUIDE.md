@@ -25,7 +25,7 @@ directories can still be searched.
 
 ## 2. Installation
 
-macOS, Windows, Linux and Python distributions are at **v1.0.25**.
+macOS, Windows, Linux and Python distributions are at **v1.0.29**.
 Use the platform-specific commands below.
 
 ### Homebrew (recommended on macOS)
@@ -48,8 +48,8 @@ toolchain. Homebrew maps `superorange0707/tap` to the separate
 ### Linux installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.25/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.25
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.29/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.29
 ```
 
 This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
@@ -58,8 +58,8 @@ adjacent executables in `~/.local/bin` without changing Brain workspace state.
 ### Standalone macOS/Linux archive
 
 Use the verified
-[v1.0.25 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.25)
-or [v1.0.25 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.25)
+[v1.0.29 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.29)
+or [v1.0.29 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.29)
 for the matching arm64/amd64 platform. Keep `brain`,
 `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the same directory on
 `PATH`.
@@ -70,9 +70,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.25 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.29 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.25
+.\scripts\install-project-brain.ps1 -Version 1.0.29
 brain.exe --version
 ```
 
@@ -90,7 +90,7 @@ For a ZIP already downloaded in a browser or transferred from another machine,
 put its published `SHA256SUMS.txt` in the same directory and run the same script:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.25-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.29-windows-amd64.zip"
 ```
 
 The version is read from the official filename. This path performs no network
@@ -106,14 +106,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.25-windows-amd64.zip` and the published
+Download `project-brain-v1.0.29-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.25-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.25-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.29-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.29-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -136,7 +136,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.25"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.29"
 ```
 
 Upgrade later with:
@@ -148,7 +148,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.25"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.29"
 ```
 
 ### From a source checkout
@@ -290,10 +290,54 @@ require attention. Git/network checks and temporary refresh failures retry with
 backoff. The visible page reads current status every five seconds and immediately
 when returning to its tab, without resetting drafts or pending form choices.
 Repository checks use the configured interval (180 seconds by default) while
-the UI service runs, including when the browser tab is closed.
+the UI service runs, including when the browser tab and launching terminal are
+closed. `brain ui` starts a detached local process; after a reboot or logout,
+start it once again, or install the macOS login service described below.
 The Off/When idle preference and safe timestamps are stored
 only under the Brain-owned state directory. `brain watch` uses this same detector
 and scheduler rather than a separate unconditional polling implementation.
+
+### macOS login and background service
+
+From an initialized workspace, run `brain service install` once. Brain installs
+one private LaunchAgent under your own `~/Library/LaunchAgents`, starts it now,
+and starts it again when you sign in to the Mac. No administrator account,
+`sudo`, system daemon, extra runtime or external scheduler is required.
+
+```bash
+brain service install          # enable login startup and start this workspace
+brain service status           # inspect registration and authenticated UI health
+brain ui                       # open the managed service's existing local page
+brain service stop             # stop only when idle; no immediate restart
+brain service start            # resume the installed service
+brain service uninstall        # stop safely and remove this workspace's login item
+```
+
+The service runs the UI and existing idle-refresh scheduler without a terminal
+or browser. Keep **When idle** enabled; installation preserves this preference.
+macOS restarts it after a crash, with a retry delay. An explicit safe stop exits
+cleanly, so it remains stopped until requested again or the next login. Sleep
+pauses work, and logout stops a user agent; this does not run before login.
+Busy refreshes or investigations block replacement and uninstall instead of
+being killed. For foreground diagnostics, run `brain service stop` before
+`brain ui --foreground`. Each workspace has its own service identity. Use
+`brain service install --port 0` for automatic port selection when running more
+than one workspace. Reinstalling without `--port` preserves that selection.
+
+The service retains a stable Homebrew executable link across upgrades. Stop it
+before upgrading, then run `brain service install` to reconcile its definition
+and resume it. Source/venv installations require their interpreter and source
+checkout to remain in place. Logs are private at the configured state's
+`ui.log`; the service plist does not contain the UI token or exported terminal
+credentials. Login startup has a fresh macOS environment: use your approved
+Git/Keychain/credential-manager configuration and VPN, rather than credentials
+or SSH-agent socket paths exported only in one terminal.
+
+macOS may request permission for background activity or access to protected
+project folders. Check **System Settings → General → Login Items & Extensions**
+and the relevant folder access setting if registration succeeds but startup does
+not. Company MDM policies still apply. Brain reports failed readiness explicitly;
+it does not elevate privileges or change these policies.
 
 ### What “latest” means
 
@@ -761,6 +805,44 @@ End-of-day batch processing in batch-service.
 
 Knowledge files are searched alongside code on every relevant request.
 
+For domain-heavy tickets, record more than acronym expansions. Keep each entry
+small and tie it to evidence you can verify:
+
+| Field | Record |
+|---|---|
+| Vocabulary | Business term, acronym, source identifier, and ambiguous meanings |
+| Ownership | Repository and established relative source/model path |
+| Rule | Inputs, decision/constraint, output, and authoritative documentation |
+| Interaction | Caller/event/model reference, downstream effect, and precedence |
+| Authoring target | Rule/concept/model or ordinary source; generator/runtime boundary |
+| Verification | Known test path, acceptance example, negative/boundary case |
+
+These mappings guide the AI's next exact-source request; they are not automatic
+proof of behavior or an alias-expansion engine. The start handoff and M365 kit
+include the glossary/project map. Focused retrieval can search other Markdown
+knowledge files. The AI must resolve a conflicting or ambiguous rule before
+using it in a production proposal.
+
+For MPS or another DSL, first establish which tool and persistence format the
+project uses. A generated Java file alone does not identify the authoring rule.
+The AI should trace the ticket's domain term to the authoring model/concept,
+relevant references and constraints, generator/runtime behavior, and tests.
+For projectional models, require precise editor steps at verified model/concept
+targets rather than invented text patches or serialized node IDs. The external
+evidence reader now decodes standard MPS v9 XML models and module descriptors,
+including project ZIPs, into bounded structural navigation and exact reference
+targets. Repository refresh also captures an optional immutable MPS component
+for new tickets. Exact `file_hint` anchors such as `repo/path.mps#id:node`
+return source-backed model connections; `impact_analysis` follows incoming
+references. Older tickets retain their original component and source, including
+explicit unavailability if their generation predates MPS ingestion.
+See [MPS and IPF evidence](MPS_IPF.md) for supported formats and the
+authoring-to-test workflow. Refresh captures configured repository models in the
+optional MPS projection without adding them to the ordinary lexical index;
+local attachments can also be imported through `brain evidence`. Unsupported
+persistence needs an appropriate MPS export/provider; a decoded registry alone
+does not establish business semantics.
+
 ## 6. Create a persistent M365 Copilot Agent
 
 Project Brain can generate the permanent Instructions and stable project
@@ -865,9 +947,12 @@ private evaluation data or file paths need to cross a browser surface.
 
 No AI model runs inside the page. It does not execute tests or edit code. Closing
 the browser tab does not stop the local server, because doing so could kill a
-long refresh. Run `brain ui stop` (only accepted while idle) or press Ctrl+C in
-the server terminal. Running `brain ui` again reopens the existing private local
-instance instead of failing on its occupied port; `brain ui status` reports it.
+long refresh. `brain ui` returns after its background service is ready, so closing
+the launching terminal is also safe. Run `brain ui stop` (only accepted while
+idle) to stop it. Use `brain ui --foreground` to keep a diagnostic session attached
+to the terminal, where Ctrl+C stops it. Running `brain ui` again reopens the
+existing private local instance instead of failing on its occupied port;
+`brain ui status` reports it.
 
 The remaining sections document the equivalent terminal workflow and are useful
 for automation, M365 file delivery, or troubleshooting.
@@ -939,7 +1024,50 @@ It deterministically routes the reply:
 
 - `INVESTIGATION_REQUEST` (or legacy `CONTEXT_REQUEST`): validate, retrieve, and deliver local evidence;
 - normal conversation: tell the developer to answer the AI directly;
-- `FINAL_SOLUTION`: archive the plan and mark the ticket ready to implement.
+- `FINAL_SOLUTION`: archive the implementation proposal. The legacy session status
+  remains `ready_to_implement`; the UI displays **Implementation plan saved**.
+
+### Turn an implementation plan into a ticket delivery
+
+The AI instructions require a concrete proposal under **Suggested production
+changes**. Each edit should name the verified repository, relative path,
+symbol/configuration key, and exact insertion or replacement location, followed
+by a fenced diff or replacement snippet. Include needed imports and changed
+callers. For projectional DSL models, use precise editor operations at verified
+model/concept/node targets. If no source edit is needed, explain the reason.
+
+Map every acceptance criterion to its edit and exact test/assertion. Order small
+steps by dependency and give an observable result for each step. Validation
+commands must come from repository instructions or build/test evidence.
+“Update the handler” and “add tests” are not sufficient implementation details.
+If source needed to produce the snippet is missing, request that exact file or
+range through Brain before drafting the proposal.
+
+Preview checks for a non-empty fenced production block in the suggested-changes
+section. It ignores request blocks, test-section fences, prose/diagram fences,
+empty blocks and simple placeholders. When none is detected, UI and CLI explain
+what to ask the AI to supply. This is advisory: older prose-only plans still
+archive, and precise model-editor steps or no-code resolutions require review.
+Block presence does not verify its contents, edit targets, completeness or
+correctness; current-source quotes can also look like a proposed code block.
+`brain preview --json` exposes the same advisory in `label` and `message`;
+`brain continue --json` retains its existing archive result fields.
+
+Track delivery using observable stages, not a percentage derived from retrieval:
+
+| Stage | Evidence of progress |
+|---|---|
+| Evidence collected | Pinned source explains the relevant behavior and blockers |
+| Proposal supplied | Per-file edits/model steps and acceptance-to-test mapping |
+| Developer applied | Actual working-tree diff returned through implementation feedback |
+| Validation observed | Actual command/output reviewed against each acceptance criterion |
+
+Brain collects context and never edits target repositories or runs their tests.
+The chat AI proposes changes, the developer applies them in the IDE, and
+**Implementation feedback** returns the diff and test output for review. A saved
+plan or a supplied code block does not mean the ticket has been delivered. Use
+focused batched reads for decision-changing blockers; once those are resolved,
+move to the proposal and feedback instead of repeating broad retrieval.
 
 For M365, use:
 
@@ -1378,6 +1506,8 @@ before moving it outside the project's trust boundary.
 brain evidence ABC-1234 internal-standard.md --kind document --target m365
 brain evidence ABC-1234 production.log --kind log --target m365
 brain evidence ABC-1234 runtime-snapshot.json --kind runtime --target m365
+brain evidence ABC-1234 payment-model.mps --kind document --target m365
+brain evidence ABC-1234 mps-project.zip --kind document --target m365
 ```
 
 Text evidence is archived under the ticket and included in later context rounds
@@ -1385,9 +1515,28 @@ as explicitly user-supplied evidence, subject to per-item and total context
 limits. Give the generated `generated/handoffs/ABC-1234/evidence-NNN.md` to the
 Agent as well: a later bounded context may omit a large attachment. Check the
 reported delivery path if the workspace uses a custom generated directory.
-Binary files such as PDFs
-are archived locally, but Brain does not claim to parse them; attach the stored
-binary directly to M365 Copilot or another AI that supports that format.
+MPS `.mps` v9 UTF-8 XML models and `.mpl`, `.msd`, `.mpr`, `.devkit` descriptors are decoded
+locally. A ZIP containing these files lets the reader resolve cross-model
+references by exact model identity and persistent node ID. Nodes without an ID
+retain source-location keys and lines for containment, never as reference targets.
+The handoff includes qualified
+concept/role names, containment, root connections, properties, reference status, source positions,
+and descriptor/generator nesting. Original bytes and SHA-256 are preserved.
+Summaries are bounded to 32 KB with omission counts; models up to 128 KB also
+include their full supplied source. Larger sources and ZIP members remain in
+the original attachment. Request a supplied name or exact `member.mps#id:node-id`
+through `resolve` or a `symbol`/`file_hint` anchor to retrieve model connections
+and original source windows. Use `impact_analysis` for incoming references in
+the supplied model project and the
+returned `member.mps#lines:start-end` anchor for additional source. Every focused
+read checks the original attachment hash; duplicate names remain candidates.
+The reader accepts at most 128 MPS files, 3 MB per file and 16 MB total
+decoded source, and never extracts ZIPs or executes MPS. Unsupported formats
+and missing/dynamic/ambiguous targets remain explicit. This is external
+evidence, not pinned repository proof or a verified business execution trace.
+
+Other binary files such as PDFs are archived locally; attach the stored binary
+directly to M365 Copilot or another AI that supports that format.
 
 A runtime snapshot already committed in a configured repository can use the
 normal v5 `files` request. A live process, production database or deployed
@@ -1469,7 +1618,12 @@ Run `brain ui` again to reopen the registered local instance, or open the exact
 loopback URL printed by the command. Use `brain ui status` to check it and
 `brain ui stop` to stop it safely while idle. Use `brain ui --port 0` if an
 unrelated program owns the default port, or `brain ui --no-open` on a headless
-machine. Keep the terminal process running while using the page.
+machine. The default background service does not require an open terminal.
+If startup fails, inspect `state/ui.log` under the workspace (or the configured
+state directory), or run `brain ui --foreground` to see the error directly.
+After a reboot or logout, start `brain ui` again unless you have enabled the
+macOS login service with `brain service install`. For that service, inspect
+`brain service status` and the private log before retrying `brain service start`.
 
 ### Clipboard unavailable
 

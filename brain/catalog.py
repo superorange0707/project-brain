@@ -29,7 +29,7 @@ ATLAS_MANIFEST_VERSION = 1
 COMPONENT_NAMES = (
     "lexical", "zoekt", "structural", "relationships", "experience", "semantic",
     "hierarchy", "typed_graph", "change_intelligence", "semantic_cards",
-    "runtime_anchors", "java_intelligence",
+    "runtime_anchors", "java_intelligence", "mps_models",
 )
 
 TERM_INDEX_INVALIDATION_TRIGGERS = (
@@ -234,8 +234,11 @@ def canonical_atlas_manifest(manifest: dict[str, Any]) -> str:
         "components": {
             name: logical_component(name)
             for name in COMPONENT_NAMES
+            if name != "mps_models" or (components.get(name) or {}).get("status") == "ready"
         },
     }
+    if "mps_models" not in logical["components"]:
+        logical["schema_manifest"].get("components", {}).pop("mps_models", None)
     return json.dumps(logical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -926,6 +929,7 @@ def collect_generation_components(
     *,
     semantic_failed: bool = False,
     atlas_payload: dict[str, Any] | None = None,
+    mps_component: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Verify current projections and turn them into one generation component manifest."""
     from .backends.zoekt import immutable_snapshot_available, shard_manifest_identity, shard_path
@@ -941,7 +945,10 @@ def collect_generation_components(
         for name, raw in state.items()
         if isinstance(raw, dict)
     }
-    components: dict[str, dict[str, Any]] = {"lexical": lexical_component(settings, state)}
+    from .mps_index import build_component, retain_aligned_component
+
+    components: dict[str, dict[str, Any]] = {"lexical": lexical_component(settings, state),
+                                           "mps_models": retain_aligned_component(settings, state, mps_component if mps_component is not None else build_component(settings, state))}
 
     zoekt_rows: list[dict[str, str]] = []
     for repo, sha in sorted(snapshots.items()):
@@ -1103,6 +1110,11 @@ def _reusable_generation_is_intact(
             ))
             if not isinstance(payload, dict) or _content_hash(payload) != registered.get("content_hash"):
                 return False
+            if name == "mps_models":
+                from .mps_index import validate_payload
+
+                if not validate_payload(payload, ref.snapshots, registered):
+                    return False
             if name == "semantic":
                 from .semantic import semantic_state_compatibility
 
@@ -1224,7 +1236,10 @@ def publish_generation(
         component_values = {
             name: dict((components or {}).get(name) or {"schema_version": "1", "status": "unavailable"})
             for name in COMPONENT_NAMES
+            if name != "mps_models" or ((components or {}).get(name) or {}).get("status") == "ready"
         }
+        if component_values.get("mps_models", {}).get("status") == "ready" and not component_values["mps_models"].get("_artifact_source"):
+            raise sqlite3.IntegrityError("ready MPS source component requires an immutable source artifact")
         semantic_component = component_values.get("semantic") or {}
         if semantic_component.get("status") == "ready":
             from .semantic import semantic_schema_version
@@ -1342,6 +1357,17 @@ def publish_generation(
                         raise sqlite3.IntegrityError(f"copied {name} artifact is not valid JSON") from error
                     if not isinstance(copied_payload, dict) or _content_hash(copied_payload) != persisted.get("content_hash"):
                         raise sqlite3.IntegrityError(f"copied {name} artifact content identity changed before publication")
+                    if name == "mps_models":
+                        from .mps_index import validate_payload, validate_membership, load_component
+
+                        if not validate_payload(copied_payload, {str(item["repo"]): str(item["sha"]) for item in snapshots}, persisted):
+                            raise sqlite3.IntegrityError("copied MPS source artifact failed snapshot/source validation")
+                        current = _generation_ref(connection, parent) if parent is not None else None
+                        retained = (current is not None and current.snapshots == copied_payload["snapshots"]
+                                    and current.component("mps_models").get("content_hash") == persisted.get("content_hash")
+                                    and load_component(settings, current) is not None)
+                        if not retained and not validate_membership(settings, copied_payload):
+                            raise sqlite3.IntegrityError("copied MPS source artifact failed immutable path/blob membership validation")
                     if name == "semantic" and persisted.get("status") == "ready":
                         from .semantic import semantic_state_compatibility
 

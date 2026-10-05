@@ -33,7 +33,7 @@ in control and apply the resulting solution in your normal IDE.
 
 ## Install
 
-This source tree documents **v1.0.28** for macOS, Windows and Linux. Published
+This source tree documents **v1.0.29** for macOS, Windows and Linux. Published
 downloads are listed on the [latest stable release](https://github.com/superorange0707/project-brain/releases/latest).
 Standalone downloads contain `brain`, `codebase-memory-mcp`, `zoekt`, and
 `zoekt-index`; model weights are never bundled.
@@ -61,7 +61,7 @@ sessions are preserved during upgrades. Finish active refresh or retrieval work
 before stopping the UI. This patch fixes idle refresh and live UI status without
 changing index formats or model inputs; upgrading alone needs no manual refresh
 or re-embedding. See the
-[release upgrade notes](https://github.com/superorange0707/project-brain/releases/tag/v1.0.28).
+[release upgrade notes](https://github.com/superorange0707/project-brain/releases/tag/v1.0.29).
 
 ### Windows 11 x64
 
@@ -69,9 +69,9 @@ On managed machines that allow `git clone` but block direct `.ps1` downloads,
 get the installer from the tagged repository and run it directly:
 
 ```powershell
-git clone --depth 1 --branch v1.0.28 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.29 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.28
+.\scripts\install-project-brain.ps1 -Version 1.0.29
 ```
 
 Specifying `-Version` skips the GitHub API lookup. The installer downloads only
@@ -88,7 +88,7 @@ Already downloaded the ZIP? Put the release's `SHA256SUMS.txt` beside it and,
 from the installer clone, run:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.28-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.29-windows-amd64.zip"
 ```
 
 This path is fully offline: no API call, credentials, administrator access, or
@@ -98,7 +98,7 @@ file in another directory. Close a running Brain UI before upgrading its tools.
 
 If company policy also blocks PowerShell script execution, use the portable ZIP:
 
-**[Download `project-brain-v1.0.28-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.28/project-brain-v1.0.28-windows-amd64.zip)**
+**[Download `project-brain-v1.0.29-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.29/project-brain-v1.0.29-windows-amd64.zip)**
 
 Download the ZIP in a browser and extract its complete contents into
 `%LOCALAPPDATA%\ProjectBrain\bin` (or another folder you control) so the four
@@ -116,20 +116,20 @@ Windows is recommended when `brain refresh` needs to fetch remote refs and
 create immutable Git snapshots.
 
 Verify the download against
-[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.28/SHA256SUMS.txt):
+[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.29/SHA256SUMS.txt):
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.28-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\project-brain-v1.0.29-windows-amd64.zip -Algorithm SHA256
 ```
 
 On unrestricted machines, the same installer is also available directly from
-the [v1.0.28 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.28).
+the [v1.0.29 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.29).
 
 ### Linux — verified user-level installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.28/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.28
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.29/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.29
 brain --version
 ```
 
@@ -141,17 +141,17 @@ and installs the four executables in `~/.local/bin`.
 Python 3.11–3.14 is supported:
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.28"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.29"
 ```
 
 Or install the release wheel directly:
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.28/project_brain_context-1.0.28-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.29/project_brain_context-1.0.29-py3-none-any.whl
 ```
 
 All native archives, Python distributions, installers and their checksums are on the
-**[v1.0.28 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.28)**.
+**[v1.0.29 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.29)**.
 
 ## Quick start
 
@@ -163,9 +163,32 @@ brain init --name payments-platform
 brain ui
 ```
 
-Closing the browser tab does not interrupt a long refresh. Run `brain ui` again
+`brain ui` starts the local service in the background and returns to the prompt.
+You can close both the terminal and browser; **Auto Refresh: When idle** keeps
+running while the computer is awake. Run `brain ui` again
 to reopen the same local instance, `brain ui status` to inspect it, or
-`brain ui stop` to stop it safely while idle.
+`brain ui stop` to stop it safely while idle. After a reboot or logout, run
+`brain ui` once to start it again. Use `brain ui --foreground` for terminal
+diagnostics; background startup output is saved in the workspace's `state/ui.log`
+(or the configured state directory).
+
+On **macOS**, install the workspace's login service once to have Brain start
+automatically after you sign in, and recover after an unexpected process exit:
+
+```bash
+brain service install
+brain service status
+brain ui
+```
+
+This uses a user LaunchAgent and needs no `sudo`. Keep **Auto Refresh: When idle**
+enabled; its existing preference is preserved. Terminal and browser can both be
+closed. `brain service stop` (or `brain ui stop`) stops safely while idle and
+stays stopped until you start it again or next sign in. `brain service start`
+resumes it; `brain service uninstall` removes login startup while preserving
+workspace data. `brain service install --port 0` supports another workspace on
+an automatically selected port. Company-managed Macs may require approval for
+background activity or access to the project folder in System Settings.
 
 The Brain view also includes **Storage & recovery**. It previews or safely
 reclaims only unpinned old generations, snapshots, and shards; current state and
@@ -270,6 +293,7 @@ need a model pack, vector service, API key, or cloud index.
 
 - exact content and path search across many repositories;
 - class, interface, method, function, implementation, and caller evidence;
+- pinned MPS v9 models/descriptors, nested node jumps, forward/reverse connections and language-definition anchors;
 - Java/Spring MVC, Feign, Kafka, configuration, persistence, and test links;
 - ordered execution and cross-repository integration flows;
 - impact, test, contract, and configuration/data surfaces;
