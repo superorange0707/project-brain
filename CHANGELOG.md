@@ -2,7 +2,7 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.30] - 2026-10-05
+## [1.0.31] - 2026-10-05
 
 - Publish the private UI instance record before starting idle-refresh inventory,
   avoiding a startup file-replacement race. Wait for launchd to finish removing
@@ -32,10 +32,16 @@ All notable changes are documented here. This project follows Semantic Versionin
   neither claims that changes were applied or tests passed. Regenerate the M365
   Agent Kit to receive the updated instructions.
 
+## [1.0.30] - Unpublished candidate
+
+- Withheld after native Windows validation found an MPS artifact-reference path
+  mismatch and portable fixture/connection cleanup issues. v1.0.31 corrects them
+  and preserves unsafe ZIP member names through validation.
+
 ## [1.0.29] - Unpublished candidate
 
 - Withheld after remote release validation exposed asynchronous launchd removal
-  and an initial idle-refresh startup race. v1.0.30 includes the corrections.
+  and an initial idle-refresh startup race. v1.0.31 includes the corrections.
 
 ## [1.0.28] - 2026-09-28
 

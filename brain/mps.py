@@ -711,7 +711,7 @@ def documents_from_attachment(filename: str, source: bytes) -> dict[str, bytes] 
             documents = {}
             for item in selected:
                 path = PurePosixPath(item.filename)
-                if (path.is_absolute() or ".." in path.parts or "\\" in item.filename
+                if (item.orig_filename != item.filename or path.is_absolute() or ".." in path.parts or "\\" in item.filename
                         or ":" in item.filename or not item.filename or item.filename.casefold() in seen):
                     raise MpsError("MPS ZIP contains an unsafe or duplicate member path")
                 seen.add(item.filename.casefold())

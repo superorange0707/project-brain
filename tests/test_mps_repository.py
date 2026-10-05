@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
@@ -83,7 +84,7 @@ class MpsRepositoryTests(unittest.TestCase):
         self.assertEqual("ready", generation.component("mps_models")["status"])
         self.assertEqual(lexical, lexical_membership_identity(self.settings, {"service": sha}))
         self.assertEqual(old_identity, canonical_atlas_identity(resolve_generation(self.settings, generation=old.generation).manifest))
-        with _connect(self.settings) as connection:
+        with closing(_connect(self.settings)) as connection:
             paths = [row[0] for row in connection.execute("SELECT path FROM file_membership WHERE repo='service' AND snapshot_sha=?", (sha,))]
         self.assertNotIn("a.mps", paths)
         self.assertEqual(sha, state["service"]["sha"])

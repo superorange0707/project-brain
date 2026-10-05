@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote
 
 from . import mps
@@ -262,7 +262,7 @@ def load_component(settings, generation=None) -> dict | None:
     if generation is None:
         return None
     component = generation.component("mps_models")
-    expected_ref = f"generations/generation-{generation.generation:06d}/mps_models.json"
+    expected_ref = str(Path("generations") / f"generation-{generation.generation:06d}" / "mps_models.json")
     if (component.get("status") != "ready" or component.get("artifact_ref") != expected_ref
             or canonical_atlas_identity(generation.manifest) != generation.identity):
         return None

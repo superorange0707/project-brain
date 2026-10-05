@@ -30,7 +30,11 @@ def archive(documents: dict[str, bytes]) -> bytes:
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as output:
         for name, source in documents.items():
-            output.writestr(name, source)
+            # Keep malformed member names intact even on Windows.
+            info = zipfile.ZipInfo("placeholder.mps")
+            info.filename = info.orig_filename = name
+            info.compress_type = zipfile.ZIP_DEFLATED
+            output.writestr(info, source)
     return stream.getvalue()
 
 
@@ -374,7 +378,7 @@ class MpsParserTests(unittest.TestCase):
         self.assertEqual(2, len(parsed["files"]))
         self.assertEqual(1, parsed["reference_counts"]["resolved"])
         self.assertIsNone(mps.project_from_attachment("other.zip", archive({"file.txt": b'hi'})))
-        for name in ("../escape.mps", "/absolute.mps", "C:/model.mps", "dir\\model.mps"):
+        for name in ("../escape.mps", "/absolute.mps", "C:/model.mps", "dir\\model.mps", "model.mps\0hidden.mps"):
             with self.subTest(name=name), self.assertRaisesRegex(mps.MpsError, "unsafe"):
                 mps.project_from_attachment("project.zip", archive({name: source}))
         with self.assertRaisesRegex(mps.MpsError, "duplicate"):
@@ -455,7 +459,7 @@ class MpsEvidenceTests(unittest.TestCase):
             self.assertIn("MPS structural navigation", content)
             self.assertIn('"resolved"', content)
             self.assertIn("not repository proof", content)
-            self.assertEqual(content, artifact.read_text())
+            self.assertEqual(content, artifact.read_text(encoding="utf-8"))
             self.assertEqual("waiting_for_ai", session_state(settings, "MPS-1")["status"])
             self.assertIn("MPS structural navigation", _external_evidence(settings, "MPS-1")[0].content)
 
