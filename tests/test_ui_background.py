@@ -21,7 +21,7 @@ from brain.ui import _ui_lock, serve_ui, start_ui, ui_instance
 class BackgroundUiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="brain background ")
-        self.addCleanup(self.temporary.cleanup)
+        self.addCleanup(self._cleanup_workspace)
         root = Path(self.temporary.name)
         (root / "service").mkdir()
         (root / "service" / "app.py").write_text("def hello(): return 'hello'\n", encoding="utf-8")
@@ -32,6 +32,18 @@ class BackgroundUiTest(unittest.TestCase):
         )
         self.settings = load_settings(self.config)
         self.instance = {"schema_version": 1, "port": 9876, "token": "a" * 43}
+
+    def _cleanup_workspace(self) -> None:
+        # Windows retains the onefile parent's log handle briefly after UI shutdown.
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                self.temporary.cleanup()
+                return
+            except PermissionError:
+                if os.name != "nt" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
 
     def test_cli_defaults_to_background_and_keeps_foreground_opt_in(self) -> None:
         for flags, expected in (([], "start_ui"), (["--foreground"], "serve_ui")):
