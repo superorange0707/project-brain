@@ -4,6 +4,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [1.0.31] - 2026-10-05
 
+- Build the optional MPS projection once per full refresh instead of repeating
+  its source scan before final publication.
 - Publish the private UI instance record before starting idle-refresh inventory,
   avoiding a startup file-replacement race. Wait for launchd to finish removing
   stopped jobs before reporting completion or reinstalling them. Exercise both

@@ -16,7 +16,7 @@ from brain.core import (BrainError, ContextBundle, SearchHit, _restore_checkpoin
                         parse_context_request, read_source, session_state, snapshot_indexes, start_session)
 from brain.investigation import _validated_prior_evidence_ids
 from brain.index import _connect, lexical_membership_identity
-from brain.ops import gc
+from brain.ops import gc, refresh_brain
 from brain.platforms import native_command
 from test_mps import model
 
@@ -90,6 +90,14 @@ class MpsRepositoryTests(unittest.TestCase):
         self.assertEqual(sha, state["service"]["sha"])
         snapshot_indexes(self.settings, changed_only=True)
         self.assertEqual(generation.generation, current_generation_ref(self.settings).generation)
+
+    def test_full_refresh_builds_and_publishes_mps_sources_once(self) -> None:
+        with mock.patch("brain.mps_index.build_component", wraps=mps_index.build_component) as built:
+            refresh_brain(self.settings, fetch=False, discover=False)
+        self.assertEqual(1, built.call_count)
+        generation = current_generation_ref(self.settings)
+        self.assertEqual("ready", generation.component("mps_models")["status"])
+        self.assertIn("FlowA", mps_index.read_source(self.settings, "service", "a.mps", generation))
 
     def test_v5_model_routes_direct_files_and_old_ticket_pin_survive_refresh_and_gc(self) -> None:
         self.commit_fixture()

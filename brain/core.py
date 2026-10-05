@@ -5781,19 +5781,21 @@ def snapshot_indexes(
         existing_generation = current_generation_ref(settings)
         from .mps_index import build_component, load_component, retain_aligned_component
 
-        mps_component = build_component(settings, state)
+        # Full refresh collects MPS once, together with the other final projections.
+        mps_component = build_component(settings, state) if publish else None
         backends = ["sqlite-fts5"] + (["zoekt"] if zoekt else [])
         snapshots = {
             name: str(item.get("sha") or "working-tree")
             for name, item in state.items()
             if isinstance(item, dict)
         }
-        mps_changed = mps_component.get("status") == "ready" and (
+        mps_changed = mps_component is not None and mps_component.get("status") == "ready" and (
             existing_generation is None
             or existing_generation.component("mps_models").get("content_hash") != mps_component.get("content_hash")
             or load_component(settings, existing_generation) is None
         )
-        mps_component = retain_aligned_component(settings, state, mps_component, existing_generation)
+        if mps_component is not None:
+            mps_component = retain_aligned_component(settings, state, mps_component, existing_generation)
         should_publish = publish and (
             updated
             or existing_generation is None
