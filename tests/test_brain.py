@@ -3954,7 +3954,7 @@ class SyntheticFanoutTest(unittest.TestCase):
             with mock.patch.object(core_module, "read_source", wraps=read_source) as reads:
                 bundle = retrieve_context(settings, request)
             verified_reads = [call for call in reads.call_args_list if call.kwargs.get("full")]
-            self.assertEqual(2, len(verified_reads))
+            self.assertEqual(2, len(verified_reads), bundle.trace)
             self.assertTrue(all(call.args[1].path == "Needle.java" for call in verified_reads))
 
         self.assertEqual(80, bundle.trace["requested_operations"])

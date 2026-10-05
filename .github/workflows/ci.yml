@@ -56,6 +56,15 @@ jobs:
           python -m unittest discover -s tests -p "test_mps*.py" -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_investigation_v1.py -k test_end_to_end_10_50_100_refresh_delta_and_retrieval_are_bounded -v
+      - name: Verify background and bounded retrieval paths
+        env:
+          PYTHONWARNINGS: error::ResourceWarning
+        run: |
+          python -m unittest discover -s tests -p test_ui_background.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_brain.py -k test_fifty_repository_repetitive_request_is_fused_routed_and_bounded -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_symbol_scope.py -k test_exact_error_requested_relations_deliver_bodies_without_a_symbol_followup -v
       - name: Run tests without WSL
         env:
           PYTHONWARNINGS: error::ResourceWarning

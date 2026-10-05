@@ -181,7 +181,7 @@ class BackgroundUiTest(unittest.TestCase):
                 if saved.get("last_refresh"):
                     break
                 time.sleep(0.1)
-            self.assertTrue(saved.get("last_refresh"), saved)
+            self.assertTrue(saved.get("last_refresh"), f"{saved}\n{(state / 'ui.log').read_text(encoding='utf-8')}")
             self.assertIsNotNone(current_generation_ref(self.settings))
             with patch("sys.stdout", new_callable=io.StringIO) as output:
                 start_ui(self.settings, port=0, open_browser=False)
