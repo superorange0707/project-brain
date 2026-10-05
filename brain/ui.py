@@ -728,7 +728,12 @@ class _Server(ThreadingHTTPServer):
             is_idle=self.operations.is_idle,
         )
         super().__init__(address, _Handler)
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        # The private instance record is published before serving. Starting the
+        # inventory scan in __init__ races its atomic temporary-file replacement.
         self.auto_refresh.start()
+        super().serve_forever(poll_interval=poll_interval)
 
     def _auto_refresh(self) -> Any:
         from .ops import refresh_brain

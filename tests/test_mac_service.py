@@ -122,6 +122,16 @@ class MacServiceTest(unittest.TestCase):
                 mac_service.service(self.settings, "install")
             launchctl.assert_not_called()
 
+    def test_install_preserves_registered_job_without_owned_definition(self) -> None:
+        with patch("brain.mac_service._require_macos"), \
+                patch("brain.mac_service.os.getuid", return_value=501, create=True), \
+                patch("brain.mac_service._loaded", return_value=True), \
+                patch("brain.mac_service._launchctl") as launchctl:
+            with self.assertRaisesRegex(BrainError, "definition is missing.*preserved"):
+                mac_service.service(self.settings, "install")
+            launchctl.assert_not_called()
+            self.assertFalse(self.agent.exists())
+
     def test_stop_waits_for_record_cleanup_after_authenticated_shutdown(self) -> None:
         with patch("brain.mac_service.ui_instance", return_value={"running": True}) as request, \
                 patch("brain.mac_service._load_ui_instance", side_effect=[{"pid": 123}, None, None]), \
@@ -136,6 +146,19 @@ class MacServiceTest(unittest.TestCase):
                 patch("brain.mac_service.time.sleep"):
             with self.assertRaisesRegex(BrainError, "still stopping.*preserved"):
                 mac_service._stop(self.settings)
+
+    def test_bootout_waits_for_launchd_removal_and_reports_timeout(self) -> None:
+        with patch("brain.mac_service._launchctl") as command, \
+                patch("brain.mac_service._loaded", side_effect=[True, False]) as loaded, \
+                patch("brain.mac_service.time.sleep"):
+            mac_service._bootout("gui/501/test")
+            command.assert_called_once_with("bootout", "gui/501/test")
+            self.assertEqual(2, loaded.call_count)
+        with patch("brain.mac_service._launchctl"), \
+                patch("brain.mac_service._loaded", return_value=True), \
+                patch("brain.mac_service.time.monotonic", side_effect=[0, 16]):
+            with self.assertRaisesRegex(BrainError, "still removing"):
+                mac_service._bootout("gui/501/test")
 
     def test_homebrew_command_keeps_stable_link_across_versions(self) -> None:
         executable = self.root / "Cellar" / "project-brain" / "1.0.28" / "bin" / "brain"

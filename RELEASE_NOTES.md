@@ -1,4 +1,4 @@
-# Project Brain v1.0.29 — Mac Background Service and MPS Ticket Delivery
+# Project Brain v1.0.30 — Mac Background Service and MPS Ticket Delivery
 
 Brain can now run independently of Terminal and the browser. On macOS, an
 optional per-workspace login service starts Brain when you sign in and restarts
@@ -39,7 +39,7 @@ brain service status
 brain ui
 ```
 
-The version must be `brain 1.0.29`. Run the service commands from your initialized
+The version must be `brain 1.0.30`. Run the service commands from your initialized
 Brain workspace. Keep **Auto Refresh: When idle** enabled. Terminal and browser
 can then be closed; sleep pauses processing and logout stops the user service.
 `brain service stop` stops safely while idle and preserves login startup;

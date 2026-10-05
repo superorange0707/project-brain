@@ -15,7 +15,7 @@ from brain.catalog import current_generation_ref
 from brain.cli import main
 from brain.core import BrainError, load_settings
 from brain.platforms import process_group_kwargs
-from brain.ui import _ui_lock, serve_ui, start_ui, ui_instance
+from brain.ui import _load_ui_instance, _ui_lock, serve_ui, start_ui, ui_instance
 
 
 class BackgroundUiTest(unittest.TestCase):
@@ -53,6 +53,18 @@ class BackgroundUiTest(unittest.TestCase):
                 chosen.assert_called_once()
                 self.assertEqual({"port": 0, "open_browser": False}, chosen.call_args.kwargs)
                 other.assert_not_called()
+
+    def test_auto_refresh_starts_after_private_instance_publication(self) -> None:
+        with patch("brain.auto_refresh.AutoRefreshService") as scheduler, \
+                patch("brain.ui.ThreadingHTTPServer.__init__", autospec=True) as initialize, \
+                patch("brain.ui.ThreadingHTTPServer.serve_forever"), \
+                patch("brain.ui.ThreadingHTTPServer.server_close"), patch("builtins.print"):
+            initialize.side_effect = lambda server, address, handler: setattr(server, "server_address", address)
+            scheduler.return_value.start.side_effect = lambda: self.assertIsNotNone(_load_ui_instance(self.settings))
+            serve_ui(self.settings, port=9876, open_browser=False)
+            scheduler.return_value.start.assert_called_once()
+            scheduler.return_value.stop.assert_called_once()
+        self.assertIsNone(_load_ui_instance(self.settings))
 
     def test_reopen_and_uncertain_health_never_launch_a_competing_process(self) -> None:
         record = self.settings.state_dir / "ui-instance.json"

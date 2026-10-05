@@ -76,8 +76,12 @@ jobs:
           brain --version
 
   standalone-smoke:
-    name: Standalone macOS arm64
-    runs-on: macos-latest
+    name: Standalone macOS (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
         with:

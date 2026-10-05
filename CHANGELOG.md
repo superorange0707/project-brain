@@ -2,8 +2,12 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.29] - 2026-10-05
+## [1.0.30] - 2026-10-05
 
+- Publish the private UI instance record before starting idle-refresh inventory,
+  avoiding a startup file-replacement race. Wait for launchd to finish removing
+  stopped jobs before reporting completion or reinstalling them. Exercise both
+  Apple Silicon and Intel macOS standalone lifecycle paths in CI.
 - Start `brain ui` in a detached local process so closing the terminal or browser
   does not stop idle refresh. Reuse the existing status/reopen/safe-stop commands;
   retain `--foreground` for diagnostics and save background output to `state/ui.log`.
@@ -27,6 +31,11 @@ All notable changes are documented here. This project follows Semantic Versionin
   AI delivery guidance. Distinguish saved plans from supplied change blocks;
   neither claims that changes were applied or tests passed. Regenerate the M365
   Agent Kit to receive the updated instructions.
+
+## [1.0.29] - Unpublished candidate
+
+- Withheld after remote release validation exposed asynchronous launchd removal
+  and an initial idle-refresh startup race. v1.0.30 includes the corrections.
 
 ## [1.0.28] - 2026-09-28
 

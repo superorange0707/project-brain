@@ -63,6 +63,15 @@ def _loaded(target: str) -> bool:
     return result.returncode == 0
 
 
+def _bootout(target: str) -> None:
+    _launchctl("bootout", target)
+    deadline = time.monotonic() + 15
+    while _loaded(target):
+        if time.monotonic() >= deadline:
+            raise BrainError("macOS is still removing the stopped service; retry shortly.")
+        time.sleep(0.1)
+
+
 def _stable_executable(executable: str) -> str:
     """Retain an installed command symlink rather than pinning a Homebrew Cellar version."""
     if not getattr(sys, "frozen", False):
@@ -155,6 +164,8 @@ def service(settings: Settings, action: str, *, port: int | None = None) -> dict
         definition = _definition(settings)
         loaded = _loaded(target)
         if action == "install":
+            if definition is None and loaded:
+                raise BrainError("The service definition is missing; the registered job was preserved.")
             # Explicit installation can take over a detached UI, but never interrupt work.
             installed_port = int(definition["ProgramArguments"][-1]) if definition else 8765
             desired = _plist(settings, installed_port if port is None else port)
@@ -162,7 +173,7 @@ def service(settings: Settings, action: str, *, port: int | None = None) -> dict
                 _stop(settings)
                 with _ui_lock(settings, "ui-server.lock"):
                     if loaded:
-                        _launchctl("bootout", target)
+                        _bootout(target)
                     with _ui_log(settings):
                         pass  # Create a private log before launchd opens its output paths.
                     atomic_managed_bytes_write(path.parent, path, plistlib.dumps(desired))
@@ -191,7 +202,7 @@ def service(settings: Settings, action: str, *, port: int | None = None) -> dict
             if definition is not None:
                 with _ui_lock(settings, "ui-server.lock"):
                     if loaded:
-                        _launchctl("bootout", target)
+                        _bootout(target)
                     if action == "uninstall":
                         _definition(settings)  # Recheck ownership before removing our one plist.
                         path.unlink()
