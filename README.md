@@ -58,9 +58,10 @@ brain ui
 Homebrew installs a prebuilt package; it does not compile Python or require
 Xcode. Existing workspaces, model packs, caches, Atlas generations, and ticket
 sessions are preserved during upgrades. Finish active refresh or retrieval work
-before stopping the UI. This patch fixes idle refresh and live UI status without
-changing index formats or model inputs; upgrading alone needs no manual refresh
-or re-embedding. See the
+before stopping the UI. Run **Refresh Brain** once after upgrading so new tickets
+receive the richer MPS discovery metadata. Existing tickets keep their pinned
+generations; no model-pack reinstall, ticket reset or re-embedding is required.
+See the
 [release upgrade notes](https://github.com/superorange0707/project-brain/releases/tag/v1.0.33).
 
 ### Windows 11 x64
