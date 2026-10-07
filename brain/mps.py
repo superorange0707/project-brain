@@ -53,6 +53,28 @@ def _node_label(node: dict) -> str:
                 node["concept"].get("name") or node["key"])
 
 
+def _search_terms(value: str) -> set[str]:
+    from .atlas import _tokens
+
+    # Bound discovery work on code/comment properties; exact anchors read the rest.
+    return ({value.casefold(), re.sub(r"[\s_$./-]+", "", value).casefold()}
+            if len(value.encode()) <= 256 else set()) | _tokens(value[:256])
+
+
+def _query_matches(query: str, terms: set[str]) -> bool:
+    from .investigation import _compound_terms
+
+    tokens = _compound_terms(query[:256])
+    compact = re.sub(r"[\s_$./-]+", "", query).casefold()
+    # Do not drop short differentiators: FlowA/FlowB and flow A/flow B differ.
+    return query.casefold() in terms or compact in terms or bool(tokens) and "".join(tokens) == compact and set(tokens) <= terms
+
+
+def _node_search_values(node: dict) -> list[str]:
+    return [_node_label(node), str(node["concept"].get("name") or ""),
+            *(str(prop["value"]) for prop in node["properties"] if prop.get("value") is not None)]
+
+
 def _language_id(value: str | None) -> str | None:
     if value is None or re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value) is None:
         return None
@@ -247,6 +269,16 @@ def definition_anchors(project: dict, selected: list[tuple[str, str]]) -> dict:
     return {"bindings": result, "omitted_uses": len(seen_uses) - len(uses)}
 
 
+def _node_location(model: dict, node: dict) -> dict:
+    return {"path": model["path"], "model_ref": model["reference"], "node_id": node["id"],
+            "model_identity": model["identity"],
+            "key": node["key"], "concept": node["concept"].get("name"), "label": _node_label(node),
+            "concept_identity": node["concept"], "sha256": model["sha256"],
+            "anchor": f"{model['path']}#{node['key']}",
+            "parent_anchor": f"{model['path']}#{node['parent']}" if node["parent"] is not None else None,
+            "line_start": node["line_start"], "line_end": node["line_end"]}
+
+
 def model_connections(project: dict) -> dict:
     """Lift explicit references to their enclosing model roots, preserving callsites.
 
@@ -259,14 +291,6 @@ def model_connections(project: dict) -> dict:
     owners: dict[tuple[str, str], tuple[str, str]] = {}
     roots: dict[tuple[str, str], dict] = {}
 
-    def location(model: dict, node: dict) -> dict:
-        return {"path": model["path"], "model_ref": model["reference"], "node_id": node["id"],
-                "model_identity": model["identity"],
-                "key": node["key"], "concept": node["concept"].get("name"), "label": _node_label(node),
-                "concept_identity": node["concept"], "sha256": model["sha256"],
-                "anchor": f"{model['path']}#{node['key']}",
-                "line_start": node["line_start"], "line_end": node["line_end"]}
-
     for path, model in models.items():
         for node in model["nodes"]:  # Parser order is parent before children.
             key = (path, node["key"])
@@ -275,7 +299,7 @@ def model_connections(project: dict) -> dict:
                 persistent[(path, node["id"])] = node
             owners[key] = owners[(path, node["parent"])] if node["parent"] is not None else key
             if owners[key] == key:
-                roots[key] = location(model, node)
+                roots[key] = _node_location(model, node)
     connections = []
     omitted = 0
     for path, model in models.items():
@@ -296,11 +320,11 @@ def model_connections(project: dict) -> dict:
                     current = nodes[(path, current["parent"])]
                 connections.append({
                     "identity": hashlib.sha256(json.dumps([path, node["key"], ref["line"], ref["serialized"]], sort_keys=True).encode()).hexdigest(),
-                    "source_root": roots[source_root], "source_node": location(model, node),
+                    "source_root": roots[source_root], "source_node": _node_location(model, node),
                     "containment_path": list(reversed(ancestry)), "role": ref["role"], "line": ref["line"],
                     "status": ref["status"], "scope": ref.get("scope"), "serialized": ref["serialized"],
                     "target_model": ref.get("target_model"), "target_node_id": ref.get("target_node"),
-                    "target_node": location(models[ref["target_path"]], target) if target is not None else None,
+                    "target_node": _node_location(models[ref["target_path"]], target) if target is not None else None,
                     "target_root": roots[target_root] if target_root is not None else None,
                     "within_root": source_root == target_root,
                 })
@@ -310,7 +334,12 @@ def model_connections(project: dict) -> dict:
 
 def trace_model_connections(project: dict, queries: list[str], *, direction: str = "outgoing", depth: int = MAX_TRACE_DEPTH,
                             query_paths: dict[str, set[str]] | None = None) -> dict:
-    """Bounded multi-root navigation and reverse impact, with continuation anchors."""
+    """Trace actual node subtrees and precise reverse caller scopes.
+
+    A jump into an internal node does not select its unrelated siblings. Shared
+    targets retain every incoming connection, but expand once, without claiming
+    execution paths. Exact node anchors may end in #refs:offset to page edges.
+    """
     if direction not in {"outgoing", "incoming"} or not 1 <= depth <= MAX_TRACE_DEPTH:
         raise MpsError("MPS trace requires outgoing/incoming direction and depth 1..8")
     graph = model_connections(project)
@@ -321,70 +350,152 @@ def trace_model_connections(project: dict, queries: list[str], *, direction: str
         if origin is not None:
             by_root.setdefault((origin["path"], origin["key"]), []).append(connection)
     wanted = {query.strip() for query in queries[:16] if query.strip()}
-    seed_keys = set()
+    query_specs = {}
+    for query in wanted:
+        base, marker, offset = query.rpartition("#refs:")
+        if not marker:
+            query_specs[query] = (query, 0)
+        elif re.fullmatch(r"[0-9]{1,5}", offset) and int(offset) <= MAX_CONNECTIONS:
+            query_specs[query] = (base, int(offset))
+    nodes = {}
+    owners = {}
+    positions = {}
+    ends = {}
+    seed_scopes = set()
+    exact_scopes = set()
     matched_nodes = []
     matched_count = 0
-    query_roots: dict[str, set[tuple[str, str]]] = {}
+    query_nodes: dict[str, set[tuple[str, str]]] = {}
     for model in project["files"]:
-        owner = {}
-        for node in model.get("nodes", []):
-            owner[node["key"]] = owner[node["parent"]] if node["parent"] is not None else node["key"]
-            identities = {model["path"], model["reference"], f"{model['path']}#{node['key']}"}
-            if model["identity"] is not None:
-                identities.add(model["identity"])
+        model_identities = {model["path"], model.get("reference")}
+        if model.get("identity") is not None:
+            model_identities.add(model["identity"])
+        for position, node in enumerate(model.get("nodes", [])):
+            key = model["path"], node["key"]
+            nodes[key] = (model, node)
+            positions[key] = ends[key] = position
+            owners[key] = owners[(model["path"], node["parent"])] if node["parent"] is not None else key
+            identities = {f"{model['path']}#{node['key']}"}
             if node["id"] is not None:
                 identities.add(f"{model['reference']}#{node['id']}")
                 if model["identity"] is not None:
                     identities.add(f"{model['identity']}#{node['id']}")
-            names = {_node_label(node).casefold(), str(node["concept"].get("name") or "").casefold()}
-            matches = {query for query in wanted if (query_paths is None or model["path"] in query_paths.get(query, set()))
-                       and (query in identities or query.casefold() in names)}
+            # Model identity/path matches select the model explicitly above;
+            # their tokens cannot make every sibling root a node-name match.
+            values = _node_search_values(node)
+            candidate_terms = [_search_terms(value) for value in values]
+            matches = {query for query, (base, _) in query_specs.items()
+                       if (query_paths is None or model["path"] in query_paths.get(query, set()))
+                       and (base in identities or (query == base and (base in model_identities
+                            or ("#" not in base and PurePosixPath(base).suffix.lower() not in MODEL_SUFFIXES
+                                and any(_query_matches(base, terms) for terms in candidate_terms)))))}
             if matches:
-                root_key = (model["path"], owner[node["key"]])
-                seed_keys.add(root_key)
                 matched_count += 1
                 for query in matches:
-                    query_roots.setdefault(query, set()).add(root_key)
+                    base, offset = query_specs[query]
+                    scope = key if base in identities else owners[key]
+                    seed_scopes.add((scope, offset))
+                    if base in identities:
+                        exact_scopes.add((scope, offset))
+                    query_nodes.setdefault(query, set()).add(scope if base in model_identities else key)
                 if len(matched_nodes) < MAX_TRACE_ROOTS:
                     matched_nodes.append({"path": model["path"], "key": node["key"], "node_id": node["id"],
                                           "anchor": f"{model['path']}#{node['key']}", "line": node["line_start"]})
+        # Preorder intervals allow exact subtree filtering without rescanning
+        # every ancestor for every connection.
+        for node in reversed(model.get("nodes", [])):
+            if node["parent"] is not None:
+                parent = model["path"], node["parent"]
+                ends[parent] = max(ends[parent], ends[model["path"], node["key"]])
+    exact_roots = {owners[key] for key, _ in exact_scopes}
+    seed_scopes = {item for item in seed_scopes if item in exact_scopes or owners[item[0]] not in exact_roots}
+    ordered_scopes = sorted(seed_scopes, key=lambda item: (item[0][0], positions[item[0]], item[1]))
+    # A selected ancestor already covers zero-offset child selections.
+    selected = {key for key, offset in ordered_scopes if not offset}
+    scopes = []
+    for key, offset in ordered_scopes:
+        parent = nodes[key][1]["parent"]
+        while parent is not None and (key[0], parent) not in selected:
+            parent = nodes[key[0], parent][1]["parent"]
+        if offset or parent is None:
+            scopes.append((key, offset))
+    selected_roots = {owners[key] for key, _ in scopes}
+    seed_keys = {owners[key] for key, _ in scopes[:MAX_TRACE_ROOTS]}
     seeds = [key for key in roots if key in seed_keys]
-    queue = deque((key, 0) for key in seeds[:MAX_TRACE_ROOTS])
-    seen = set(key for key, _ in queue)
+    queue = deque((key, offset, 0, None) for key, offset in scopes[:MAX_TRACE_ROOTS])
+    seen = {key for key, _, _, _ in queue}
+    seen_roots = {owners[key] for key in seen}
     steps = []
+    emitted = set()
     frontier = []
-    truncated = bool(graph["omitted_connections"] or len(seeds) > MAX_TRACE_ROOTS or len(queries) > 16)
+    truncated = bool(graph["omitted_connections"] or len(scopes) > MAX_TRACE_ROOTS or len(queries) > 16)
+
+    def continuation(key: tuple[str, str], reason: str, offset: int = 0, remaining: int = 0) -> dict:
+        location = _node_location(*nodes[key])
+        return {**location, "reason": reason, "direction": direction, "remaining_connections": remaining,
+                "root_anchor": roots[owners[key]]["anchor"],
+                "continuation_kind": "connection_page" if reason == "branch_limit" else "refocus",
+                "continuation_anchor": location["anchor"] + (f"#refs:{offset}" if offset else "")}
+
+    def covered(key: tuple[str, str]) -> bool:
+        while key not in seen:
+            parent = nodes[key][1]["parent"]
+            if parent is None:
+                return False
+            key = key[0], parent
+        return True
+
     while queue:
-        key, hops = queue.popleft()
-        edges = by_root.get(key, [])
+        key, offset, hops, via = queue.popleft()
+        origin = "source_node" if direction == "outgoing" else "target_node"
+        edges = []
+        for edge in by_root.get(owners[key], []):
+            node_key = edge[origin]["path"], edge[origin]["key"]
+            if (positions[key] <= positions[node_key] <= ends[key]
+                    or direction == "incoming" and positions[node_key] <= positions[key] <= ends[node_key]):
+                edges.append(edge)
         if hops >= depth:
-            if edges:
-                frontier.append(roots[key])
+            if len(edges) > offset:
+                frontier.append(continuation(key, "depth_limit", offset, len(edges) - offset))
                 truncated = True
             continue
-        if len(edges) > MAX_TRACE_BRANCH:
-            frontier.append(roots[key])
+        if len(edges) > offset + MAX_TRACE_BRANCH:
+            frontier.append(continuation(key, "branch_limit", offset + MAX_TRACE_BRANCH,
+                                         len(edges) - offset - MAX_TRACE_BRANCH))
             truncated = True
-        for connection in edges[:MAX_TRACE_BRANCH]:
-            neighbor = connection["target_root"] if direction == "outgoing" else connection["source_root"]
+        for index, connection in enumerate(edges[offset:offset + MAX_TRACE_BRANCH], offset):
+            if connection["identity"] in emitted:
+                continue
+            emitted.add(connection["identity"])
+            neighbor = connection["target_node"] if direction == "outgoing" else connection["source_node"]
             neighbor_key = (neighbor["path"], neighbor["key"]) if neighbor is not None else None
-            revisit = neighbor_key in seen if neighbor_key is not None else False
-            steps.append({**connection, "depth": hops, "direction": direction, "revisited_root": revisit})
+            revisit = covered(neighbor_key) if neighbor_key is not None else False
+            origin_key = connection[origin]["path"], connection[origin]["key"]
+            relation = "exact_node" if origin_key == key else "ancestor_context" if (
+                direction == "incoming" and positions[origin_key] < positions[key]) else "descendant_node"
+            steps.append({**connection, "depth": hops, "direction": direction, "revisited_node": revisit,
+                          "revisited_root": owners[neighbor_key] in seen_roots if neighbor_key is not None else False,
+                          "traversal_anchor": f"{key[0]}#{key[1]}", "via_connection": via,
+                          "scope_relation": relation,
+                          "resume_anchor": f"{key[0]}#{key[1]}#refs:{index}"})
             if neighbor_key is not None and not revisit:
                 if len(seen) >= MAX_TRACE_ROOTS:
-                    frontier.append(neighbor)
+                    frontier.append(continuation(neighbor_key, "node_limit"))
                     truncated = True
                 else:
                     seen.add(neighbor_key)
-                    queue.append((neighbor_key, hops + 1))
+                    seen_roots.add(owners[neighbor_key])
+                    queue.append((neighbor_key, 0, hops + 1, connection["identity"]))
     return {"seeds": [roots[key] for key in seeds[:MAX_TRACE_ROOTS]], "matched_nodes": matched_nodes,
-            "omitted_seed_roots": max(0, len(seeds) - MAX_TRACE_ROOTS),
+            "omitted_seed_roots": len(selected_roots - seed_keys),
+            "omitted_seed_nodes": max(0, len(scopes) - MAX_TRACE_ROOTS),
             "omitted_matches": matched_count - len(matched_nodes),
-            "ambiguous_queries": [query for query in sorted(query_roots) if len(query_roots[query]) > 1],
-            "unmatched_queries": sorted(wanted - query_roots.keys()), "steps": steps,
-            "frontier": list({(root["path"], root["key"]): root for root in frontier}.values()),
+            "ambiguous_queries": [query for query in sorted(query_nodes) if len(query_nodes[query]) > 1],
+            "unmatched_queries": sorted(wanted - query_nodes.keys()), "steps": steps,
+            "frontier": list({item["continuation_anchor"]: item for item in frontier}.values()),
             "truncated": truncated, "omitted_connections": graph["omitted_connections"], "semantics": graph["semantics"],
-            "bounds": {"depth": depth, "branch": MAX_TRACE_BRANCH, "roots": MAX_TRACE_ROOTS}}
+            "traversal_semantics": "Outgoing jumps expand the actual target-node subtree. Incoming impact includes usages of that subtree and its enclosing nodes, then follows precise caller-node scopes. Shared subtrees expand once; via_connection records one discovery chain, not all execution paths.",
+            "bounds": {"depth": depth, "branch": MAX_TRACE_BRANCH, "roots": MAX_TRACE_ROOTS, "node_scopes": MAX_TRACE_ROOTS}}
 
 
 class MpsError(ValueError):
@@ -774,10 +885,12 @@ def focused_navigation(documents: dict[str, bytes], queries: list[str], *, incom
               "file_statuses": list(source_files.values()),
               "source_only_semantics": "Descriptors and unsupported files provide declaration/raw source only; no model flow is established." if source_files else None,
               "semantics": trace["semantics"], "bounds": trace["bounds"],
+              "traversal_semantics": trace["traversal_semantics"],
               "seeds": trace["seeds"][:16], "matched_nodes": trace["matched_nodes"][:16],
               "steps": [], "frontier": trace["frontier"][:16],
               "truncated": bool(trace["truncated"] or trace["omitted_matches"] or len(trace["seeds"]) > 16 or len(trace["matched_nodes"]) > 16),
               "omitted_seed_roots": trace["omitted_seed_roots"] + max(0, len(trace["seeds"]) - 16),
+              "omitted_seed_nodes": trace["omitted_seed_nodes"],
               "ambiguous_queries": trace["ambiguous_queries"],
               "unmatched_queries": [query for query in trace["unmatched_queries"] if not any(
                   query == f"{path}#lines:{start}-{end}" for path, start, end in requested_regions) and query not in source_files],
@@ -786,7 +899,7 @@ def focused_navigation(documents: dict[str, bytes], queries: list[str], *, incom
               "unrendered_frontier_roots": max(0, len(trace["frontier"]) - 16),
               "definition_anchors": [], "omitted_definition_anchors": 0,
               "source_regions": [], "omitted_source_regions": 0,
-              "selection": "Names return all matching candidates; an exact path/node anchor disambiguates them. Source regions are bounded windows."}
+              "selection": "Names return root candidates; exact path/node anchors take precedence in the same root and select node subtrees. #refs:offset pages connections in the same direction and pinned source. Depth/node refocus anchors start a new bounded traversal. Source regions are bounded windows."}
 
     def encoded() -> str:
         return json.dumps(result, ensure_ascii=True, indent=2)
@@ -795,7 +908,8 @@ def focused_navigation(documents: dict[str, bytes], queries: list[str], *, incom
     # every registry entry and XML attribute in both graph and source regions.
     def compact(edge: dict) -> dict:
         return {key: edge[key] for key in ("identity", "source_root", "source_node", "target_root", "target_node",
-                                          "role", "line", "status", "within_root", "depth", "revisited_root")}
+                                          "containment_path", "role", "line", "status", "within_root", "depth", "direction",
+                                          "revisited_root", "revisited_node", "traversal_anchor", "via_connection", "scope_relation", "resume_anchor")}
 
     locations = [(item["path"], max(1, item["line"] - 3), item["line"] + 16)
                  for item in trace["matched_nodes"][:16]]
@@ -804,6 +918,8 @@ def focused_navigation(documents: dict[str, bytes], queries: list[str], *, incom
         result["steps"].append(compact(edge))
         if len(encoded().encode()) > MAX_SUMMARY_BYTES // 2:
             result["steps"].pop()
+            result["next_step_anchor"] = edge["resume_anchor"]
+            result["next_step_direction"] = edge["direction"]
             result["truncated"] = True
             break
         result["unrendered_steps"] -= 1
@@ -850,8 +966,13 @@ def focused_navigation(documents: dict[str, bytes], queries: list[str], *, incom
     # A single long model label/property can exceed the route budget before any
     # step is added. Return the exact focused anchor, without a clipped identity.
     if len(encoded().encode()) > MAX_SUMMARY_BYTES:
-        return json.dumps({"format": result["format"], "truncated": True,
-                           "reason": "MPS anchors exceed the focused navigation byte limit"})
+        fallback = {"format": result["format"], "route_status": result["route_status"], "truncated": True,
+                    "unrendered_steps": len(trace["steps"]),
+                    "reason": "MPS identities exceed the focused navigation byte limit; request exact source lines"}
+        anchor = trace["steps"][0]["resume_anchor"] if trace["steps"] else None
+        if anchor and len(json.dumps({**fallback, "next_step_anchor": anchor}).encode()) < MAX_SUMMARY_BYTES - 100:
+            fallback.update(next_step_anchor=anchor, next_step_direction="incoming" if incoming else "outgoing")
+        return json.dumps(fallback)
     return encoded()
 
 

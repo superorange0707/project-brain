@@ -1127,10 +1127,12 @@ class Routes {
             ("Find HTTPClient and parseHTTPResponse.", ["HTTPClient", "parseHTTPResponse"]),
             ("Find EligibilityAdaptor behavior", ["EligibilityAdaptor"]),
             ("Inspect API_TIMEOUT", ["API_TIMEOUT"]),
+            ("Inspect PE", ["PE"]),
             ("invoice cancellation", ["invoice", "cancellation"]),
         ):
             with self.subTest(objective=objective):
                 self.assertEqual(expected, objective_terms(objective))
+        self.assertEqual([], objective_terms("Inspect PE", allow_prose=False))
 
     def test_method_references_cannot_hide_the_implementation_at_repository_scale(self) -> None:
         from dataclasses import replace

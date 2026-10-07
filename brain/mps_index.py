@@ -11,8 +11,8 @@ from . import mps
 from .platforms import atomic_managed_text_write, read_managed_bytes, read_managed_text
 
 SCHEMA_VERSION = "mps-models-v1"
-PARSER_VERSION = "mps-v9-v1"
-SUPPORTED_PARSERS = {"mps-v9-v1"}
+PARSER_VERSION = "mps-v9-v2"
+SUPPORTED_PARSERS = {"mps-v9-v1", "mps-v9-v2"}
 MAPPING_PATH = "mps-flow-mappings.json"
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 
@@ -144,11 +144,14 @@ def build_component(settings, state: dict) -> dict:
                                  for item in files if is_model_path(item["path"])})
     for entry in project["files"]:
         for node in entry.get("nodes", []):
-            for term in (mps._node_label(node), str(node["concept"].get("name") or ""), str(entry.get("reference") or ""), str(entry.get("identity") or "")):
-                if len(term.encode()) > 256 or len(terms) >= 4096 and term.casefold() not in terms:
+            for value in mps._node_search_values(node) + [str(entry.get("reference") or ""), str(entry.get("identity") or ""), entry["path"]]:
+                if len(value.encode()) > 256:
                     discovery_complete = False
-                elif term:
-                    terms.add(term.casefold())
+                for term in sorted(mps._search_terms(value)):
+                    if len(term.encode()) > 256 or len(terms) >= 4096 and term not in terms:
+                        discovery_complete = False
+                    elif term:
+                        terms.add(term)
     payload = {"schema_version": SCHEMA_VERSION, "parser_version": PARSER_VERSION,
                "snapshots": snapshots, "files": files, "limitations": limitations,
                "discovery_terms": sorted(terms), "discovery_complete": discovery_complete}
@@ -299,7 +302,7 @@ def may_match(generation, request: dict) -> bool:
     values.extend(item.get("value", "") for item in request.get("anchors") or [] if item.get("kind") in {"symbol", "file_hint"})
     terms = set(details.get("discovery_terms") or [])
     return any(is_model_path(value.partition("#")[0]) or "#id:" in value or "#lines:" in value
-               or value.casefold() in terms for value in map(_query_value, values)) or details.get("discovery_complete") is False
+               or mps._query_matches(value, terms) for value in map(_query_value, values)) or details.get("discovery_complete") is False
 
 
 def navigation(settings, request: dict, *, deadline: float | None = None) -> tuple[dict | None, list]:
@@ -313,6 +316,7 @@ def navigation(settings, request: dict, *, deadline: float | None = None) -> tup
     queries = []
     query_paths = {}
     scope = request.get("repos") or []
+    terms = set(payload["discovery_terms"])
 
     def add_query(value: str, repos: list[str]) -> None:
         if not value.strip():
@@ -335,11 +339,12 @@ def navigation(settings, request: dict, *, deadline: float | None = None) -> tup
     for value in request.get("paths") or []:
         repos = value.get("repos") or ([str(value["repo"])] if value.get("repo") else scope) if isinstance(value, dict) else scope
         add_query(_query_value(value), repos)
-    if not queries:
-        terms = set(payload["discovery_terms"])
+    # Exact model reads stay focused. Generic code anchors must not suppress
+    # model candidates derived from the same ordinary objective/search request.
+    if not any(is_model_path(query.partition("#")[0]) or "#id:" in query or "#lines:" in query for query in queries):
         for value in request.get("searches") or []:
             query = _query_value(value)
-            if query.casefold() in terms or is_model_path(query.partition("#")[0]) or not payload["discovery_complete"]:
+            if mps._query_matches(query, terms) or is_model_path(query.partition("#")[0]) or not payload["discovery_complete"]:
                 add_query(query, value.get("repos") or scope if isinstance(value, dict) else scope)
     from .core import _ACTIVE_RETRIEVAL_CACHE
     cache = _ACTIVE_RETRIEVAL_CACHE.get()
@@ -349,7 +354,12 @@ def navigation(settings, request: dict, *, deadline: float | None = None) -> tup
         project = mps.parse_project(documents, deadline=deadline)
         if cache is not None:
             cache[key] = project
-    rendered = mps.focused_navigation(documents, list(dict.fromkeys(queries))[:16], incoming=request.get("mode") == "impact_analysis", query_paths=query_paths, deadline=deadline, project=project)
+    # Preserve explicit model focus, then known model candidates before generic
+    # code queries; many code anchors must not exhaust the 16-query model budget.
+    queries = list(dict.fromkeys(queries))
+    queries.sort(key=lambda query: 0 if is_model_path(query.partition("#")[0]) or "#id:" in query or "#lines:" in query
+                 else 1 if mps._query_matches(query, terms) else 2)
+    rendered = mps.focused_navigation(documents, queries, incoming=request.get("mode") == "impact_analysis", query_paths=query_paths, deadline=deadline, project=project)
     if rendered is None:
         return None, []
     result = json.loads(rendered)
@@ -400,18 +410,27 @@ def navigation(settings, request: dict, *, deadline: float | None = None) -> tup
 
 def _bound_navigation(result: dict, limit: int) -> None:
     """Preserve complete JSON and exact identities, with explicit omissions."""
-    for field, counter in (("limitations", "omitted_limitations"), ("file_statuses", "omitted_file_statuses"), ("steps", "unrendered_steps"),
-                           ("definition_anchors", "omitted_definition_anchors"), ("source_regions", "omitted_source_regions"),
-                           ("frontier", "unrendered_frontier_roots"), ("matched_nodes", "omitted_matches"), ("seeds", "omitted_seed_roots")):
+    # Original source evidence travels separately. Trim repeated discovery and
+    # declaration metadata before losing the actual requested connections.
+    for field, counter in (("limitations", "omitted_limitations"), ("definition_anchors", "omitted_definition_anchors"),
+                           ("source_regions", "omitted_source_regions"), ("file_statuses", "omitted_file_statuses"),
+                           ("matched_nodes", "omitted_matches"), ("seeds", "omitted_seed_roots"),
+                           ("steps", "unrendered_steps"), ("frontier", "unrendered_frontier_roots")):
         while result.get(field) and len(json.dumps(result, ensure_ascii=True, indent=2).encode()) > limit:
-            result[field].pop()
+            omitted = result[field].pop()
+            if field == "steps":
+                result["next_step_anchor"] = omitted["resume_anchor"]
+                result["next_step_direction"] = omitted["direction"]
             result[counter] = result.get(counter, 0) + 1
             result["truncated"] = True
     if len(json.dumps(result, ensure_ascii=True, indent=2).encode()) > limit:
-        generation, identity = result.get("generation"), result.get("component_hash")
+        retained = {key: result[key] for key in ("generation", "component_hash", "route_status", "unrendered_steps") if key in result}
+        cursor = {key: result[key] for key in ("next_step_anchor", "next_step_direction") if key in result}
         result.clear()
-        result.update(format="mps-focused-navigation", generation=generation, component_hash=identity,
+        result.update(retained, format="mps-focused-navigation",
                       truncated=True, reason="Requested MPS identities exceed the navigation byte budget; request one exact model/node anchor")
+        if len(json.dumps({**result, **cursor}, ensure_ascii=True, indent=2).encode()) <= limit:
+            result.update(cursor)
 
 
 def _annotate_mappings(result: dict, payload: dict) -> None:

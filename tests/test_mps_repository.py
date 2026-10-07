@@ -160,6 +160,70 @@ class MpsRepositoryTests(unittest.TestCase):
         self.assertIn("FlowA", mps_index.read_source(self.settings, "service", "a.mps", old))
         self.assertIn("UPDATED_NONGIT", mps_index.read_source(self.settings, "service", "a.mps", new))
 
+    def test_three_repository_nested_flow_impact_and_duplicate_identity_keep_ticket_pin(self) -> None:
+        orchestration = self.root / "orchestration"
+        connector = self.root / "connector"
+        orchestration.mkdir()
+        connector.mkdir()
+        (self.repository / "b.mps").rename(orchestration / "b.mps")
+        (self.repository / "c.mps").rename(connector / "c.mps")
+        inner = (orchestration / "b.mps").read_bytes()
+        (orchestration / "b.mps").write_bytes(inner.replace(b'</node>\n</node>',
+            b'</node>\n<node concept="c" id="unrelated" role="h"><ref role="r" to="c:missing"/></node>\n</node>'))
+        caller = model("f:shared-caller", '<node concept="c" id="shared"><node concept="c" id="shared-call" role="h">'
+            '<ref role="r" to="b:inside"/></node></node>', '<import index="b" ref="f:b"/>')
+        (self.repository / "shared.mps").write_bytes(caller.replace(b'><', b'>\n<'))
+        with self.config.open("a") as stream:
+            stream.write("[[repositories]]\nname='orchestration'\npath='orchestration'\n"
+                         "[[repositories]]\nname='connector'\npath='connector'\n")
+        self.settings = load_settings(self.config)
+        snapshot_indexes(self.settings)
+        old = current_generation_ref(self.settings)
+        pinned = replace(self.settings, atlas_generation=old, atlas_generation_mode="pinned")
+        navigation, evidence = mps_index.navigation(pinned, {"symbols": ["FlowA"], "repos": ["service"]})
+        self.assertEqual(3, len(navigation["steps"]))
+        self.assertEqual({"service", "orchestration", "connector"}, {item.repo for item in evidence})
+        self.assertEqual("orchestration/b.mps#id:inside", navigation["steps"][0]["target_node"]["anchor"])
+        self.assertTrue(navigation["steps"][-1]["revisited_node"])
+        self.assertFalse(any(step["source_node"]["node_id"] == "unrelated" for step in navigation["steps"]))
+        impact, _ = mps_index.navigation(pinned, {"mode": "impact_analysis", "anchors": [
+            {"kind": "file_hint", "value": "orchestration/b.mps#id:inside"}]})
+        self.assertEqual({"call", "shared-call"}, {step["source_node"]["node_id"] for step in impact["steps"] if step["depth"] == 0})
+        start_session(self.settings, "MPS-CROSS-REPO", "Change the shared subflow")
+        (orchestration / "b.mps").write_bytes(inner.replace(
+            b'<ref role="r"', b'<property role="p" value="UPDATED_INNER"/>\n<ref role="r"'))
+        (connector / "b.mps").write_bytes(inner)
+        snapshot_indexes(self.settings, changed_only=True)
+        current = current_generation_ref(self.settings)
+        newer, _ = mps_index.navigation(replace(pinned, atlas_generation=current), {"symbols": ["FlowA"]})
+        self.assertEqual("ambiguous", newer["steps"][0]["status"])
+        self.assertIsNone(newer["steps"][0]["target_node"])
+        with mock.patch("brain.atlas.route", side_effect=AssertionError("exact cross-repo models avoid generic discovery")):
+            content, _, _ = create_context(self.settings, "MPS-CROSS-REPO", self.request(
+                anchors=[{"kind": "file_hint", "value": "service/a.mps#id:a"}]))
+        self.assertIn("orchestration/b.mps#id:inside", content)
+        self.assertNotIn("UPDATED_INNER", content)
+        state = session_state(self.settings, "MPS-CROSS-REPO")
+        self.assertEqual(old.identity, state["atlas_generation_id"])
+        self.assertEqual(3, len(state["request_history"][-1]["retrieval"]["trace"]["mps_navigation"]["steps"]))
+
+    def test_repository_context_byte_trim_resumes_exact_connections(self) -> None:
+        source = model("f:many", '<node concept="c" id="root">' + ''.join(
+            f'<node concept="c" id="call-{number}" role="h"><ref role="r" node="leaf"/></node>'
+            for number in range(20)) + '</node><node concept="c" id="leaf"/>').replace(b'><', b'>\n<')
+        (self.repository / "many.mps").write_bytes(source)
+        snapshot_indexes(self.settings)
+        generation = current_generation_ref(self.settings)
+        pinned = replace(self.settings, atlas_generation=generation, atlas_generation_mode="pinned", hard_context_chars=24_000)
+        first, _ = mps_index.navigation(pinned, {"anchors": [{"kind": "file_hint", "value": "service/many.mps#id:root"}]})
+        self.assertTrue(first["steps"])
+        self.assertIn("next_step_anchor", first)
+        self.assertEqual("outgoing", first["next_step_direction"])
+        second, _ = mps_index.navigation(pinned, {"anchors": [{"kind": "file_hint", "value": first["next_step_anchor"]}]})
+        self.assertTrue(second["steps"])
+        self.assertEqual(first["next_step_anchor"], second["steps"][0]["resume_anchor"])
+        self.assertFalse({step["identity"] for step in first["steps"]} & {step["identity"] for step in second["steps"]})
+
     def test_component_poisoning_rejected_and_same_sha_repaired_without_breaking_old_identity(self) -> None:
         self.commit_fixture()
         snapshot_indexes(self.settings)
@@ -204,9 +268,15 @@ class MpsRepositoryTests(unittest.TestCase):
 
     def test_parser_upgrade_republishes_and_failed_optional_refresh_retains_aligned_component(self) -> None:
         self.commit_fixture()
+        with mock.patch.object(mps_index, "PARSER_VERSION", "mps-v9-v1"):
+            snapshot_indexes(self.settings)
+        legacy = current_generation_ref(self.settings)
         snapshot_indexes(self.settings)
         old = current_generation_ref(self.settings)
-        with mock.patch.object(mps_index, "PARSER_VERSION", "mps-v9-v2"):
+        self.assertGreater(old.generation, legacy.generation)
+        self.assertEqual("mps-v9-v2", old.component("mps_models")["details"]["parser_version"])
+        self.assertIsNotNone(mps_index.load_component(self.settings, legacy))
+        with mock.patch.object(mps_index, "PARSER_VERSION", "mps-v9-v3"):
             snapshot_indexes(self.settings, changed_only=True)
             new = current_generation_ref(self.settings)
             self.assertGreater(new.generation, old.generation)
@@ -300,6 +370,69 @@ class MpsRepositoryTests(unittest.TestCase):
         trace = session_state(self.settings, "MPS-OBJECTIVE")["request_history"][-1]["retrieval"]["trace"]
         self.assertEqual(3, len(trace["mps_navigation"]["steps"]))
         self.assertIn('"node_id": "inside"', content)
+
+    def test_ordinary_mixed_code_and_model_query_returns_both_in_one_context(self) -> None:
+        (self.repository / "code.py").write_text("def unchanged_code():\n    return 1\n\ndef FlowA():\n    return 2\n")
+        snapshot_indexes(self.settings)
+        start_session(self.settings, "MPS-MIXED", "Trace code and model together")
+        with mock.patch("brain.mps.parse_project", wraps=mps_index.mps.parse_project) as parsed:
+            content, _, _ = create_context(self.settings, "MPS-MIXED", self.request(
+                objective="Trace FlowA alongside unchanged_code", anchors=[{"kind": "symbol", "value": "unchanged_code"}]))
+        self.assertEqual(1, parsed.call_count)
+        self.assertIn("MPS structural navigation", content)
+        self.assertIn("def unchanged_code()", content)
+        state = session_state(self.settings, "MPS-MIXED")
+        self.assertEqual({"a.mps", "b.mps", "c.mps", "code.py"}, {item["path"] for item in state["evidence_records"]})
+        trace = state["request_history"][-1]["retrieval"]["trace"]
+        self.assertFalse(trace.get("mps_only", False))
+        self.assertEqual(3, len(trace["mps_navigation"]["steps"]))
+        generation = current_generation_ref(self.settings)
+        pinned = replace(self.settings, atlas_generation=generation, atlas_generation_mode="pinned")
+        navigation, _ = mps_index.navigation(pinned, {"anchors": [
+            {"kind": "symbol", "value": f"ordinary_code_{index}"} for index in range(20)], "searches": ["FlowA"]})
+        self.assertEqual(3, len(navigation["steps"]))
+        self.assertEqual("a", navigation["matched_nodes"][0]["node_id"])
+        self.assertTrue(navigation["truncated"])
+        start_session(self.settings, "MPS-MIXED-EXACT", "Read a model node and code with the same name")
+        content, _, _ = create_context(self.settings, "MPS-MIXED-EXACT", self.request(
+            objective="Inspect FlowA", anchors=[{"kind": "file_hint", "value": "service/a.mps#id:a"},
+                                                {"kind": "symbol", "value": "FlowA"}]))
+        self.assertIn("def FlowA()", content)
+        self.assertIn("MPS structural navigation", content)
+        trace = session_state(self.settings, "MPS-MIXED-EXACT")["request_history"][-1]["retrieval"]["trace"]
+        self.assertFalse(trace.get("mps_only", False))
+
+    def test_ordinary_business_query_matches_property_and_unrelated_code_skips_models(self) -> None:
+        source = (self.repository / "a.mps").read_bytes().replace(b'name="name"', b'name="businessRule"').replace(b'FlowA', b'ApprovePayment')
+        source = source.replace(b'<node concept="c" id="call" role="h">',
+                                b'<node concept="c" id="call" role="h"><property role="p" value="PE"/>')
+        (self.repository / "a.mps").write_bytes(source)
+        snapshot_indexes(self.settings)
+        generation = current_generation_ref(self.settings)
+        pinned = replace(self.settings, atlas_generation=generation, atlas_generation_mode="pinned")
+        for query in ("ApprovePayment", "approve payment", "approve-payment", "approve_payment"):
+            with self.subTest(query=query):
+                request = parse_context_request(self.request(objective=f'Inspect "{query}"'))
+                self.assertTrue(mps_index.may_match(generation, request))
+                navigation, evidence = mps_index.navigation(pinned, request)
+                self.assertEqual("a", navigation["matched_nodes"][0]["node_id"])
+                self.assertEqual(3, len(navigation["steps"]))
+                self.assertTrue(evidence)
+        start_session(self.settings, "SHORT-DOMAIN", "Inspect a short domain identifier")
+        content, _, _ = create_context(self.settings, "SHORT-DOMAIN", self.request(objective="Inspect PE"))
+        self.assertIn("MPS structural navigation", content)
+        trace = session_state(self.settings, "SHORT-DOMAIN")["request_history"][-1]["retrieval"]["trace"]
+        self.assertEqual(["call"], [node["node_id"] for node in trace["mps_navigation"]["matched_nodes"]])
+        start_session(self.settings, "CODE-ONLY", "Inspect unrelated ordinary code")
+        with mock.patch("brain.mps.parse_project", side_effect=AssertionError("unrelated code must skip model parsing")):
+            content, _, _ = create_context(self.settings, "CODE-ONLY", self.request(
+                objective="Inspect unchanged_code callers", anchors=[{"kind": "symbol", "value": "unchanged_code"}]))
+        self.assertIn("def unchanged_code()", content)
+        self.assertNotIn("MPS structural navigation", content)
+        # Explicit model/node follow-ups remain focused despite broader objectives.
+        navigation, _ = mps_index.navigation(pinned, {"anchors": [{"kind": "file_hint", "value": "service/a.mps#id:call"}],
+                                                   "searches": ["FlowB"]})
+        self.assertEqual(["call"], [node["node_id"] for node in navigation["matched_nodes"]])
 
     def test_malformed_import_does_not_abort_component_and_invalid_discovery_is_rejected(self) -> None:
         source = (self.repository / "a.mps").read_bytes().replace(b'ref="f:b"', b'ref="f:b%"')

@@ -370,7 +370,10 @@ def _java_entities(
         r"([A-Za-z_$][\w$]*)[ \t]*\([^;{}\n]*\)[ \t]*(?:throws[^{\n]+)?\{"
     )
     controls = {"if", "for", "while", "switch", "catch", "try", "synchronized", "return", "new"}
-    for match in method_pattern.finditer(code_search):
+    # Only class-owned declarations can become methods below. Avoid the
+    # backtracking method scan on long marker-free/generated identifiers.
+    method_matches = method_pattern.finditer(code_search) if classes and "(" in code_search else ()
+    for match in method_matches:
         name = match.group(1)
         if name in controls:
             continue

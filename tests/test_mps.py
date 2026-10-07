@@ -39,6 +39,31 @@ def archive(documents: dict[str, bytes]) -> bytes:
 
 
 class MpsParserTests(unittest.TestCase):
+    def test_business_property_candidates_share_token_rules_without_binding_by_name(self) -> None:
+        source = model("f:rules", '<node concept="c" id="approve"><property role="p" value="ApprovePayment"/>'
+                       '<ref role="r" to="missing:target" resolve="ApprovePayment"/></node>'
+                       '<node concept="c" id="reject"><property role="p" value="RejectPayment"/></node>'
+                       '<node concept="c" id="alias"><property role="p" value="PE"/></node>'
+                       '<node concept="c" id="separate"><property role="p" value="Approval"/>'
+                       '<property role="other" value="Settlement"/></node>').replace(b'name="name"', b'name="businessRule"')
+        project = mps.parse_project({"rules.mps": source})
+        for query in ("ApprovePayment", "approve payment", "approve-payment", "approve_payment"):
+            with self.subTest(query=query):
+                trace = mps.trace_model_connections(project, [query])
+                self.assertEqual(["approve"], [node["node_id"] for node in trace["matched_nodes"]])
+                self.assertEqual("unknown_import", trace["steps"][0]["status"])
+                self.assertIsNone(trace["steps"][0]["target_node"])
+        self.assertEqual(["alias"], [node["node_id"] for node in mps.trace_model_connections(project, ["PE"])["matched_nodes"]])
+        self.assertEqual([], mps.trace_model_connections(project, ["PX"])["seeds"])
+        self.assertEqual([], mps.trace_model_connections(project, ["approval settlement"])["seeds"])
+        flows = mps.parse_project({"flows.mps": model("f:flows", '<node concept="c" id="a"><property role="p" value="FlowA"/></node>'
+                                                     '<node concept="c" id="b"><property role="p" value="FlowB"/></node>')})
+        for query in ("FlowA", "flow A"):
+            self.assertEqual(["a"], [node["node_id"] for node in mps.trace_model_connections(flows, [query])["matched_nodes"]])
+        self.assertEqual([], mps.trace_model_connections(flows, ["flow Z"])["seeds"])
+        duplicate = mps.parse_project({"rules.mps": source, "copy.mps": source.replace(b'f:rules', b'f:copy')})
+        self.assertEqual(["approve payment"], mps.trace_model_connections(duplicate, ["approve payment"])["ambiguous_queries"])
+
     def test_stable_concept_and_reference_ids_find_actual_language_declarations(self) -> None:
         language = "26b3d6d5-b99a-4ed6-83be-d2ea6f3627a1"
         usage = model("f:usage", '<node concept="c" id="instance"><ref role="r" node="target"/></node>'
@@ -177,7 +202,8 @@ class MpsParserTests(unittest.TestCase):
         self.assertEqual(4, len(incoming["steps"]))
         partial = mps.trace_model_connections(project, ["FlowA"], depth=1)
         self.assertTrue(partial["truncated"])
-        self.assertEqual(["FlowB"], [root["label"] for root in partial["frontier"]])
+        self.assertEqual(["b.mps#id:inside"], [item["continuation_anchor"] for item in partial["frontier"]])
+        self.assertEqual("b.mps#id:b", partial["frontier"][0]["root_anchor"])
         nested = mps.trace_model_connections(project, ["b.mps#id:inside"])
         self.assertEqual(["FlowB"], [root["label"] for root in nested["seeds"]])
         self.assertEqual("inside", nested["matched_nodes"][0]["node_id"])
@@ -198,6 +224,110 @@ class MpsParserTests(unittest.TestCase):
         self.assertEqual({"ambiguous", "dynamic"}, {edge["status"] for edge in traced["steps"]})
         self.assertTrue(all(edge["target_root"] is None for edge in traced["steps"]))
         self.assertEqual([], mps.trace_model_connections(project, ["FlowB"])["steps"])
+
+    def test_cross_repo_nested_scopes_shared_subflows_and_cycles_exclude_siblings(self) -> None:
+        documents = {
+            "gateway/entry.mps": model("f:entry", '<node concept="c" id="entry"><property role="p" value="Entry"/>'
+                '<node concept="c" id="call-left" role="h"><ref role="r" to="s:left"/></node>'
+                '<node concept="c" id="call-right" role="h"><ref role="r" to="s:right"/></node>'
+                '<node concept="c" id="call-shared" role="h"><ref role="r" to="s:left"/></node></node>'
+                '<node concept="c" id="other-caller"><ref role="r" to="s:unrelated"/></node>',
+                '<import index="s" ref="f:subflows"/>'),
+            "orchestration/subflows.mps": model("f:subflows", '<node concept="c" id="owner">'
+                '<node concept="c" id="left" role="h"><ref role="r" to="l:one"/></node>'
+                '<node concept="c" id="right" role="h"><ref role="r" to="l:two"/></node>'
+                '<node concept="c" id="unrelated" role="h"><ref role="r" to="l:unrelated"/></node></node>',
+                '<import index="l" ref="f:leaf"/>'),
+            "connector/leaf.mps": model("f:leaf", '<node concept="c" id="one"><ref role="r" to="s:right"/></node>'
+                '<node concept="c" id="two"><ref role="r" to="s:left"/></node><node concept="c" id="unrelated"/>',
+                '<import index="s" ref="f:subflows"/>'),
+        }
+        project = mps.parse_project(documents)
+        traced = mps.trace_model_connections(project, ["Entry"])
+        self.assertEqual(7, len(traced["steps"]))
+        self.assertFalse(any(edge["source_node"]["node_id"] == "unrelated" for edge in traced["steps"]))
+        shared = next(edge for edge in traced["steps"] if edge["source_node"]["node_id"] == "call-shared")
+        self.assertTrue(shared["revisited_node"])
+        leaf = next(edge for edge in traced["steps"] if edge["source_node"]["node_id"] == "left")
+        self.assertEqual("orchestration/subflows.mps#id:left", leaf["traversal_anchor"])
+        caller = next(edge for edge in traced["steps"] if edge["source_node"]["node_id"] == "call-left")
+        self.assertEqual(caller["identity"], leaf["via_connection"])
+        cycle = next(edge for edge in traced["steps"] if edge["source_node"]["node_id"] == "two")
+        self.assertTrue(cycle["revisited_node"])
+        exact = mps.trace_model_connections(project, ["orchestration/subflows.mps#id:left"])
+        into_sibling = next(edge for edge in exact["steps"] if edge["source_node"]["node_id"] == "one")
+        self.assertTrue(into_sibling["revisited_root"])
+        self.assertFalse(into_sibling["revisited_node"])
+        self.assertFalse(any(edge["source_node"]["node_id"] == "unrelated" for edge in exact["steps"]))
+        incoming = mps.trace_model_connections(project, ["orchestration/subflows.mps#id:left"], direction="incoming")
+        first_callers = {edge["source_node"]["node_id"] for edge in incoming["steps"] if edge["depth"] == 0}
+        self.assertEqual({"call-left", "call-shared", "two"}, first_callers)
+        self.assertNotIn("other-caller", {edge["source_node"]["node_id"] for edge in incoming["steps"]})
+
+    def test_exact_connection_pages_progress_in_both_directions(self) -> None:
+        count = mps.MAX_TRACE_BRANCH + 3
+        source = model("f:pages", '<node concept="c" id="root">' + ''.join(
+            f'<node concept="c" id="call-{index}" role="h"><ref role="r" node="leaf"/></node>'
+            for index in range(count)) + '</node><node concept="c" id="leaf"/>')
+        project = mps.parse_project({"pages.mps": source})
+        for anchor, direction in (("pages.mps#id:root", "outgoing"), ("pages.mps#id:leaf", "incoming")):
+            with self.subTest(direction=direction):
+                first = mps.trace_model_connections(project, [anchor], direction=direction, depth=1)
+                page = next(item for item in first["frontier"] if item["reason"] == "branch_limit")
+                self.assertEqual(anchor + "#refs:16", page["continuation_anchor"])
+                self.assertEqual(direction, page["direction"])
+                self.assertEqual("connection_page", page["continuation_kind"])
+                second = mps.trace_model_connections(project, [page["continuation_anchor"]], direction=direction, depth=1)
+                first_edges = {edge["identity"] for edge in first["steps"] if edge["depth"] == 0}
+                second_edges = {edge["identity"] for edge in second["steps"] if edge["depth"] == 0}
+                self.assertEqual(mps.MAX_TRACE_BRANCH, len(first_edges))
+                self.assertEqual(3, len(second_edges))
+                self.assertFalse(first_edges & second_edges)
+        invalid = mps.trace_model_connections(project, ["pages.mps#refs:16", "pages.mps#id:root#refs:bad"])
+        self.assertEqual([], invalid["seeds"])
+
+    def test_exact_scope_precedence_ancestor_impact_and_parent_cycle_keep_distinct_edges(self) -> None:
+        project = mps.parse_project({"scopes.mps": model("f:scopes", '<node concept="c" id="root">'
+            '<property role="p" value="Root"/><node concept="c" id="inner" role="h"><ref role="r" node="root"/></node>'
+            '<node concept="c" id="sibling" role="h"><ref role="r" node="leaf"/></node></node>'
+            '<node concept="c" id="leaf"/><node concept="c" id="broad-caller"><ref role="r" node="root"/></node>')})
+        mixed = mps.trace_model_connections(project, ["Root", "scopes.mps#id:inner"], depth=1)
+        self.assertEqual(["inner"], [step["source_node"]["node_id"] for step in mixed["steps"]])
+        self.assertEqual("refocus", mixed["frontier"][0]["continuation_kind"])
+        complete = mps.trace_model_connections(project, ["scopes.mps#id:inner"])
+        identities = [step["identity"] for step in complete["steps"]]
+        self.assertEqual(2, len(identities))
+        self.assertEqual(len(identities), len(set(identities)))
+        incoming = mps.trace_model_connections(project, ["scopes.mps#id:inner"], direction="incoming")
+        broad = next(step for step in incoming["steps"] if step["source_node"]["node_id"] == "broad-caller")
+        self.assertEqual("ancestor_context", broad["scope_relation"])
+        self.assertEqual("root", broad["target_node"]["node_id"])
+
+    def test_focused_byte_omissions_have_a_resumable_first_missing_connection(self) -> None:
+        source = model("f:pages", '<node concept="c" id="root">' + ''.join(
+            f'<node concept="c" id="call-{index}" role="h"><ref role="r" node="leaf"/></node>'
+            for index in range(16)) + '</node><node concept="c" id="leaf"/>')
+        documents = {"pages.mps": source}
+        first = json.loads(mps.focused_navigation(documents, ["pages.mps#id:root"]))
+        self.assertTrue(first["steps"])
+        self.assertGreater(first["unrendered_steps"], 0)
+        second = json.loads(mps.focused_navigation(documents, [first["next_step_anchor"]]))
+        self.assertTrue(second["steps"])
+        self.assertEqual(first["next_step_anchor"], second["steps"][0]["resume_anchor"])
+        self.assertFalse({edge["identity"] for edge in first["steps"]} & {edge["identity"] for edge in second["steps"]})
+
+    def test_seed_limits_report_only_roots_with_scopes_actually_queued(self) -> None:
+        project = mps.parse_project({
+            "a.mps": model("f:a", '<node concept="c" id="root"><node concept="c" id="one" role="h"/>'
+                '<node concept="c" id="two" role="h"/></node>'),
+            "b.mps": model("f:b", '<node concept="c" id="leaf"/>'),
+        })
+        with mock.patch.object(mps, "MAX_TRACE_ROOTS", 2):
+            trace = mps.trace_model_connections(project, ["a.mps#id:one", "a.mps#id:two", "b.mps#id:leaf"])
+        self.assertEqual(["a.mps#id:root"], [root["anchor"] for root in trace["seeds"]])
+        self.assertEqual(1, trace["omitted_seed_roots"])
+        self.assertEqual(1, trace["omitted_seed_nodes"])
+        self.assertTrue(trace["truncated"])
 
     def test_trace_identity_is_case_sensitive_and_labels_report_ambiguity(self) -> None:
         project = mps.parse_project({"a.mps": model("f:a(display)",

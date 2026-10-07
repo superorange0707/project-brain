@@ -19,12 +19,25 @@ Older generations without the component report unavailable MPS source; they
 cannot substitute the current checkout. Model source reads use the indexed
 component, including reads in current-generation mode.
 
-The existing bounded objective search terms also discover MPS nodes when they
-match an indexed model/node/concept name; no model path is required first.
-This is name-based candidate discovery, not business-term semantic matching.
-Glossary/source evidence must establish a business-term-to-model relationship.
-Objective terms are a fallback when no explicit model query is supplied;
-explicit `resolve`, symbol, path and file-hint queries retain precedence.
+The existing context retrieval pipeline discovers MPS nodes from bounded
+objective/search terms, including node/concept names and decoded property values;
+no model path or separate MPS entry mode is required first. CamelCase, separated
+words and supported separators (space, `_`, `.`, `/`, `$`, `-`) share candidate matching. Short identifiers retain
+their full value: `PE` is not an empty token query, and `FlowA` differs from `FlowB`.
+Ordinary code anchors do not suppress matching MPS objective terms: the same
+context can contain code and pinned model evidence. Exact model paths/node anchors
+retain their focused scope. These are lexical candidates; glossary/source evidence
+must establish aliases and business meanings that do not appear in the model.
+Ordinary objective discovery retains two-character uppercase identifiers such as
+unquoted `PE`; qualified code-anchor precision mode retains its stricter extraction.
+Within the 16-query model budget, exact model anchors precede known
+model candidates, which precede unrelated code queries; truncation stays explicit.
+Candidate discovery bounds each value's tokenization to 256 characters. A long
+value or the 4096-term limit makes the cheap gate conservative; broad or distributed
+terms can trigger a bounded parse without a matching node. Per-node matching does
+not combine words from unrelated property values. Exact anchors read omitted source.
+New refreshes publish discovery profile v2; existing v1 ticket pins remain readable
+with their original discovery metadata, without acquiring the v2 property index.
 You can also use a known name in `resolve` or a `symbol` anchor. Then copy
 the returned exact repository anchor into a focused request. The following
 placeholders must be replaced with verified values from the handoff:
@@ -44,8 +57,8 @@ Use `impact_analysis` for incoming references. Follow returned frontier or
 `#lines:start-end` anchors in the same ticket; use an exact `files` request for
 additional model, mapping or specification source. Delta contexts retain this
 navigation. Exact resolved model anchors skip generic discovery; name searches
-can also gather related code and tests. Candidate terms avoid parsing the model
-project for unrelated ordinary symbols, and source/parse caches last only for
+can also gather related code and tests. A complete candidate gate skips unrelated
+ordinary symbols, and source/parse caches last only for
 the current request. Backend operations, bytes, elapsed stages and omitted
 routes are reported. Time limits are checked between bounded parser/graph units
 and after enrichment; a single unit is not continuously preempted.

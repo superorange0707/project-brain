@@ -3491,7 +3491,7 @@ def retrieve_context(
             else:
                 bundle.unresolved.append("MPS navigation deferred by this request's physical/time budget; repeat the exact model/node anchor in a focused request.")
 
-        explicit_model_anchor = any("#id:" in str(item.get("value") or "") or "#lines:" in str(item.get("value") or "")
+        explicit_model_anchor = bool(request.get("anchors")) and all("#id:" in str(item.get("value") or "") or "#lines:" in str(item.get("value") or "")
             or is_model_path(str(item.get("value") or "").partition("#")[0]) for item in request.get("anchors") or [])
         model_only = request.get("version") == 5 and explicit_model_anchor and bundle.mps_navigation.get("route_status") == "structural" and not bundle.mps_navigation.get("unmatched_queries") and not any(
             request.get(key) for key in ("history", "expand")

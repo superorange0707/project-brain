@@ -28,7 +28,7 @@ def objective_terms(objective: str, *, limit: int = 4, allow_prose: bool = True)
     patterns = (
         r"['\"]([^'\"]{2,80})['\"]",
         SOURCE_SYMBOL_RE.pattern,
-        r"\b[A-Z][A-Z0-9_]{2,}\b",
+        r"\b[A-Z][A-Z0-9_]{1,}\b" if allow_prose else r"\b[A-Z][A-Z0-9_]{2,}\b",
         r"\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\b",
         r"(?:/[-A-Za-z0-9_{}:.]+|[-A-Za-z0-9_]+\.(?:enabled|timeout|url|topic|queue|cache))",
     )

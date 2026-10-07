@@ -33,7 +33,7 @@ in control and apply the resulting solution in your normal IDE.
 
 ## Install
 
-This source tree documents **v1.0.32** for macOS, Windows and Linux. Published
+This source tree documents **v1.0.33** for macOS, Windows and Linux. Published
 downloads are listed on the [latest stable release](https://github.com/superorange0707/project-brain/releases/latest).
 Standalone downloads contain `brain`, `codebase-memory-mcp`, `zoekt`, and
 `zoekt-index`; model weights are never bundled.
@@ -61,7 +61,7 @@ sessions are preserved during upgrades. Finish active refresh or retrieval work
 before stopping the UI. This patch fixes idle refresh and live UI status without
 changing index formats or model inputs; upgrading alone needs no manual refresh
 or re-embedding. See the
-[release upgrade notes](https://github.com/superorange0707/project-brain/releases/tag/v1.0.32).
+[release upgrade notes](https://github.com/superorange0707/project-brain/releases/tag/v1.0.33).
 
 ### Windows 11 x64
 
@@ -69,9 +69,9 @@ On managed machines that allow `git clone` but block direct `.ps1` downloads,
 get the installer from the tagged repository and run it directly:
 
 ```powershell
-git clone --depth 1 --branch v1.0.32 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.33 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.32
+.\scripts\install-project-brain.ps1 -Version 1.0.33
 ```
 
 Specifying `-Version` skips the GitHub API lookup. The installer downloads only
@@ -88,7 +88,7 @@ Already downloaded the ZIP? Put the release's `SHA256SUMS.txt` beside it and,
 from the installer clone, run:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.32-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.33-windows-amd64.zip"
 ```
 
 This path is fully offline: no API call, credentials, administrator access, or
@@ -98,7 +98,7 @@ file in another directory. Close a running Brain UI before upgrading its tools.
 
 If company policy also blocks PowerShell script execution, use the portable ZIP:
 
-**[Download `project-brain-v1.0.32-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.32/project-brain-v1.0.32-windows-amd64.zip)**
+**[Download `project-brain-v1.0.33-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.33/project-brain-v1.0.33-windows-amd64.zip)**
 
 Download the ZIP in a browser and extract its complete contents into
 `%LOCALAPPDATA%\ProjectBrain\bin` (or another folder you control) so the four
@@ -116,20 +116,20 @@ Windows is recommended when `brain refresh` needs to fetch remote refs and
 create immutable Git snapshots.
 
 Verify the download against
-[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.32/SHA256SUMS.txt):
+[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.33/SHA256SUMS.txt):
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.32-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\project-brain-v1.0.33-windows-amd64.zip -Algorithm SHA256
 ```
 
 On unrestricted machines, the same installer is also available directly from
-the [v1.0.32 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.32).
+the [v1.0.33 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.33).
 
 ### Linux — verified user-level installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.32/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.32
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.33/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.33
 brain --version
 ```
 
@@ -141,17 +141,17 @@ and installs the four executables in `~/.local/bin`.
 Python 3.11–3.14 is supported:
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.32"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.33"
 ```
 
 Or install the release wheel directly:
 
 ```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.32/project_brain_context-1.0.32-py3-none-any.whl
+python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.33/project_brain_context-1.0.33-py3-none-any.whl
 ```
 
 All native archives, Python distributions, installers and their checksums are on the
-**[v1.0.32 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.32)**.
+**[v1.0.33 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.33)**.
 
 ## Quick start
 
@@ -293,7 +293,7 @@ need a model pack, vector service, API key, or cloud index.
 
 - exact content and path search across many repositories;
 - class, interface, method, function, implementation, and caller evidence;
-- pinned MPS v9 models/descriptors, nested node jumps, forward/reverse connections and language-definition anchors;
+- pinned MPS v9 models/descriptors, exact nested subflow scopes across repositories, forward/reverse connections and language-definition anchors;
 - Java/Spring MVC, Feign, Kafka, configuration, persistence, and test links;
 - ordered execution and cross-repository integration flows;
 - impact, test, contract, and configuration/data surfaces;
@@ -306,6 +306,27 @@ publish a newer generation for later tickets, but it cannot silently change the
 source or Semantic component used by an investigation already in progress.
 Heuristic flows and slices are navigation candidates until their exact pinned
 source locations are verified.
+
+MPS is part of the ordinary context retrieval pipeline: model/concept names and
+decoded property values supply bounded lexical candidates, including CamelCase
+and phrase matches. A code anchor does not suppress model candidates from the
+same objective. One context can contain code and pinned model evidence, without
+a separate MPS request format or entry mode. Names remain discovery candidates;
+model/node IDs establish reference targets. Existing tickets keep their pinned
+component; refresh publishes the richer discovery terms for new tickets.
+
+MPS navigation preserves each callsite and actual target node. An exact nested
+anchor follows its subtree; incoming impact follows precise callers and labels
+references to enclosing nodes as `ancestor_context`. Shared targets and cycles
+retain distinct connections while deduplicating expansion. `via_connection`
+records one discovery chain, rather than every possible execution path.
+Continue byte-omitted steps with `next_step_anchor`, then use the frontier's
+`continuation_anchor`: `#refs:offset` pages connections in the same mode and
+pinned ticket; depth/node `refocus` starts another bounded traversal. Connection
+pages resume a scope's direct connections; downstream scopes can be rediscovered
+in later requests and keep stable connection identities for ticket deduplication.
+Structural connections need language/aspect/generator/test evidence to establish business
+execution, branch guards, data bindings, retries and transactions.
 
 ## How it works
 

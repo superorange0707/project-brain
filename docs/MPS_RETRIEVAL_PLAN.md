@@ -18,7 +18,7 @@ artifact. Its identity includes:
 ```json
 {
   "schema_version": "mps-models-v1",
-  "parser_version": "mps-v9-v1",
+  "parser_version": "mps-v9-v2",
   "snapshots": {"configured-repo": "original Git SHA or sealed export identity"},
   "source_manifest_hash": "hash of sorted repo/path/blob identities",
   "mapping_hash": "hash of project-declared flow mappings, or explicit absence",
@@ -30,6 +30,9 @@ The ordinary generation snapshots continue to hold real Git SHAs. Existing
 lexical SQLite rows and old generation components remain unchanged. The new
 component is optional on older generations; its absence is a declared
 capability limitation, never permission to read a newer working tree.
+Discovery profile v2 adds bounded property/compound candidates to the same
+context retrieval entrance. Profile v1 components remain readable by pinned
+tickets; a refresh publishes v2 for new tickets without changing old artifacts.
 
 Ingestion reads MPS blobs from the pinned immutable Git manifest or verified
 snapshot export. Non-Git sources must first have an immutable manifest/source

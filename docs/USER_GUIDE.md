@@ -832,7 +832,11 @@ targets rather than invented text patches or serialized node IDs. The external
 evidence reader now decodes standard MPS v9 XML models and module descriptors,
 including project ZIPs, into bounded structural navigation and exact reference
 targets. Repository refresh also captures an optional immutable MPS component
-for new tickets. Exact `file_hint` anchors such as `repo/path.mps#id:node`
+for new tickets. Ordinary objective/search terms discover node/concept names and
+bounded decoded property values; a code anchor still allows matching model
+candidates in the same context. No separate MPS entry mode is required. Use the
+returned candidates for focused follow-ups; business aliases need project evidence.
+Exact `file_hint` anchors such as `repo/path.mps#id:node`
 return source-backed model connections; `impact_analysis` follows incoming
 references. Older tickets retain their original component and source, including
 explicit unavailability if their generation predates MPS ingestion.

@@ -1,3 +1,60 @@
+# Project Brain v1.0.33 — Unified MPS Retrieval and Nested Flows
+
+Ordinary ticket questions can retrieve code and pinned MPS model evidence in the
+same context. Model/concept names and decoded property values provide bounded
+lexical candidates; exact model/node identities establish structural references.
+
+## What changed
+
+- Code anchors no longer suppress matching model terms from the same objective.
+  CamelCase and supported word separators share candidate matching. Ordinary
+  discovery retains short uppercase terms such as PE, while qualified code
+  anchors retain their existing precision rules.
+- Follow exact nested-node subtrees across repositories. Reverse impact retains
+  precise caller nodes and marks references to enclosing nodes as ancestor
+  context. Shared targets retain each callsite while expansion is deduplicated.
+- Page bounded connection lists with the returned source anchor and direction.
+  Byte-omitted steps retain a continuation cursor; depth/node frontiers start a
+  new focused traversal. Stable connection identities support ticket deduplication.
+- Refresh publishes discovery profile v2 for new tickets. Existing v1 model
+  components and original ticket generations remain readable. Source and lexical
+  membership proofs retain their existing boundaries.
+- Avoid an unnecessary Java method regex scan when there is no owning class or
+  opening parenthesis. Existing parser time and row bounds remain enforced.
+- AI guidance requires exact authoring-node edits, before/after changes, affected
+  usages and acceptance assertions. Structural references and supplied change
+  blocks still require project language, generator, source and test validation.
+
+## Upgrade
+
+On macOS, finish active operations, then run:
+
+```sh
+brain ui stop
+brew update
+brew trust --formula superorange0707/tap/project-brain
+brew upgrade superorange0707/tap/project-brain
+brain --version
+```
+
+The version must be `brain 1.0.33`. If you use the macOS login service, run
+`brain service install` from the initialized workspace to refresh its executable
+reference, then `brain service status`. Otherwise restart with `brain ui`.
+Windows and Linux users can use the matching native archives and existing
+checksum-verifying installers.
+
+Run **Refresh Brain** to publish the richer model discovery metadata for new
+tickets. Regenerate the M365 Agent Kit to receive the updated delivery guidance.
+Keep existing indexes, model packs and ticket history; no ticket reset or model
+reinstall is required. Existing tickets keep their original discovery metadata.
+
+Publication retains the full Python/native test matrix, model qualification,
+standalone and installer checks, cross-platform parity, checksums and provenance.
+Private IPF business correctness and unsupported persistence remain outside the
+generic structural reader's guarantees.
+
+---
+
 # Project Brain v1.0.32 — Mac Background Service and MPS Ticket Delivery
 
 Brain can now run independently of Terminal and the browser. On macOS, an

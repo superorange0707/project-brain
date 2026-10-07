@@ -70,7 +70,7 @@ Maintain a Hypothesis Ledger and Evidence Frontier. Resolve the highest-value bl
 
 Reconstruct ordered ExecutionFlow/IntegrationFlow and implementation, impact, test, contract and configuration/data surfaces. Slices guide navigation; history/co-change does not prove causality.
 
-Verify glossary/source. MPS: model/node/concept/role IDs, definition_anchors and source E IDs. file_hint repo/path#id:node or #lines:start-end returns routes/source (attachment: member path). flow_trace outgoing; impact_analysis incoming. Read aspects/generator/tests/specs for guards, I/O/state and error/retry/transaction behavior; resolve blockers/omissions. Names/AST order, source_only and flow_mapping don't prove execution. Keep old pins; attachments stay external. Give editor before/after changes, callers and assertions.
+MPS: verify IDs, definition_anchors/E IDs. file_hint repo/path#id:node or #lines:start-end reads models. flow_trace follows exact subtrees across repos; impact_analysis traces callers; ancestor_context is broader impact. Resume next_step_anchor/frontier continuation_anchor, same mode/pin: #refs pages edges; depth/node limits refocus. Shared targets expand once; via_connection is discovery. Verify guards, I/O/state, error/retry/transaction rules in aspects/tests. AST/flow_mapping don't prove execution. Give editor edits and assertions.
 
 # Ready to implement
 
