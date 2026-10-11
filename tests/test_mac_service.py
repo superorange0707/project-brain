@@ -132,6 +132,20 @@ class MacServiceTest(unittest.TestCase):
             launchctl.assert_not_called()
             self.assertFalse(self.agent.exists())
 
+    def test_launchctl_reports_execution_failure_and_timeout_without_guessing_login_state(self) -> None:
+        target = "gui/501/owned-workspace"
+        cases = (
+            ("print", PermissionError(13, "Permission denied"), r"Could not execute /bin/launchctl print: .*Permission denied"),
+            ("kickstart", subprocess.TimeoutExpired(["/bin/launchctl", "kickstart", target], 15),
+             r"launchctl kickstart timed out after 15 seconds; its completion could not be confirmed"),
+        )
+        for action, error, expected in cases:
+            with self.subTest(action=action), patch("brain.mac_service.subprocess.run", side_effect=error) as run:
+                with self.assertRaisesRegex(BrainError, expected) as raised:
+                    mac_service._launchctl(action, target, check=False)
+                self.assertIs(error, raised.exception.__cause__)
+                run.assert_called_once_with(["/bin/launchctl", action, target], capture_output=True, text=True, timeout=15)
+
     def test_stop_waits_for_record_cleanup_after_authenticated_shutdown(self) -> None:
         with patch("brain.mac_service.ui_instance", return_value={"running": True}) as request, \
                 patch("brain.mac_service._load_ui_instance", side_effect=[{"pid": 123}, None, None]), \
@@ -178,6 +192,19 @@ class MacServiceTest(unittest.TestCase):
         link.unlink()
         link.symlink_to(newer)
         self.assertEqual("new version", link.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(sys.platform == "darwin" and os.environ.get("BRAIN_TEST_EXECUTABLE"),
+                         "requires the macOS packaged executable")
+    def test_packaged_service_status_runs_the_native_controller(self) -> None:
+        result = subprocess.run(
+            [os.environ["BRAIN_TEST_EXECUTABLE"], "-c", str(self.settings.config_path), "service", "status", "--json"],
+            capture_output=True, text=True, timeout=45,
+        )
+        self.assertEqual(0, result.returncode, result.stderr[-3000:])
+        status = json.loads(result.stdout)
+        self.assertFalse(status["installed"])
+        self.assertFalse(status["loaded"])
+        self.assertFalse(status["running"])
 
     @unittest.skipUnless(sys.platform == "darwin" and os.environ.get("BRAIN_TEST_LAUNCHD") == "1",
                          "requires an explicitly enabled macOS login-session integration test")
