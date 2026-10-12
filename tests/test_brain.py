@@ -4973,7 +4973,9 @@ class ReleaseSafetyTest(unittest.TestCase):
 
     def test_repository_contains_no_credential_or_private_path_material(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        excluded = {".git", ".venv", "build", "dist", "__pycache__"}
+        # Ignored local outputs (.runs logs, workspace state) legitimately hold
+        # machine paths and are never release inputs; scan what ships.
+        excluded = {".git", ".venv", "build", "dist", "__pycache__", ".runs", ".pytest_cache", "state", "generated", "knowledge"}
         patterns = {
             "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
             "GitHub token": re.compile(r"gh" + r"[pousr]_[A-Za-z0-9]{20,}"),
