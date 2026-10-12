@@ -46,7 +46,7 @@ def _mapping_entries(source: str) -> list[dict]:
 def build_component(settings, state: dict) -> dict:
     """Capture Git objects or sealed exports; never read an unsealed working tree."""
     from .index import _git_blob_contents, _git_manifest
-    from .sync import _sealed_snapshot_is_intact, _snapshot_seal_path, MAX_GIT_SNAPSHOT_SEAL_BYTES
+    from .sync import _validated_snapshot_seal, _snapshot_seal_path
 
     snapshots = {name: str(raw.get("sha") or "working-tree") for name, raw in state.items() if isinstance(raw, dict)}
     files = []
@@ -67,9 +67,10 @@ def build_component(settings, state: dict) -> dict:
                 if target is None or not target.resolve().is_relative_to(settings.state_dir.resolve()):
                     raise ValueError("no immutable Git or managed snapshot source")
                 seal_path = _snapshot_seal_path(target.parent, sha)
-                if not _sealed_snapshot_is_intact(target, seal_path, sha):
+                validated = _validated_snapshot_seal(target, seal_path, sha)
+                if validated is None:
                     raise ValueError("managed source snapshot seal is unavailable or changed")
-                seal = json.loads(read_managed_text(settings.state_dir, seal_path, max_bytes=MAX_GIT_SNAPSHOT_SEAL_BYTES))["files"]
+                seal = validated["files"]
                 manifest = {path: ("100644", "sha256:" + details["sha256"]) for path, details in seal.items()}
             selected = [path for path, (mode, _) in sorted(manifest.items())
                         if mode in {"100644", "100755"} and _safe_path(path) and (is_model_path(path) or path == MAPPING_PATH)]
@@ -233,7 +234,7 @@ def retain_aligned_component(settings, state: dict, candidate: dict, generation=
 def validate_membership(settings, payload: dict) -> bool:
     """Publication proves path/blob membership, not just self-consistent hashes."""
     from .index import _git_manifest
-    from .sync import _sealed_snapshot_is_intact, _snapshot_seal_path, MAX_GIT_SNAPSHOT_SEAL_BYTES
+    from .sync import _validated_snapshot_seal, _snapshot_seal_path
     try:
         for name, sha in payload["snapshots"].items():
             repo = replace(settings.repo(name), source_sha=sha)
@@ -246,9 +247,10 @@ def validate_membership(settings, payload: dict) -> bool:
                 if target is None or not target.resolve().is_relative_to(settings.state_dir.resolve()):
                     return False
                 seal_path = _snapshot_seal_path(target.parent, sha)
-                if not _sealed_snapshot_is_intact(target, seal_path, sha):
+                validated = _validated_snapshot_seal(target, seal_path, sha)
+                if validated is None:
                     return False
-                seal = json.loads(read_managed_text(settings.state_dir, seal_path, max_bytes=MAX_GIT_SNAPSHOT_SEAL_BYTES))["files"]
+                seal = validated["files"]
                 if any(item["path"] not in seal or "sha256:" + seal[item["path"]]["sha256"] != item["blob"] for item in files):
                     return False
             elif any(manifest.get(item["path"]) not in {("100644", item["blob"]), ("100755", item["blob"])} for item in files):

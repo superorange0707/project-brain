@@ -3715,7 +3715,41 @@ None.
 
     def test_end_to_end_10_50_100_refresh_delta_and_retrieval_are_bounded(self) -> None:
         from brain import atlas as atlas_module
+        from brain import catalog as catalog_module
         from brain import index as index_module
+        from brain import ops as ops_module
+
+        def measured_refresh(settings, events, timings):
+            def timed(name, operation):
+                calls = 0
+
+                def wrapped(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    started = time.perf_counter()
+                    try:
+                        return operation(*args, **kwargs)
+                    finally:
+                        timings.append({
+                            "function": name,
+                            "call": calls,
+                            "elapsed_ms": round((time.perf_counter() - started) * 1_000, 3),
+                        })
+
+                return wrapped
+
+            with (
+                mock.patch("brain.atlas.build_atlas", new=timed("build_atlas", atlas_module.build_atlas)),
+                mock.patch("brain.ops.semantic_status", new=timed("semantic_status", ops_module.semantic_status)),
+                mock.patch("brain.catalog.collect_generation_components", new=timed(
+                    "collect_components", catalog_module.collect_generation_components,
+                )),
+                mock.patch("brain.catalog.publish_generation", new=timed(
+                    "publish_generation", catalog_module.publish_generation,
+                )),
+                mock.patch("brain.index.write_state", new=timed("write_state", index_module.write_state)),
+            ):
+                refresh_brain(settings, fetch=False, discover=False, progress=events.append)
 
         scale_root = self.root / "end-to-end-scale"
         config = self.root / "end-to-end-scale.toml"
@@ -3738,9 +3772,11 @@ None.
             config.write_text("\n".join(rows) + "\n", encoding="utf-8")
             settings = load_settings(config)
             rss_before = _peak_rss_mb()
+            refresh_events: list[dict[str, object]] = []
+            refresh_timings: list[dict[str, object]] = []
             refresh_started = time.perf_counter()
             with mock.patch("brain.atlas._file_intelligence", wraps=atlas_module._file_intelligence) as parsed:
-                refresh_brain(settings, fetch=False, discover=False)
+                measured_refresh(settings, refresh_events, refresh_timings)
             refresh_ms = (time.perf_counter() - refresh_started) * 1_000
             expected_changed = count - configured
             self.assertLessEqual(parsed.call_count, expected_changed)
@@ -3772,7 +3808,14 @@ None.
             self.assertLessEqual(opened.call_count, 3)
             self.assertLessEqual(bundle.trace["physical_backend_operations"], 3)
             self.assertLess(bundle.trace["bytes_read"], 100_000)
-            self.assertLess(refresh_ms, 30_000)
+            self.assertLess(refresh_ms, 30_000, json.dumps({
+                "repositories": count,
+                "refresh_phases": [
+                    {"phase": event.get("phase"), "elapsed_ms": round(float(event.get("elapsed_ms", 0)), 3)}
+                    for event in refresh_events
+                ],
+                "refresh_functions": refresh_timings,
+            }, sort_keys=True))
             self.assertLess(retrieval_ms, 10_000)
             rss_after = _peak_rss_mb()
             if rss_before is not None and rss_after is not None:
@@ -3783,22 +3826,34 @@ None.
                 "retrieval_ms": round(retrieval_ms, 3), "sqlite_opens": opened.call_count,
                 "physical_operations": bundle.trace["physical_backend_operations"],
                 "bytes_read": bundle.trace["bytes_read"], "peak_rss_mb": rss_after,
+                "refresh_functions": refresh_timings,
             })
             configured = count
 
         last = scale_root / "repo-099" / "ScaleService.java"
         last.write_text(last.read_text(encoding="utf-8") + "// SCALE_DELTA_100\n", encoding="utf-8")
         settings = load_settings(config)
+        delta_events: list[dict[str, object]] = []
+        delta_timings: list[dict[str, object]] = []
         delta_started = time.perf_counter()
         with mock.patch("brain.atlas._file_intelligence", wraps=atlas_module._file_intelligence) as parsed_delta:
-            refresh_brain(settings, fetch=False, discover=False)
+            measured_refresh(settings, delta_events, delta_timings)
         delta_ms = (time.perf_counter() - delta_started) * 1_000
         self.assertEqual(1, parsed_delta.call_count)
-        self.assertLess(delta_ms, 30_000)
+        self.assertLess(delta_ms, 30_000, json.dumps({
+            "repositories": 100,
+            "changed_repositories": 1,
+            "refresh_phases": [
+                {"phase": event.get("phase"), "elapsed_ms": round(float(event.get("elapsed_ms", 0)), 3)}
+                for event in delta_events
+            ],
+            "refresh_functions": delta_timings,
+        }, sort_keys=True))
         metrics.append({
             "repositories": 100, "changed_repositories": 1,
             "atlas_files_parsed": parsed_delta.call_count, "delta_refresh_ms": round(delta_ms, 3),
             "peak_rss_mb": _peak_rss_mb(),
+            "refresh_functions": delta_timings,
         })
         print(json.dumps({"synthetic_scale_metrics": metrics}, sort_keys=True))
 

@@ -38,7 +38,7 @@ from brain.platforms import native_command
 from brain.relations import _relationship_payload_hash, generate_relationship_map, related_relationships
 from brain.semantic import build_semantic_index, search_semantic
 from brain.sync import (
-    _export_snapshot, _git_archive_to_path, _sealed_snapshot_is_intact,
+    _export_snapshot, _git_archive_to_path, _sealed_snapshot_is_intact, _validated_snapshot_seal,
     _snapshot_metadata, _snapshot_seal, _snapshot_seal_path,
 )
 
@@ -801,10 +801,12 @@ class AtlasGenerationTests(unittest.TestCase):
         seal_path.write_text(json.dumps(_snapshot_seal(target, snapshot)), encoding="utf-8")
         with mock.patch("brain.sync.os.name", "nt"):
             self.assertTrue(_sealed_snapshot_is_intact(target, seal_path, snapshot))
+            self.assertEqual(json.loads(seal_path.read_text()), _validated_snapshot_seal(target, seal_path, snapshot))
             metadata = source.stat()
             source.write_text("class Evil {}\n", encoding="utf-8")
             os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
             self.assertFalse(_sealed_snapshot_is_intact(target, seal_path, snapshot))
+            self.assertIsNone(_validated_snapshot_seal(target, seal_path, snapshot))
 
     def test_semantic_and_relationships_use_git_objects_when_snapshot_export_is_missing(self) -> None:
         producer = self.repository

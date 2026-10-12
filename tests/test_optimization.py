@@ -982,8 +982,13 @@ class Routes {
                 blob = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 # Force the original uncached transforms as an identity oracle:
                 # every entity, region, edge and source coordinate must match.
-                with mock.patch.object(investigation, "_mask_java_comments",
-                                       side_effect=investigation._mask_java_comments_uncached):
+                # The slower oracle checks identity, not the production time cap.
+                # Keep the optimized call below and fail-closed deadline tests timed.
+                with (
+                    mock.patch("brain.atlas.time.monotonic", return_value=0),
+                    mock.patch.object(investigation, "_mask_java_comments",
+                                      side_effect=investigation._mask_java_comments_uncached),
+                ):
                     expected = atlas._file_intelligence("repo", "Routes.java", blob, content)
                 with mock.patch.object(investigation, "_mask_java_comments_uncached",
                                        wraps=investigation._mask_java_comments_uncached) as masked:

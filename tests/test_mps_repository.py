@@ -99,6 +99,16 @@ class MpsRepositoryTests(unittest.TestCase):
         self.assertEqual("ready", generation.component("mps_models")["status"])
         self.assertIn("FlowA", mps_index.read_source(self.settings, "service", "a.mps", generation))
 
+    def test_nongit_component_uses_the_validated_seal_without_reopening_it(self) -> None:
+        state, _ = snapshot_indexes(self.settings, publish=False)
+        with mock.patch("brain.mps_index.read_managed_text", side_effect=AssertionError("seal reopened after validation")):
+            component = mps_index.build_component(self.settings, state)
+            payload = json.loads(Path(component["_artifact_source"]).read_text())
+            self.assertTrue(mps_index.validate_membership(self.settings, payload))
+        self.assertEqual("ready", component["status"])
+        self.assertEqual(3, component["details"]["models"])
+        self.assertTrue(mps_index.validate_payload(payload, payload["snapshots"], component))
+
     def test_v5_model_routes_direct_files_and_old_ticket_pin_survive_refresh_and_gc(self) -> None:
         self.commit_fixture()
         snapshot_indexes(self.settings)
