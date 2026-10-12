@@ -4,3 +4,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # One grouped pull request per week keeps hosted CI runs for action bumps
+    # to a single matrix instead of one run per action.
+    groups:
+      github-actions:
+        patterns: ["*"]

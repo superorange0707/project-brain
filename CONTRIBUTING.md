@@ -30,6 +30,12 @@ On Windows, activate with `.venv\Scripts\activate`.
 Maintainers follow the [release procedure](docs/RELEASING.md) for builds,
 artifact verification and publication.
 
+Hosted CI runs once per pull-request head on a representative matrix and
+cancels superseded runs. Draft pull requests and pushes to work branches run no
+hosted checks, so push backups freely and mark the pull request ready when it
+is worth a run. The full OS/Python matrix and native packaging run for tagged
+releases only.
+
 Keep pull requests focused. Include:
 
 - the retrieval or workflow problem being solved;

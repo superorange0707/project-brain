@@ -18,6 +18,13 @@ All notable changes are documented here. This project follows Semantic Versionin
   in `brain evaluate --golden`.
 - Reuse the validated managed snapshot seal during MPS component builds instead
   of re-reading it; record refresh phase timings in the scale regression.
+- CI: run pull-request checks once per head on a representative matrix (Linux
+  3.11/3.14, Windows 3.14) with cancellation of superseded runs and job
+  timeouts; skip draft pull requests; run one post-merge check on `main`; move
+  the PyInstaller smoke to a path-filtered workflow with a single macOS runner.
+  The full OS/Python matrix remains the tagged-release qualification. Group
+  Dependabot action bumps and remove the one-off v1.0.14/v1.0.27 macOS workflows.
+
 ## [1.0.33] - 2026-10-07
 
 - Retrieve code and pinned MPS model evidence in one context: code anchors no
