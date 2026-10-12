@@ -736,11 +736,18 @@ or `holdout` as `split`, a normal request mapping, and explicit expected paths:
     "expect": {
       "production_files": ["trading-service:src/main/java/demo/EligibilityEvaluator.java"],
       "test_config_files": ["trading-service:src/test/java/demo/CustomerChangedListenerTest.java"],
-      "false_positive_files": ["trading-service:README.md"]
+      "false_positive_files": ["trading-service:README.md"],
+      "model_anchors": ["payments/flows/approval.mps#id:4387651209875421"]
     }
   }]
 }
 ```
+
+`model_anchors` are optional exact `repo/path.mps#id:node` anchors (as returned
+in MPS navigation) that the request is expected to match, seed or trace; they
+are scored as `model_anchor_recall`. Build cases from closed tickets: the ticket
+text is the objective, the files and model nodes touched by the fix are the
+expectation, and `brain experience --json` lists those paths per ticket.
 
 Run `brain evaluate --golden /secure/path/suite.json --split holdout`. The
 result stores only case IDs, suite hash, and aggregate metrics in

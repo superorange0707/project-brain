@@ -2,6 +2,39 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [Unreleased]
+
+- Seed the ordinary code search with identifiers decoded from matched MPS node
+  properties (package-qualified or CamelCase values), placed after explicit
+  anchors and inside the existing operation budget. The handoff lists them as
+  navigation candidates; a name match is not a generator or runtime binding.
+- Label evidence under `source_gen`, `source_gen.caches` and `classes_gen` as
+  generated source so the AI locates the authoring model node before proposing
+  an edit. Generated files remain searchable.
+- Add an MPS model catalog (root labels and concepts per pinned model file) to
+  the start handoff and the M365 Agent Kit knowledge file.
+- Index model and descriptor paths in ticket-labelled Git experience.
+- Score `expect.model_anchors` (`repo/path.mps#id:node`) as `model_anchor_recall`
+  in `brain evaluate --golden`.
+- Reuse the validated managed snapshot seal during MPS component builds instead
+  of re-reading it; record refresh phase timings in the scale regression.
+## [1.0.33] - 2026-10-07
+
+- Retrieve code and pinned MPS model evidence in one context: code anchors no
+  longer suppress matching model terms, CamelCase and separator variants share
+  candidate matching, and short identifiers such as `PE` are retained.
+- Follow exact nested-node subtrees across repositories; reverse impact keeps
+  precise caller nodes and labels enclosing-node references `ancestor_context`.
+  Shared targets retain each callsite while expansion is deduplicated.
+- Page bounded connection lists with `#refs:offset`; byte-omitted steps keep a
+  continuation cursor and depth/node frontiers start a new focused traversal.
+- Publish discovery profile v2 on refresh for new tickets; v1 components and
+  pinned ticket generations remain readable.
+- Skip the Java method regex scan when no owning class or opening parenthesis
+  exists, within the unchanged parser time and row bounds.
+- Require exact authoring-node edits, before/after values, affected usages and
+  acceptance assertions in AI delivery guidance.
+
 ## [1.0.32] - 2026-10-05
 
 - Retry transient Windows sharing violations during atomic state publication,

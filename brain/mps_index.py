@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote
@@ -15,6 +16,11 @@ PARSER_VERSION = "mps-v9-v2"
 SUPPORTED_PARSERS = {"mps-v9-v1", "mps-v9-v2"}
 MAPPING_PATH = "mps-flow-mappings.json"
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
+MAX_CODE_CANDIDATES = 4
+MAX_CATALOG_ROOTS_PER_MODEL = 24
+# A dotted lowercase package ending in a capitalised type, or a CamelCase name
+# with at least two humps. Values are discovery candidates, never bindings.
+_CODE_IDENTIFIER_RE = re.compile(r"(?:[a-z_][\w$]*\.)+[A-Z][\w$]*|(?:[A-Z][a-z0-9]+){2,}[\w$]*")
 
 
 def _hash(value: object) -> str:
@@ -307,6 +313,69 @@ def may_match(generation, request: dict) -> bool:
                or mps._query_matches(value, terms) for value in map(_query_value, values)) or details.get("discovery_complete") is False
 
 
+def code_candidates(project: dict, result: dict, queries: list[str], *, limit: int = MAX_CODE_CANDIDATES) -> list[dict]:
+    """Property values of matched/traced nodes that look like code identifiers.
+
+    They seed the ordinary code search of the same request so a flow's handler,
+    generated class or topic constant is hydrated beside the model. A name match
+    is navigation only; it never proves a generator or runtime binding.
+    """
+    wanted = {(item["path"], item["key"]) for item in result.get("matched_nodes") or []}
+    for step in result.get("steps") or []:
+        for end in ("source_node", "target_node"):
+            if step.get(end):
+                wanted.add((step[end]["path"], step[end]["key"]))
+    searched = {query.partition("#")[0].casefold() for query in queries}
+    found: dict[str, dict] = {}
+    for model in project["files"]:
+        for node in model.get("nodes", []):
+            if (model["path"], node["key"]) not in wanted:
+                continue
+            for prop in node["properties"]:
+                value = str(prop.get("value") or "").strip()
+                term = value.rsplit(".", 1)[-1]
+                if (len(value) > 120 or term.casefold() in searched or value.casefold() in searched or term in found
+                        or _CODE_IDENTIFIER_RE.fullmatch(value) is None):
+                    continue
+                found[term] = {"value": value, "search": term, "anchor": f"{model['path']}#{node['key']}",
+                               "role": prop["role"].get("name"), "line": prop["line"]}
+                if len(found) >= limit:
+                    return list(found.values())
+    return list(found.values())
+
+
+def model_catalog(settings, generation=None, *, max_bytes: int = 8_000) -> str | None:
+    """Markdown vocabulary of pinned models: root labels and concepts per file.
+
+    Derived from the generation's immutable component, so the catalog matches
+    the ticket's pin. It names what exists; business meaning needs source.
+    """
+    payload = load_component(settings, generation)
+    if payload is None:
+        return None
+    lines = ["Root nodes per pinned model file: `label (concept)`. Names are discovery",
+             "candidates for `resolve`/`file_hint`; exact `repo/path#id:node` anchors bind."]
+    for item in payload["files"]:
+        if not is_model_path(item["path"]) or PurePosixPath(item["path"]).suffix.lower() in mps.SPLIT_SUFFIXES:
+            continue
+        try:
+            model = mps.parse_document(item["source"].encode())
+        except mps.MpsError:
+            continue
+        if model.get("kind") != "model":
+            continue
+        roots = [node for node in model["nodes"] if node["parent"] is None]
+        shown = ", ".join(f"`{mps._node_label(node)[:80]} ({node['concept'].get('name') or 'unknown concept'})`"
+                          for node in roots[:MAX_CATALOG_ROOTS_PER_MODEL])
+        omitted = f" … {len(roots) - MAX_CATALOG_ROOTS_PER_MODEL} more roots" if len(roots) > MAX_CATALOG_ROOTS_PER_MODEL else ""
+        lines.append(f"- `{item['repo']}:{item['path']}` ({len(roots)} roots): {shown or 'no roots'}{omitted}")
+        if len("\n".join(lines).encode()) > max_bytes:
+            lines.pop()
+            lines.append("- [Project Brain omitted the remaining model files at the catalog byte limit; ask for exact model paths.]")
+            break
+    return "\n".join(lines) + "\n" if len(lines) > 2 else None
+
+
 def navigation(settings, request: dict, *, deadline: float | None = None) -> tuple[dict | None, list]:
     """Return separate derived navigation and exact repository source evidence."""
     from .core import Evidence
@@ -381,6 +450,7 @@ def navigation(settings, request: dict, *, deadline: float | None = None) -> tup
         evidence.append(Evidence(repo, path, region["line_start"], region["line_end"], content, "MPS source", 100,
                                  ["pinned MPS model navigation"], source if len(source.encode()) <= 1_000_000 else None))
     _annotate_mappings(result, payload)
+    result["code_candidates"] = code_candidates(project, result, queries)
     mapping_sources = set()
     mapping_bytes = 0
     all_sources = {(item["repo"], item["path"]): item for item in payload["files"]}
@@ -414,7 +484,8 @@ def _bound_navigation(result: dict, limit: int) -> None:
     """Preserve complete JSON and exact identities, with explicit omissions."""
     # Original source evidence travels separately. Trim repeated discovery and
     # declaration metadata before losing the actual requested connections.
-    for field, counter in (("limitations", "omitted_limitations"), ("definition_anchors", "omitted_definition_anchors"),
+    for field, counter in (("limitations", "omitted_limitations"), ("code_candidates", "omitted_code_candidates"),
+                           ("definition_anchors", "omitted_definition_anchors"),
                            ("source_regions", "omitted_source_regions"), ("file_statuses", "omitted_file_statuses"),
                            ("matched_nodes", "omitted_matches"), ("seeds", "omitted_seed_roots"),
                            ("steps", "unrendered_steps"), ("frontier", "unrendered_frontier_roots")):

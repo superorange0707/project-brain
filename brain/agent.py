@@ -257,6 +257,15 @@ def create_m365_agent_kit(settings: Settings) -> dict[str, Any]:
             knowledge.extend(["", f"## {title}", "", text.strip()])
             if omitted:
                 knowledge.append("[Project Brain omitted unsafe or excess bytes from this knowledge source.]")
+    from .catalog import current_generation_ref
+    from .mps_index import model_catalog
+
+    try:
+        catalog = model_catalog(settings, current_generation_ref(settings))
+    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+        catalog = None  # An unindexed workspace still gets a kit; the catalog is optional.
+    if catalog:
+        knowledge.extend(["", "## MPS model catalog (current generation, navigation only)", "", catalog.strip()])
     knowledge_text, _ = _bounded_utf8_text(
         "\n".join(knowledge).rstrip() + "\n",
         M365_KNOWLEDGE_TOTAL_BYTES,

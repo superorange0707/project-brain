@@ -75,6 +75,20 @@ def _request(value: object) -> dict[str, Any]:
     return parse_context_request(encoded)
 
 
+def _model_anchors(navigation: dict[str, Any] | None) -> set[str]:
+    """Exact `repo/path#id:node` anchors a request matched, seeded or traced."""
+    found: set[str] = set()
+    for item in [*(navigation or {}).get("matched_nodes", []), *(navigation or {}).get("seeds", [])]:
+        if item.get("anchor"):
+            found.add(str(item["anchor"]))
+    for step in (navigation or {}).get("steps", []):
+        for end in ("source_node", "target_node"):
+            node = step.get(end)
+            if node:
+                found.add(f"{node['path']}#{node['key']}")
+    return found
+
+
 def _ranking(bundle: Any) -> list[str]:
     return list(dict.fromkeys(_raw_ranking(bundle)))
 
@@ -411,6 +425,8 @@ def evaluate_golden(
         required_entities = _values(expect.get("required_entities"))
         required_edges = _values(expect.get("required_edges") or expect.get("graph_edges"))
         excluded = _files(expect.get("false_positive_files") or expect.get("excluded_files"))
+        expected_model_anchors = _values(expect.get("model_anchors"))
+        found_model_anchors = _model_anchors(bundle.mps_navigation)
         top = ranking[:limit]
         semantic_only = [
             f"{item.repo}:{item.path}"
@@ -443,6 +459,7 @@ def evaluate_golden(
             "entity_recall_at_40": _ranked_label_recall(entity_labels, required_entities, 40),
             "entity_recall_at_50": _ranked_label_recall(entity_labels, required_entities, 50),
             "graph_edge_recall": _recall({edge for edge in required_edges if edge in relationship_text}, required_edges),
+            "model_anchor_recall": _recall(found_model_anchors, expected_model_anchors),
             "evidence_recall_at_18": _recall(set(ranking[:18]), required),
             "file_recall_at_limit": _recall(set(top), required),
             "candidate_file_recall_at_limit": _recall(set(top), required),
@@ -534,6 +551,7 @@ def evaluate_golden(
             "entity_recall_at_40": average("entity_recall_at_40"),
             "entity_recall_at_50": average("entity_recall_at_50"),
             "graph_edge_recall": average("graph_edge_recall"),
+            "model_anchor_recall": average("model_anchor_recall"),
             "evidence_recall_at_18": average("evidence_recall_at_18"),
             "file_recall_at_limit": average("file_recall_at_limit"),
             "candidate_file_recall_at_limit": average("candidate_file_recall_at_limit"),
