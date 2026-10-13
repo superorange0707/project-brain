@@ -44,25 +44,25 @@ Standalone downloads contain `brain`, `codebase-memory-mcp`, `zoekt`, and
 brew install superorange0707/tap/project-brain
 ```
 
-Already using Project Brain?
+Already using Project Brain? From your workspace, on any platform:
 
 ```bash
-brain ui stop
-brew update
-brew trust --formula superorange0707/tap/project-brain
-brew upgrade superorange0707/tap/project-brain
-brain --version
-brain ui
+brain upgrade
 ```
 
-Homebrew installs a prebuilt package; it does not compile Python or require
-Xcode. Existing workspaces, model packs, caches, Atlas generations, and ticket
-sessions are preserved during upgrades. Finish active refresh or retrieval work
-before stopping the UI. Run **Refresh Brain** once after upgrading so new tickets
-receive the richer MPS discovery metadata. Existing tickets keep their pinned
-generations; no model-pack reinstall, ticket reset or re-embedding is required.
-See the
-[release upgrade notes](https://github.com/superorange0707/project-brain/releases/tag/v1.0.33).
+`brain upgrade` checks the latest release, stops the local UI when it is idle,
+upgrades through Homebrew (or swaps a verified standalone install in place on
+Windows and Linux), republishes the index only if the new version changed its
+schemas, and restarts the UI. It says when the M365 Agent Kit changed; otherwise
+nothing needs re-pasting. `brain upgrade --check` only reports versions.
+Workspaces, model packs, caches, Atlas generations and ticket sessions are
+preserved, and existing tickets keep their pinned generations.
+
+Upgrading from v1.0.33 or older, which predate `brain upgrade`, takes the old
+steps one last time: `brain ui stop`, `brew update`,
+`brew trust --formula superorange0707/tap/project-brain`,
+`brew upgrade superorange0707/tap/project-brain`, then `brain ui` (Windows:
+rerun the installer below).
 
 ### Windows 11 x64
 

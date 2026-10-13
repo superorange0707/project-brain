@@ -324,9 +324,9 @@ being killed. For foreground diagnostics, run `brain service stop` before
 `brain service install --port 0` for automatic port selection when running more
 than one workspace. Reinstalling without `--port` preserves that selection.
 
-The service retains a stable Homebrew executable link across upgrades. Stop it
-before upgrading, then run `brain service install` to reconcile its definition
-and resume it. Source/venv installations require their interpreter and source
+The service retains a stable Homebrew executable link across upgrades.
+`brain upgrade` stops it, upgrades, runs `brain service install` to reconcile
+its definition and resumes it. Source/venv installations require their interpreter and source
 checkout to remain in place. Logs are private at the configured state's
 `ui.log`; the service plist does not contain the UI token or exported terminal
 credentials. Login startup has a fresh macOS environment: use your approved
@@ -1727,6 +1727,42 @@ GitHub release descriptor and artifact downloads continue to use configured
 enterprise proxy policy plus the verified system-trust and SHA-256 checks above.
 
 ## 15. Updating and uninstalling
+
+Run `brain upgrade` from your workspace. It finds the latest release from the
+pinned `superorange0707/project-brain` GitHub Releases, then:
+
+- **Homebrew:** stops the UI or login service when idle, runs `brew update`,
+  `brew trust --formula superorange0707/tap/project-brain` (best effort) and
+  `brew upgrade superorange0707/tap/project-brain`, and reinstalls the login
+  service definition when you use one.
+- **Standalone (Windows ZIP, Linux/macOS installer):** downloads the platform
+  archive through the same TLS/proxy-aware path as model packs, verifies it
+  against the release's `SHA256SUMS.txt`, checks the staged `brain --version`,
+  stops the idle UI and renames each shipped file aside before moving the new
+  one in. Any failure restores the previous files. Windows keeps the replaced
+  running `brain.exe` as `brain.exe.brain-upgrade-old` until the next start.
+  Other files in the install directory are left alone.
+- **Python (source, pip, uv):** changes nothing and prints the matching upgrade
+  command.
+
+The new version then republishes the index once if its serving schemas changed
+(old tickets keep their pinned generations), restarts the UI if it was running,
+and reports whether the M365 Agent Kit needs re-pasting.
+
+| Command | Use |
+|---|---|
+| `brain upgrade --check` | Report current and latest versions only. |
+| `brain upgrade --version X.Y.Z` | Install a specific release. |
+| `brain upgrade --version X.Y.Z --archive FILE --sha256 HEX` | Offline: install a downloaded archive. |
+| `brain upgrade --release-base-url URL` | Use an approved internal release mirror (`https://` or `file://`). |
+
+The command exits with status 75 when the UI is busy refreshing or
+investigating; retry when it is idle. Installed binaries check for a new
+release at most once a day while the UI runs and show it in **Health**; set
+`PROJECT_BRAIN_NO_UPDATE_CHECK=1` to turn that check off. Releases up to v1.0.33
+predate this command: upgrade them once with the steps in section 2.
+
+For Python installations:
 
 ```bash
 uv tool upgrade project-brain-context

@@ -28,6 +28,17 @@ All notable changes are documented here. This project follows Semantic Versionin
   re-pasting into Agent Builder is no longer an every-release step. The
   knowledge file is now `PROJECT_KNOWLEDGE.txt` (Agent Builder embeds `.txt`,
   not `.md`); a stale `PROJECT_KNOWLEDGE.md` is removed on regeneration.
+- Add `brain upgrade`: Homebrew installs delegate to `brew update/trust/upgrade`
+  and the login service is reinstalled; standalone installs download the
+  platform archive from the pinned GitHub Release, verify it against
+  `SHA256SUMS.txt`, check the staged `brain --version`, stop the idle UI and
+  rename each shipped file aside (a running Windows `brain.exe` can be renamed),
+  restoring everything on failure. Source/pip/uv installs are not mutated. The
+  new binary republishes only on schema drift, restarts the UI and reports the
+  Agent Kit. `--check`, `--version`, offline `--archive`/`--sha256` and
+  `--release-base-url` are supported; exit 75 means the UI is busy. Installed
+  binaries check for updates daily (opt out with
+  `PROJECT_BRAIN_NO_UPDATE_CHECK=1`) and show them in `brain status` and Health.
 - CI: run pull-request checks once per head on a representative matrix (Linux
   3.11/3.14, Windows 3.14) with cancellation of superseded runs and job
   timeouts; skip draft pull requests; run one post-merge check on `main`; move

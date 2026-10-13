@@ -848,7 +848,10 @@
     function renderBrain(brain, background) {
       var semantic = brain.semantic || {};
       var kit = brain.agent_kit || {};
-      document.getElementById("recovery-guidance").textContent = kit.status === "stale" ?
+      var update = brain.update || {};
+      document.getElementById("recovery-guidance").textContent = update.update_available ?
+        "Project Brain " + update.latest + " is available: run brain upgrade from this workspace." :
+        kit.status === "stale" ?
         "M365 Agent Kit changed (" + (kit.changed || []).join(", ") + "): run brain agent-kit m365 and replace it in Agent Builder." :
         brain.generation_predates_binary ?
         "The published generation predates this Brain version; the next refresh (idle auto-refresh or Refresh Brain) publishes a new generation. Existing tickets keep their pinned generation." :

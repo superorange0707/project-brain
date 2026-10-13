@@ -168,6 +168,13 @@ def _parser() -> argparse.ArgumentParser:
     model.add_argument("--samples", type=int, default=3, help="benchmark samples per public synthetic workload (1-10)")
     model.add_argument("--latency-budget-ms", type=int, default=3000, help="Precision candidate-pool p95 budget for autotune")
 
+    upgrade = commands.add_parser("upgrade", help="upgrade this Brain installation (Homebrew or standalone) in one step")
+    upgrade.add_argument("--check", action="store_true", help="only report the current and latest versions")
+    upgrade.add_argument("--version", dest="target_version", metavar="X.Y.Z", help="install this release instead of the latest")
+    upgrade.add_argument("--archive", help="offline: a downloaded release archive for this platform")
+    upgrade.add_argument("--sha256", help="offline: the archive's SHA-256 when SHA256SUMS.txt cannot be fetched")
+    upgrade.add_argument("--release-base-url", help="release mirror base URL (https:// or file://)")
+    upgrade.add_argument("--finish", action="store_true", help=argparse.SUPPRESS)
     commands.add_parser("freshness", help="compare pinned source snapshots and index state")
     commands.add_parser("storage", help="show local Brain storage usage")
     gc = commands.add_parser("gc", help="remove unpinned old index generations")
@@ -1014,10 +1021,24 @@ def execute(args: argparse.Namespace) -> int:
             brain_status = status.get("brain") or {}
             if brain_status.get("generation_predates_binary"):
                 print("Index: the published generation predates this Brain version; the next refresh republishes it.")
+            update = brain_status.get("update") or {}
+            if update.get("update_available"):
+                print(f"Project Brain {update['latest']} is available: run brain upgrade.")
             kit = brain_status.get("agent_kit") or {}
             if kit.get("status") == "stale":
                 print(f"M365 Agent Kit changed ({', '.join(kit['changed'])}): run brain agent-kit m365 and replace it in Agent Builder.")
         return 0
+    if args.command == "upgrade":
+        from .upgrade import UpgradeBusy, finish, upgrade
+
+        if args.finish:
+            return finish(settings)
+        try:
+            return upgrade(settings, version=args.target_version, archive=args.archive, sha256=args.sha256,
+                           release_base_url=args.release_base_url, check_only=args.check)
+        except UpgradeBusy as error:
+            print(f"{error}. Retry brain upgrade when it is idle.", file=sys.stderr)
+            return 75
     if args.command == "service":
         from .mac_service import service
 
@@ -1066,6 +1087,10 @@ def execute(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     _configure_windows_stdio()
+    if getattr(sys, "frozen", False):
+        from .upgrade import cleanup_retired
+
+        cleanup_retired()  # Windows keeps a replaced running .exe until the next start.
     try:
         return execute(_parser().parse_args(argv))
     except (BrainError, OSError, ValueError, RuntimeError) as exc:

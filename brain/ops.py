@@ -633,6 +633,7 @@ def dashboard_status(settings: Settings) -> dict[str, Any]:
         "core": {"ready": core_ready, "source_freshness": source_freshness},
         "generation_predates_binary": generation_predates_binary(current_generation_ref(settings)),
         "agent_kit": __import__("brain.agent", fromlist=["agent_kit_status"]).agent_kit_status(settings),
+        "update": __import__("brain.upgrade", fromlist=["status_update"]).status_update(settings),
         "semantic": semantic,
         "capabilities": available,
         "freshness": repo_freshness,
