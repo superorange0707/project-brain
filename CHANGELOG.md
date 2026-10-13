@@ -39,6 +39,13 @@ All notable changes are documented here. This project follows Semantic Versionin
   `--release-base-url` are supported; exit 75 means the UI is busy. Installed
   binaries check for updates daily (opt out with
   `PROJECT_BRAIN_NO_UPDATE_CHECK=1`) and show them in `brain status` and Health.
+- Add `brain mcp`, a stdlib Model Context Protocol (stdio) server, and
+  `brain mcp config --host claude-desktop|claude-code|vscode|cursor|jetbrains
+  [--write]`. Agents call `brain_start`, `brain_continue`, `brain_handoff`,
+  `brain_session`, `brain_resume`, `brain_feedback` and `brain_status`, which run
+  the existing retrieval in-process under the same locks; results are paged at
+  80,000 characters. No delete/model/edition/storage tools and no arbitrary file
+  reads. Microsoft 365 Copilot keeps the file handoff.
 - CI: run pull-request checks once per head on a representative matrix (Linux
   3.11/3.14, Windows 3.14) with cancellation of superseded runs and job
   timeouts; skip draft pull requests; run one post-merge check on `main`; move

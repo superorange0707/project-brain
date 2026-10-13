@@ -265,6 +265,12 @@ def _parser() -> argparse.ArgumentParser:
     ui.add_argument("--no-open", action="store_true", help="do not open the browser automatically")
     ui.add_argument("--foreground", action="store_true", help="keep the UI attached to this terminal for diagnostics")
 
+    mcp = commands.add_parser("mcp", help="Model Context Protocol server for Claude, VS Code, Cursor and JetBrains agents")
+    mcp.add_argument("action", nargs="?", choices=("serve", "config"), default="serve",
+                     help="serve (default; hosts launch this over stdio) or config (print/write a host entry)")
+    mcp.add_argument("--host", choices=("claude-desktop", "claude-code", "vscode", "cursor", "jetbrains"),
+                     help="host to configure with the config action")
+    mcp.add_argument("--write", action="store_true", help="merge the entry into the host's configuration file")
     service = commands.add_parser("service", help="manage this workspace's macOS login/background service")
     service.add_argument("action", choices=("install", "start", "status", "stop", "uninstall"))
     service.add_argument("--port", type=int, help="install with this loopback port; 0 chooses a free port")
@@ -1027,6 +1033,19 @@ def execute(args: argparse.Namespace) -> int:
             kit = brain_status.get("agent_kit") or {}
             if kit.get("status") == "stale":
                 print(f"M365 Agent Kit changed ({', '.join(kit['changed'])}): run brain agent-kit m365 and replace it in Agent Builder.")
+        return 0
+    if args.command == "mcp":
+        from .mcp import describe, serve, write_host_config
+
+        if args.action == "serve":
+            return serve(settings.config_path)
+        if not args.host:
+            raise BrainError("brain mcp config needs --host claude-desktop|claude-code|vscode|cursor|jetbrains")
+        print(describe(settings, args.host))
+        if args.write:
+            written = write_host_config(settings, args.host)
+            print(f"Wrote {written}; restart or reconnect {args.host} to load it." if written else
+                  "This host has no configuration file; paste the entry above.")
         return 0
     if args.command == "upgrade":
         from .upgrade import UpgradeBusy, finish, upgrade

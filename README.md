@@ -257,6 +257,16 @@ For Microsoft 365 Copilot, create the permanent Agent setup kit once:
 brain agent-kit m365
 ```
 
+Using Claude Desktop, Claude Code, Cursor or a JetBrains/VS Code agent instead?
+Let it call Brain directly over MCP, with no copying:
+
+```bash
+brain mcp config --host claude-desktop --write
+```
+
+See [Agents that call Brain directly](docs/USER_GUIDE.md#agents-that-call-brain-directly-mcp).
+Microsoft 365 Copilot cannot reach a laptop, so it keeps the file handoff.
+
 See the [M365 setup guide](docs/USER_GUIDE.md#6-create-a-persistent-m365-copilot-agent)
 for the files to add to Agent Builder and the Protocol v5 multi-wave workflow.
 

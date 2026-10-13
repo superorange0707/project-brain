@@ -894,6 +894,50 @@ directly for business, document, runtime, and environment facts. It emits a
 `INVESTIGATION_REQUEST` only when local repository evidence is required. Project Brain
 does not install a connector, request an M365 credential, or call the cloud.
 
+### Agents that call Brain directly (MCP)
+
+Claude Desktop, Claude Code (including inside the MPS 2026.1 terminal), VS Code
+with GitHub Copilot, Cursor and JetBrains AI Assistant can call Brain as a
+Model Context Protocol server instead of you copying handoffs. Connect a host
+once from your workspace:
+
+```bash
+brain mcp config --host claude-desktop --write
+brain mcp config --host claude-code --write
+brain mcp config --host vscode --write
+brain mcp config --host cursor --write
+brain mcp config --host jetbrains
+```
+
+`--write` merges a `project-brain-<workspace>` entry into the host's file
+(Claude Desktop's `claude_desktop_config.json`, `.mcp.json`, `.vscode/mcp.json`
+or `.cursor/mcp.json` in the workspace) and keeps every other server. JetBrains
+prints the JSON to paste under **Settings | Tools | AI Assistant | Model Context
+Protocol (MCP)**. For Claude Code the command also prints a
+`claude mcp add --scope user ...` line that works in every project. The entry
+uses the absolute executable and `brain.toml` paths, because hosts do not inherit
+your shell `PATH`; it never contains the UI token. Restart or reconnect the host
+afterwards.
+
+The agent then uses these tools: `brain_start`, `brain_continue` (send an
+`INVESTIGATION_REQUEST` object or a `FINAL_SOLUTION`), `brain_handoff` (further
+pages), `brain_session`, `brain_resume`, `brain_feedback` and `brain_status`.
+They run the same retrieval, pins, budgets and duplicate checks as the UI, in
+the server process, so the UI does not need to be running. Results are paged at
+80,000 characters. There are deliberately no tools to delete sessions, change
+models or editions, clean storage, or read arbitrary local files; attach
+documents yourself with `brain evidence`.
+
+| Host | Calls a local MCP server? |
+|---|---|
+| Claude Desktop, Claude Code, Cursor, JetBrains AI Assistant | Yes (stdio). |
+| VS Code / JetBrains with GitHub Copilot | Yes, when your organization enables the *MCP servers in Copilot* policy (off by default for Business/Enterprise). |
+| Microsoft 365 Copilot (Agent Builder, Copilot Studio) | No: these run in Microsoft's cloud and cannot reach your laptop. Keep the file handoff above. |
+
+An MCP host sends the retrieved source to whichever model it uses, exactly as a
+pasted handoff would, but without a manual step. Use only hosts your company
+approves for that source.
+
 ## 7. Local investigation cockpit
 
 Run the editor-independent GUI from a Brain workspace:
