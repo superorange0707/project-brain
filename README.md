@@ -58,7 +58,8 @@ nothing needs re-pasting. `brain upgrade --check` only reports versions.
 Workspaces, model packs, caches, Atlas generations and ticket sessions are
 preserved, and existing tickets keep their pinned generations.
 
-Upgrading from v1.0.33 or older, which predate `brain upgrade`, takes the old
+`brain upgrade`, `brain mcp` and Windows `brain service` ship in the first
+release after v1.0.33. Upgrading from v1.0.33 or older takes the old
 steps one last time: `brain ui stop`, `brew update`,
 `brew trust --formula superorange0707/tap/project-brain`,
 `brew upgrade superorange0707/tap/project-brain`, then `brain ui` (Windows:

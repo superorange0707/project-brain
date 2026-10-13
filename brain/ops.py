@@ -624,6 +624,9 @@ def dashboard_status(settings: Settings) -> dict[str, Any]:
         health = "Freshness unverified"
     else:
         health = "Healthy"
+    from .agent import agent_kit_status
+    from .upgrade import status_update
+
     return {
         "version": __import__("brain").__version__,
         "edition": requested,
@@ -632,8 +635,8 @@ def dashboard_status(settings: Settings) -> dict[str, Any]:
         "health": health,
         "core": {"ready": core_ready, "source_freshness": source_freshness},
         "generation_predates_binary": generation_predates_binary(current_generation_ref(settings)),
-        "agent_kit": __import__("brain.agent", fromlist=["agent_kit_status"]).agent_kit_status(settings),
-        "update": __import__("brain.upgrade", fromlist=["status_update"]).status_update(settings),
+        "agent_kit": agent_kit_status(settings),
+        "update": status_update(settings),
         "semantic": semantic,
         "capabilities": available,
         "freshness": repo_freshness,

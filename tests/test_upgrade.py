@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -189,6 +190,32 @@ class UpgradeTests(unittest.TestCase):
         (self.install / "keep.old").write_bytes(b"keep")
         upgrade_module.cleanup_retired(self.install)
         self.assertEqual({"brain", "zoekt", "notes.txt", "keep.old"}, {p.name for p in self.install.iterdir()})
+
+
+@unittest.skipUnless(os.name == "nt", "Windows executable locking semantics")
+class WindowsRunningExecutableTests(unittest.TestCase):
+    def test_running_executable_can_be_renamed_aside_and_replaced_but_not_deleted(self) -> None:
+        import shutil
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            running = directory / "brain.exe"
+            shutil.copy2(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe", running)
+            process = subprocess.Popen([str(running), "/c", "ping -n 30 127.0.0.1 >nul"])
+            try:
+                time.sleep(1)
+                with self.assertRaises(PermissionError):
+                    running.unlink()
+                (directory / "unpacked").mkdir()
+                (directory / "unpacked" / "brain.exe").write_bytes(b"new")
+                upgrade_module._swap(directory / "unpacked", directory)
+                self.assertEqual(b"new", running.read_bytes())
+                self.assertTrue((directory / ("brain.exe" + upgrade_module.ASIDE_SUFFIX)).exists())
+            finally:
+                process.kill()
+                process.wait()
+            upgrade_module.cleanup_retired(directory)
+            self.assertFalse((directory / ("brain.exe" + upgrade_module.ASIDE_SUFFIX)).exists())
 
 
 class UpdateStatusTests(unittest.TestCase):
