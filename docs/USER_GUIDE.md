@@ -339,6 +339,19 @@ and the relevant folder access setting if registration succeeds but startup does
 not. Company MDM policies still apply. Brain reports failed readiness explicitly;
 it does not elevate privileges or change these policies.
 
+### Windows sign-in startup
+
+On Windows, `brain service install` (from an initialized workspace) adds one
+value to your own `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` key and
+starts the UI now. At each sign-in Windows runs
+`brain -c <workspace>\brain.toml ui --no-open`, which starts the background UI
+and its idle refresh and then exits. No administrator rights, Task Scheduler
+or Windows service are involved. `brain service start|stop|status|uninstall`
+work as on macOS; `uninstall` removes only this workspace's value, and
+`--port` is kept across reinstalls. Unlike macOS, nothing restarts the UI after
+a crash; `brain ui` reopens it. Company policy can disable Run-key startup
+items; Brain then reports the UI as stopped after sign-in.
+
 ### What “latest” means
 
 Project Brain runs `git fetch --prune --quiet origin` for each repo. It then picks

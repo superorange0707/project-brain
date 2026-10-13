@@ -153,7 +153,7 @@ def _wait_ready(settings: Settings, label: str, *, timeout: float = 30) -> None:
 
 def _require_macos() -> None:
     if sys.platform != "darwin":
-        raise BrainError("Login services currently support macOS. Use brain ui for terminal-independent operation on this platform.")
+        raise BrainError("Login services currently support macOS and Windows. Use brain ui for terminal-independent operation on this platform.")
 
 
 def service(settings: Settings, action: str, *, port: int | None = None) -> dict[str, Any]:

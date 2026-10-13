@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from dataclasses import asdict
@@ -271,7 +272,7 @@ def _parser() -> argparse.ArgumentParser:
     mcp.add_argument("--host", choices=("claude-desktop", "claude-code", "vscode", "cursor", "jetbrains"),
                      help="host to configure with the config action")
     mcp.add_argument("--write", action="store_true", help="merge the entry into the host's configuration file")
-    service = commands.add_parser("service", help="manage this workspace's macOS login/background service")
+    service = commands.add_parser("service", help="start this workspace at sign-in (macOS LaunchAgent, Windows Run key)")
     service.add_argument("action", choices=("install", "start", "status", "stop", "uninstall"))
     service.add_argument("--port", type=int, help="install with this loopback port; 0 chooses a free port")
     service.add_argument("--json", action="store_true", help="print service status as JSON")
@@ -1059,13 +1060,17 @@ def execute(args: argparse.Namespace) -> int:
             print(f"{error}. Retry brain upgrade when it is idle.", file=sys.stderr)
             return 75
     if args.command == "service":
-        from .mac_service import service
+        if os.name == "nt":
+            from .win_service import service
+        else:
+            from .mac_service import service
 
         status = service(settings, args.action, port=args.port)
         if args.json:
             print(json.dumps(status, indent=2))
         else:
-            print("macOS login service: " + ("installed" if status["installed"] else "not installed"))
+            print(("Windows sign-in startup: " if os.name == "nt" else "macOS login service: ")
+                  + ("installed" if status["installed"] else "not installed"))
             print(f"Brain UI: running on 127.0.0.1:{status['port']}" if status["running"] else "Brain UI: stopped")
             print(f"Log: {status['log']}")
         return 0

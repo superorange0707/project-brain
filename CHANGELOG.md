@@ -46,6 +46,9 @@ All notable changes are documented here. This project follows Semantic Versionin
   the existing retrieval in-process under the same locks; results are paged at
   80,000 characters. No delete/model/edition/storage tools and no arbitrary file
   reads. Microsoft 365 Copilot keeps the file handoff.
+- `brain service install|start|stop|status|uninstall` now works on Windows
+  through a per-user `Run` registry value (no administrator rights): the UI and
+  idle refresh start again after every sign-in, as the LaunchAgent does on macOS.
 - CI: run pull-request checks once per head on a representative matrix (Linux
   3.11/3.14, Windows 3.14) with cancellation of superseded runs and job
   timeouts; skip draft pull requests; run one post-merge check on `main`; move
