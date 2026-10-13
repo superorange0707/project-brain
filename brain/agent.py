@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -220,21 +221,23 @@ def archive_final_solution(settings: Settings, ticket: str, text: str) -> Path:
     return path
 
 
-def create_m365_agent_kit(settings: Settings) -> dict[str, Any]:
-    from .core import (
-        _atomic_generated_text_write,
-        _bounded_text_file,
-        _bounded_utf8_text,
-        _validated_generated_artifact,
-    )
+M365_KIT_DIRECTORY = "m365-agent"
+# Agent Builder embeds .txt but not .md knowledge files; the content stays Markdown.
+M365_KNOWLEDGE_FILE = "PROJECT_KNOWLEDGE.txt"
+_KIT_STATUS_CACHE: dict[tuple, dict[str, Any]] = {}
 
-    directory = settings.generated_dir / "m365-agent"
-    _validated_generated_artifact(settings, directory / ".managed", create_parents=True)
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _render_m365_pasted_texts(settings: Settings) -> tuple[str, str]:
+    """The two texts a user pastes/uploads into Agent Builder, rendered without writing."""
+    from .core import _bounded_text_file, _bounded_utf8_text
+
     instructions = package_files("brain").joinpath("m365_agent_instructions.md").read_text(encoding="utf-8")
     project_name, _ = _bounded_utf8_text(settings.name, 512, " [truncated]")
     instructions = instructions.replace("{{PROJECT_NAME}}", project_name)
-    instructions_path = directory / "INSTRUCTIONS.md"
-    _atomic_generated_text_write(settings, instructions_path, instructions.rstrip() + "\n")
 
     knowledge = ["# Project knowledge", "", f"Project: `{settings.name}`", "", "## Repository catalog", ""]
     for repo in settings.repositories:
@@ -271,8 +274,22 @@ def create_m365_agent_kit(settings: Settings) -> dict[str, Any]:
         M365_KNOWLEDGE_TOTAL_BYTES,
         "\n\n[Project Brain omitted remaining Agent Kit knowledge at the byte limit.]\n",
     )
-    knowledge_path = directory / "PROJECT_KNOWLEDGE.md"
+    return instructions, knowledge_text
+
+
+def create_m365_agent_kit(settings: Settings) -> dict[str, Any]:
+    from .core import _atomic_generated_text_write, _validated_generated_artifact
+
+    directory = settings.generated_dir / M365_KIT_DIRECTORY
+    _validated_generated_artifact(settings, directory / ".managed", create_parents=True)
+    instructions, knowledge_text = _render_m365_pasted_texts(settings)
+    instructions_path = directory / "INSTRUCTIONS.md"
+    _atomic_generated_text_write(settings, instructions_path, instructions.rstrip() + "\n")
+    knowledge_path = directory / M365_KNOWLEDGE_FILE
     _atomic_generated_text_write(settings, knowledge_path, knowledge_text)
+    legacy_knowledge = directory / "PROJECT_KNOWLEDGE.md"
+    if legacy_knowledge.is_file() and not legacy_knowledge.is_symlink():
+        legacy_knowledge.unlink()  # Superseded by the .txt file Agent Builder accepts.
 
     suggested = """# Suggested prompts
 
@@ -309,7 +326,7 @@ Starter prompt:
 
 > Investigate this ticket as a read-only coding agent. I will attach the Project Brain start package. Ask me directly for business, document, or runtime facts; emit an INVESTIGATION_REQUEST v5 only when local repository evidence is required; return FINAL_SOLUTION when the implementation is ready.
 
-This kit uses Project Brain INVESTIGATION_REQUEST protocol v5, bounded multi-wave investigation, and delta context lineage. Protocols v1–v4 remain accepted for existing conversations. After upgrading Brain, rerun `brain agent-kit m365`, replace Agent Builder Instructions and PROJECT_KNOWLEDGE.md, and optionally refresh Suggested Prompts. A new M365 conversation is recommended for protocol validation.
+This kit uses Project Brain INVESTIGATION_REQUEST protocol v5, bounded multi-wave investigation, and delta context lineage. Protocols v1–v4 remain accepted for existing conversations. You do not need to redo this after every Brain upgrade: `brain status`, `brain upgrade` and the UI Health panel report when the rendered Instructions or {knowledge_path.name} changed. Only then rerun `brain agent-kit m365` and replace that item in Agent Builder.
 
 For every ticket, run `brain start TICKET --ticket-file ticket.md --target m365` and upload the printed `generated/handoffs/TICKET/start.md`. During a longer v5 wave, Brain may publish `checkpoint-NNN.md` in that ticket folder before the remaining flow work finishes; upload it immediately if you need the first exact evidence, then apply `checkpoint-delta-NNN.md` to that checkpoint when it appears. The normal completed-round handoff remains `context-NNN.md` in the same ticket folder. Never upload the internal `.runs/TICKET/request-NNN.yml`; it is the AI-to-Brain command. The changing filename prevents M365 from reusing an older attachment; `current.md` is only a local alias.
 """
@@ -347,6 +364,8 @@ Return `FINAL_SOLUTION` only when exact repositories, files, symbols/configurati
         "investigation_protocol": 5,
         "legacy_protocols": [1, 2, 3, 4],
         "state_machine": ["INTAKE", "ORIENT", "INVESTIGATE", "CHALLENGE", "SYNTHESIZE", "STOP"],
+        "instructions_sha256": _sha256_text(instructions),
+        "knowledge_sha256": _sha256_text(knowledge_text),
     }
     manifest_path = directory / "AGENT_KIT.json"
     _atomic_generated_text_write(settings, manifest_path, json.dumps(manifest, indent=2) + "\n")
@@ -365,3 +384,45 @@ Return `FINAL_SOLUTION` only when exact repositories, files, symbols/configurati
         "setup": setup,
         "protocol": protocol,
     }
+
+
+def agent_kit_status(settings: Settings) -> dict[str, Any]:
+    """Whether the Agent Builder copy is current, without writing anything; never raises."""
+    from .catalog import current_generation_ref
+    from .core import _bounded_text_file
+
+    directory = settings.generated_dir / M365_KIT_DIRECTORY
+    manifest_path = directory / "AGENT_KIT.json"
+    try:
+        if not manifest_path.is_file():
+            return {"status": "missing", "changed": [], "directory": str(directory)}
+        generation = current_generation_ref(settings)
+
+        def stamp(path: Path) -> tuple:
+            try:
+                metadata = path.stat()
+                return metadata.st_size, metadata.st_mtime_ns
+            except OSError:
+                return ()
+
+        # ponytail: re-rendering parses pinned models for the catalog, so the
+        # 5-second UI poll reuses a result keyed on every rendered input.
+        key = (str(directory), stamp(manifest_path), generation.identity if generation else None,
+               stamp(settings.knowledge_dir / "PROJECT_MAP.md"), stamp(settings.knowledge_dir / "glossary.md"),
+               settings.name, tuple((repo.name, repo.description, tuple(repo.tags)) for repo in settings.repositories))
+        if key in _KIT_STATUS_CACHE:
+            return dict(_KIT_STATUS_CACHE[key])
+        text, _ = _bounded_text_file(manifest_path, 64 * 1024)
+        manifest = json.loads(text)
+        instructions, knowledge_text = _render_m365_pasted_texts(settings)
+        changed = [name for name, field, value in (
+            ("INSTRUCTIONS.md", "instructions_sha256", instructions),
+            (M365_KNOWLEDGE_FILE, "knowledge_sha256", knowledge_text),
+        ) if manifest.get(field) != _sha256_text(value)]
+        result = {"status": "stale" if changed else "current", "changed": changed, "directory": str(directory)}
+        if len(_KIT_STATUS_CACHE) >= 32:
+            _KIT_STATUS_CACHE.clear()
+        _KIT_STATUS_CACHE[key] = result
+        return dict(result)
+    except Exception as error:  # Status must never break the UI or CLI status path.
+        return {"status": "unknown", "changed": [], "directory": str(directory), "error": type(error).__name__}

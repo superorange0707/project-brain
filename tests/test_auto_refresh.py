@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 from brain.auto_refresh import (
     MAX_FRESHNESS_PROBE_SECONDS,
+    SCHEMA_DRIFT_REASON,
     AutoRefreshService,
     FreshnessDecision,
     _probe_repository,
@@ -308,6 +309,31 @@ class AutoRefreshServiceTests(unittest.TestCase):
             decision = detect_auto_refresh(self.settings)
         self.assertEqual("refresh", decision.kind)
         self.assertIn("Core indexes are stale.", decision.reasons)
+
+    def test_schema_drift_is_a_refreshable_reason(self) -> None:
+        from dataclasses import replace
+
+        from brain.catalog import current_generation_ref
+        from brain.ops import dashboard_status
+
+        self._initialize_git_state()
+        self.assertEqual("ready", detect_auto_refresh(self.settings).kind)
+        self.assertFalse(dashboard_status(self.settings)["generation_predates_binary"])
+
+        with patch("brain.catalog.schema_fingerprint", return_value="sha256:" + "0" * 64):
+            decision = detect_auto_refresh(self.settings)
+            self.assertTrue(dashboard_status(self.settings)["generation_predates_binary"])
+        self.assertEqual("refresh", decision.kind)
+        self.assertIn(SCHEMA_DRIFT_REASON, decision.reasons)
+
+        current = current_generation_ref(self.settings)
+        legacy_manifest = dict(current.manifest["schema_manifest"])
+        legacy_manifest.pop("brain_schema_fingerprint")
+        legacy = replace(current, manifest={**current.manifest, "schema_manifest": legacy_manifest})
+        with patch("brain.catalog.current_generation_ref", return_value=legacy):
+            decision = detect_auto_refresh(self.settings)
+        self.assertEqual("refresh", decision.kind)
+        self.assertIn(SCHEMA_DRIFT_REASON, decision.reasons)
 
     def test_unpublished_snapshot_is_refreshed_when_idle(self) -> None:
         from brain.core import load_source_state, snapshot_indexes

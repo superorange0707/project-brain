@@ -18,6 +18,16 @@ All notable changes are documented here. This project follows Semantic Versionin
   in `brain evaluate --golden`.
 - Reuse the validated managed snapshot seal during MPS component builds instead
   of re-reading it; record refresh phase timings in the scale regression.
+- Upgrades no longer need a manual **Refresh Brain**: each published generation
+  records a fingerprint of every serving schema/extractor/parser constant, and
+  idle auto-refresh republishes when the running Brain's fingerprint differs.
+  The first refresh after this release republishes once; old tickets keep their
+  pinned generations. `brain status` and the UI Health panel report the drift.
+- The M365 Agent Kit records hashes of the rendered instructions and knowledge.
+  `brain status` and the UI Health panel report only when one changed, so
+  re-pasting into Agent Builder is no longer an every-release step. The
+  knowledge file is now `PROJECT_KNOWLEDGE.txt` (Agent Builder embeds `.txt`,
+  not `.md`); a stale `PROJECT_KNOWLEDGE.md` is removed on regeneration.
 - CI: run pull-request checks once per head on a representative matrix (Linux
   3.11/3.14, Windows 3.14) with cancellation of superseded runs and job
   timeouts; skip draft pull requests; run one post-merge check on `main`; move

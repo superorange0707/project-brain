@@ -1011,6 +1011,12 @@ def execute(args: argparse.Namespace) -> int:
                 print(f"- {repo['name']}: {repo['status']} {repo['sha'] or 'unknown'}")
             print(f"Ticket memory: {status['summary']['experience_cases']} committed cases")
             print(f"Investigations: {len(status['sessions'])}")
+            brain_status = status.get("brain") or {}
+            if brain_status.get("generation_predates_binary"):
+                print("Index: the published generation predates this Brain version; the next refresh republishes it.")
+            kit = brain_status.get("agent_kit") or {}
+            if kit.get("status") == "stale":
+                print(f"M365 Agent Kit changed ({', '.join(kit['changed'])}): run brain agent-kit m365 and replace it in Agent Builder.")
         return 0
     if args.command == "service":
         from .mac_service import service

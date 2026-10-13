@@ -14,6 +14,27 @@ remote descriptor/artifact downloads must remain proxy-aware and checksum-
 verified. Never solve a loopback proxy failure by changing global proxy settings
 or weakening TLS.
 
+## Release cadence and the upgrade contract
+
+Forty tags in six weeks (four on one day) made every user repeat the upgrade
+ritual almost daily. The cadence and contract are therefore:
+
+- Publish a stable release every two to four weeks, batching fixes. Validate
+  candidates on the pull request and its hosted CI, not by publishing tags
+  that are later withheld.
+- A patch release (`x.y.Z`) must not change any index, Atlas, relationship,
+  investigation, MPS parser or Semantic schema constant. Changing one of them
+  alters `brain.catalog.schema_fingerprint()`, forces a new generation for new
+  tickets and is a minor release (`x.Y.0`) with a release-note sentence saying
+  that the first idle refresh republishes automatically.
+- Users upgrade with `brain upgrade`; release notes never list the manual
+  stop/update/trust/upgrade/refresh sequence. The post-upgrade refresh is
+  triggered by the schema-drift probe when the UI is idle (or by
+  `brain upgrade --finish`), and the M365 Agent Kit is regenerated only when
+  Brain reports that its rendered instructions or knowledge changed.
+- Hosted CI runs once per ready pull request and once post-merge; the full
+  OS/Python matrix, native packaging and model qualification run on the tag.
+
 ## Core release and Homebrew
 
 1. Run the full public/synthetic test suite on Python 3.11–3.14 for Linux and

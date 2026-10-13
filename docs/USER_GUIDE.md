@@ -868,13 +868,13 @@ This creates:
 ```text
 generated/m365-agent/
 ├── INSTRUCTIONS.md
-├── PROJECT_KNOWLEDGE.md
+├── PROJECT_KNOWLEDGE.txt
 ├── SUGGESTED_PROMPTS.md
 └── SETUP.md
 ```
 
 Paste `INSTRUCTIONS.md` into the Agent Builder **Instructions** field. Add
-`PROJECT_KNOWLEDGE.md` plus approved IPF, architecture, API, deployment, and
+`PROJECT_KNOWLEDGE.txt` plus approved IPF, architecture, API, deployment, and
 coding-standard documents to **Knowledge**. Keep operational instructions in the
 Instructions field rather than hiding them in a knowledge document.
 Add the four title/prompt pairs from `SUGGESTED_PROMPTS.md` to **Suggested
@@ -1002,9 +1002,13 @@ sent into Brain, while `generated/handoffs/ABC-1234/context-010.md` is Brain's e
 the AI. Only upload the visible `context-NNN.md` file.
 
 Agent Kit v4 and Investigation Protocol v5 support continued evidence requests
-without a lifetime round limit or extra continuation approval. Regenerate the
-kit and replace your existing Agent's INSTRUCTIONS.md and PROJECT_KNOWLEDGE.md
-to update older guidance. You do not need a new Agent or a new ticket.
+without a lifetime round limit or extra continuation approval. The knowledge
+file is `PROJECT_KNOWLEDGE.txt` because Agent Builder embeds `.txt` but not `.md`
+files; its content is unchanged Markdown. You do not need to regenerate the kit
+after every upgrade: `brain status`, `brain upgrade` and the UI Health panel say
+when the rendered instructions or knowledge changed. Only then rerun
+`brain agent-kit m365` and replace the changed item in your existing Agent. You
+do not need a new Agent or a new ticket.
 
 ```bash
 brain agent-kit m365 --json

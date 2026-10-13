@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 
 MAX_FRESHNESS_PROBE_SECONDS = 45.0
+SCHEMA_DRIFT_REASON = "Published generation predates this Brain version."
 
 
 @dataclass(frozen=True)
@@ -135,7 +136,7 @@ def _probe_repository(
 
 def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
     """Detect only drift that the authoritative refresh pipeline can recover."""
-    from .catalog import current_generation_ref
+    from .catalog import current_generation_ref, generation_predates_binary
     from .core import discover_git_repositories, load_source_state
     from .editions import capabilities, current_edition
     from .ops import StateCapacityError, ensure_write_capacity, semantic_status
@@ -168,6 +169,8 @@ def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
         reasons: set[str] = set()
         if not available.get("lexical_index"):
             reasons.add("Core indexes are stale.")
+        if generation_predates_binary(atlas):
+            reasons.add(SCHEMA_DRIFT_REASON)
 
         for repo in settings.repositories:
             source = sources.get(repo.name) or {}
