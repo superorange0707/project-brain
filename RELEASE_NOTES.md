@@ -1,4 +1,4 @@
-# Project Brain v1.0.34 — One-Command Upgrades, MCP Agents and Joint Java/MPS Evidence
+# Project Brain v1.0.35 — One-Command Upgrades, MCP Agents and Joint Java/MPS Evidence
 
 Upgrading no longer takes a checklist, AI agents that support the Model Context
 Protocol can call Brain directly, Windows gains sign-in startup, and code
@@ -29,6 +29,8 @@ evidence is retrieved beside the MPS model nodes that reference it.
   `classes_gen` are labelled generated source; start handoffs include an MPS
   model catalog; ticket history includes model changes; golden suites can
   score expected model nodes.
+- **Faster large requests on Windows**: anchor and call-flow lookups share one
+  database connection per request instead of opening one per symbol.
 - Faster, cheaper project CI and a cleaner repository layout.
 
 ## Upgrade from v1.0.33
@@ -45,9 +47,9 @@ brain --version
 brain ui
 ```
 
-The version must be `brain 1.0.34`. If you use the macOS login service, run
+The version must be `brain 1.0.35`. If you use the macOS login service, run
 `brain service install` instead of `brain ui`. On Windows, rerun the installer
-with `-Version 1.0.34`. From now on, `brain upgrade` is the only step.
+with `-Version 1.0.35`. From now on, `brain upgrade` is the only step.
 
 After this upgrade the index is republished once: automatically when
 **Auto Refresh** is set to *When idle*, otherwise click **Refresh Brain** once

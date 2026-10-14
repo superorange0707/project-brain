@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import xml.etree.ElementTree as ET
@@ -536,6 +537,15 @@ _ACTIVE_RETRIEVAL_TRACE: contextvars.ContextVar[Any | None] = contextvars.Contex
 _ACTIVE_RETRIEVAL_CACHE: contextvars.ContextVar[dict[tuple[Any, ...], Any] | None] = contextvars.ContextVar("brain_retrieval_cache", default=None)
 
 
+def _close_scope_connections() -> None:
+    """Close catalog connections reused within the retrieval scope about to end."""
+    pool = (_ACTIVE_RETRIEVAL_CACHE.get() or {}).get(("catalog-connections",)) or {}
+    if pool.get("thread") != threading.get_ident():
+        return  # Only the owning thread may close SQLite connections; scopes end on their owner.
+    for connection in (pool.get("connections") or {}).values():
+        connection.close()
+
+
 @contextmanager
 def _pinned_source_cache_scope():
     token = _ACTIVE_RETRIEVAL_CACHE.set({}) if _ACTIVE_RETRIEVAL_CACHE.get() is None else None
@@ -543,6 +553,7 @@ def _pinned_source_cache_scope():
         yield
     finally:
         if token is not None:
+            _close_scope_connections()
             _ACTIVE_RETRIEVAL_CACHE.reset(token)
 _REPO_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="brain-repo")
 
@@ -2039,6 +2050,7 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
         return _trace_symbol(settings, query, repos)
     finally:
         if token is not None:
+            _close_scope_connections()
             _ACTIVE_RETRIEVAL_CACHE.reset(token)
 
 
@@ -4599,6 +4611,7 @@ def retrieve_context(
         return bundle
     finally:
         trace._set_backend_headroom(0)
+        _close_scope_connections()
         _ACTIVE_RETRIEVAL_CACHE.reset(cache_token)
         _ACTIVE_RETRIEVAL_TRACE.reset(trace_token)
 
@@ -6994,6 +7007,7 @@ def create_context(
                 )
             finally:
                 _ACTIVE_RETRIEVAL_TRACE.reset(anchor_trace_token)
+                _close_scope_connections()
                 _ACTIVE_RETRIEVAL_CACHE.reset(anchor_cache_token)
             from .editions import current_edition as runtime_edition
 

@@ -2,7 +2,22 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.34] - 2026-10-14
+## [1.0.35] - 2026-10-14
+
+- Reuse one catalog database connection per retrieval request for runtime
+  anchor and execution-flow lookups instead of opening one per lookup. A
+  50-symbol request opened about 80 connections; on Windows each managed open
+  is slow enough that anchor resolution consumed most of the 10-second request
+  budget and later method-range lookups were skipped. The shared connection's
+  query counter and deadline handler are removed after each flow, and the
+  request scope closes its connections.
+- Includes every change listed under 1.0.34.
+
+## [1.0.34] - Unpublished candidate
+
+- Withheld after native Windows release validation found the per-lookup
+  database opens above; v1.0.35 includes the correction and all of the
+  following changes.
 
 - Seed the ordinary code search with identifiers decoded from matched MPS node
   properties (package-qualified or CamelCase values), placed after explicit

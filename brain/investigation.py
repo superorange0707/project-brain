@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from itertools import islice
 from pathlib import Path, PurePosixPath
-from threading import RLock
+from threading import RLock, get_ident
 from typing import TYPE_CHECKING, Any, Iterable
 
 from .atlas import (
@@ -1553,6 +1553,37 @@ def resolve_runtime_anchors(
     return result
 
 
+CATALOG_CONNECTIONS_KEY = ("catalog-connections",)
+
+
+def _scoped_catalog_connection(settings: Settings) -> tuple[Any, Any]:
+    """One catalog connection per retrieval scope on the scope's thread.
+
+    Opening a managed SQLite database validates its path handles, which costs
+    tens to hundreds of milliseconds on Windows; a 50-symbol request resolved
+    anchors through ~80 separate opens. Reuse is limited to the thread that
+    owns the request scope (SQLite connections are thread-bound); the scope's
+    owner closes them through core._close_scope_connections.
+    """
+    from .core import _ACTIVE_RETRIEVAL_CACHE
+
+    cache = _ACTIVE_RETRIEVAL_CACHE.get()
+    pool = cache.setdefault(CATALOG_CONNECTIONS_KEY, {"thread": get_ident(), "connections": {}}) if cache is not None else None
+    if pool is None or pool["thread"] != get_ident():
+        connection = connect(settings)
+        return connection, connection.close
+    key = str(settings.state_dir.resolve())
+    connection = pool["connections"].get(key)
+    if connection is None:
+        connection = pool["connections"][key] = connect(settings)
+
+    def release() -> None:
+        if connection.in_transaction:
+            connection.rollback()  # A failed lookup must not leave a write open on the shared connection.
+
+    return connection, release
+
+
 def _resolve_runtime_anchors(
     settings: Settings,
     generation: AtlasGenerationRef,
@@ -1620,7 +1651,7 @@ def _resolve_runtime_anchors(
     seal_key = (str(settings.state_dir.resolve()), generation.generation, cache_key)
     candidates: dict[str, dict[str, Any]] = {}
     poisoned_row = False
-    connection = connect(settings)
+    connection, release_connection = _scoped_catalog_connection(settings)
     now = datetime.now(UTC).isoformat()
     database_operations = 0
     try:
@@ -1944,7 +1975,7 @@ def _resolve_runtime_anchors(
             _ANCHOR_CACHE_SEALS[seal_key] = payload_hash
         return value
     finally:
-        connection.close()
+        release_connection()
 
 
 def _pinned_repository_evidence(bundle: ContextBundle, evidence: Any) -> bool:
@@ -2479,7 +2510,7 @@ def _execution_flow(
         return {"schema_version": EXECUTION_FLOW_SCHEMA_VERSION, "compatibility_identity": compatibility,
                 "generation": generation.generation, "status": "degraded", "reason": "no anchored entities", "steps": [],
                 "database_operations": 0}
-    connection = connect(settings)
+    connection, release_connection = _scoped_catalog_connection(settings)
     steps: list[dict[str, Any]] = []
     seen_edges: set[str] = set()
     seen_python_calls: set[tuple[Any, ...]] = set()
@@ -2724,7 +2755,11 @@ def _execution_flow(
                     "reason": "pinned graph query failed", "steps": [], "paths": [],
                     "database_operations": database_operations}
     finally:
-        connection.close()
+        # The connection may be shared by the request scope: never leave this
+        # flow's counter or its expired deadline interrupting later queries.
+        connection.set_trace_callback(None)
+        connection.set_progress_handler(None, 0)
+        release_connection()
     paths = _execution_paths(steps)
     return {
         "schema_version": EXECUTION_FLOW_SCHEMA_VERSION, "compatibility_identity": compatibility,
