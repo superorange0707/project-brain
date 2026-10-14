@@ -4,401 +4,163 @@
 
 **Give the chat AI your company already allows a safe, local codebase tool loop.**
 
-Project Brain turns tickets and follow-up questions into verified source context
-across multiple repositories. Retrieval runs locally, source repositories stay
-read-only, and exact pinned source remains the final evidence authority.
+Project Brain turns a ticket into verified source evidence from all of your
+repositories, so Microsoft 365 Copilot, Claude or an IDE agent can propose a
+concrete change. Everything runs on your machine, and your repositories stay read-only.
 
 [![CI](https://github.com/superorange0707/project-brain/actions/workflows/ci.yml/badge.svg)](https://github.com/superorange0707/project-brain/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/superorange0707/project-brain?display_name=tag)](https://github.com/superorange0707/project-brain/releases/latest)
-[![Python 3.11–3.14](https://img.shields.io/badge/Python-3.11%E2%80%933.14-3776AB?logo=python&logoColor=white)](https://github.com/superorange0707/project-brain/actions/workflows/ci.yml)
+[![Python 3.11–3.14](https://img.shields.io/badge/Python-3.11%E2%80%933.14-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Download](#install) · [Quick start](#quick-start) · [How it works](#how-it-works) · [User guide](docs/USER_GUIDE.md) · [Security](SECURITY.md)
+[Install](#install) · [Quick start](#quick-start) · [Connect your AI](#connect-your-ai) · [User guide](docs/USER_GUIDE.md) · [How it works](docs/HOW_IT_WORKS.md)
 
 </div>
 
 ---
 
 ```text
-Ticket + docs ↔ Chat AI ↔ you
-                 │
-                 ├── business/runtime question → answer directly
-                 ├── INVESTIGATION_REQUEST → Brain → verified source evidence
-                 └── enough evidence → implementation guidance
+Ticket ──► Chat AI ──INVESTIGATION_REQUEST──► Project Brain ──► your repositories (read-only)
+              ▲                                     │
+              └──────── pinned source evidence ◄────┘
 ```
 
-Project Brain expands an investigation request into source, symbols, callers,
-tests, configuration, Git history, and cross-repository relationships. You stay
-in control and apply the resulting solution in your normal IDE.
+![Project Brain workspace: a ticket with its pinned start package, request, checkpoints and evidence context](docs/assets/cockpit.jpg)
+
+The AI does the reasoning; Brain does the searching. Each request is expanded
+into exact source, callers, tests, configuration, Git history and
+cross-repository links, and every piece of evidence is pinned to the snapshot
+the ticket started from. You apply the resulting change in your own IDE.
+
+- **Works with the AI you already have.** Microsoft 365 Copilot (file handoff),
+  Claude Desktop, Claude Code, Cursor and JetBrains/VS Code agents (MCP), or any
+  chat window (clipboard).
+- **Many repositories, one investigation.** Java/Spring, Kafka, Feign, Python,
+  configuration and JetBrains MPS models in the same evidence context.
+- **Local and read-only.** No hosted service, no source upload by Brain, no
+  build or test execution in your repositories.
 
 ## Install
 
-This source tree documents **v1.0.33** for macOS, Windows and Linux. Published
-downloads are listed on the [latest stable release](https://github.com/superorange0707/project-brain/releases/latest).
-Standalone downloads contain `brain`, `codebase-memory-mcp`, `zoekt`, and
-`zoekt-index`; model weights are never bundled.
+| Platform | Command |
+|---|---|
+| macOS | `brew install superorange0707/tap/project-brain` |
+| Windows 11 x64 | Installer below, or the portable [ZIP](https://github.com/superorange0707/project-brain/releases/latest) |
+| Linux | `curl -fsSLO https://github.com/superorange0707/project-brain/releases/latest/download/install-project-brain.sh && sh install-project-brain.sh` |
+| Python 3.11–3.14 | `uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.34"` |
 
-### macOS — Homebrew
-
-```bash
-brew install superorange0707/tap/project-brain
-```
-
-Already using Project Brain?
-
-```bash
-brain ui stop
-brew update
-brew trust --formula superorange0707/tap/project-brain
-brew upgrade superorange0707/tap/project-brain
-brain --version
-brain ui
-```
-
-Homebrew installs a prebuilt package; it does not compile Python or require
-Xcode. Existing workspaces, model packs, caches, Atlas generations, and ticket
-sessions are preserved during upgrades. Finish active refresh or retrieval work
-before stopping the UI. Run **Refresh Brain** once after upgrading so new tickets
-receive the richer MPS discovery metadata. Existing tickets keep their pinned
-generations; no model-pack reinstall, ticket reset or re-embedding is required.
-See the
-[release upgrade notes](https://github.com/superorange0707/project-brain/releases/tag/v1.0.33).
-
-### Windows 11 x64
-
-On managed machines that allow `git clone` but block direct `.ps1` downloads,
-get the installer from the tagged repository and run it directly:
+**Windows.** No administrator rights or Python are needed. Run the installer
+from a temporary folder (on machines that block direct `.ps1` downloads, cloning
+the tagged repository works):
 
 ```powershell
-git clone --depth 1 --branch v1.0.33 https://github.com/superorange0707/project-brain.git project-brain-installer
-cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.33
+git clone --depth 1 --branch v1.0.34 https://github.com/superorange0707/project-brain.git project-brain-installer
 ```
-
-Specifying `-Version` skips the GitHub API lookup. The installer downloads only
-the matching Windows ZIP and `SHA256SUMS.txt`, verifies the archive, installs it
-under `%LOCALAPPDATA%\ProjectBrain\bin`, updates the user `PATH`, and checks the
-installed version. No execution-policy change is required when the environment
-already permits repository scripts.
-
-Run this installer clone from a downloads or temporary directory, not inside the
-directory that contains the repositories you will configure as a Brain
-workspace. The clone is not needed after installation.
-
-Already downloaded the ZIP? Put the release's `SHA256SUMS.txt` beside it and,
-from the installer clone, run:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.33-windows-amd64.zip"
+.\project-brain-installer\scripts\install-project-brain.ps1 -Version 1.0.34
 ```
 
-This path is fully offline: no API call, credentials, administrator access, or
-execution-policy change. It verifies the ZIP and uses the same staged install
-and PATH update as the online installer. `-ChecksumPath` can point to a checksum
-file in another directory. Close a running Brain UI before upgrading its tools.
+It verifies the release ZIP against `SHA256SUMS.txt`, installs it under
+`%LOCALAPPDATA%\ProjectBrain\bin` and adds that folder to your user `PATH`.
+Offline and blocked-PowerShell options are in the
+[User Guide](docs/USER_GUIDE.md#2-installation).
 
-If company policy also blocks PowerShell script execution, use the portable ZIP:
-
-**[Download `project-brain-v1.0.33-windows-amd64.zip`](https://github.com/superorange0707/project-brain/releases/download/v1.0.33/project-brain-v1.0.33-windows-amd64.zip)**
-
-Download the ZIP in a browser and extract its complete contents into
-`%LOCALAPPDATA%\ProjectBrain\bin` (or another folder you control) so the four
-`.exe` files and their notices remain together. Then run:
-
-```powershell
-cd "$env:LOCALAPPDATA\ProjectBrain\bin"
-.\brain.exe --version
-.\brain.exe --help
-```
-
-Add that folder to your user `PATH` if you want to run `brain.exe` from any
-directory. Python, WSL, Go, Git Bash, and Homebrew are not required. Git for
-Windows is recommended when `brain refresh` needs to fetch remote refs and
-create immutable Git snapshots.
-
-Verify the download against
-[`SHA256SUMS.txt`](https://github.com/superorange0707/project-brain/releases/download/v1.0.33/SHA256SUMS.txt):
-
-```powershell
-Get-FileHash .\project-brain-v1.0.33-windows-amd64.zip -Algorithm SHA256
-```
-
-On unrestricted machines, the same installer is also available directly from
-the [v1.0.33 Release assets](https://github.com/superorange0707/project-brain/releases/tag/v1.0.33).
-
-### Linux — verified user-level installer
+**Upgrading** from v1.0.34 onward is one command, run from your workspace:
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.33/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.33
-brain --version
+brain upgrade
 ```
 
-The installer selects Linux amd64 or arm64, verifies the published checksum,
-and installs the four executables in `~/.local/bin`.
-
-### Python package
-
-Python 3.11–3.14 is supported:
-
-```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.33"
-```
-
-Or install the release wheel directly:
-
-```bash
-python -m pip install https://github.com/superorange0707/project-brain/releases/download/v1.0.33/project_brain_context-1.0.33-py3-none-any.whl
-```
-
-All native archives, Python distributions, installers and their checksums are on the
-**[v1.0.33 Release page](https://github.com/superorange0707/project-brain/releases/tag/v1.0.33)**.
+It stops the local UI when idle, upgrades through Homebrew or swaps a verified
+standalone install, rebuilds the index only if the new version needs it, and
+restarts the UI. v1.0.33 and older predate this command: upgrade them once with
+`brew upgrade superorange0707/tap/project-brain` (after `brain ui stop`) or by
+rerunning the Windows installer.
 
 ## Quick start
 
-Run `brain init` from the directory that contains your repositories:
+From the folder that contains your repositories:
 
 ```bash
-cd ~/code/payments-platform
 brain init --name payments-platform
-brain ui
 ```
-
-`brain ui` starts the local service in the background and returns to the prompt.
-You can close both the terminal and browser; **Auto Refresh: When idle** keeps
-running while the computer is awake. Run `brain ui` again
-to reopen the same local instance, `brain ui status` to inspect it, or
-`brain ui stop` to stop it safely while idle. After a reboot or logout, run
-`brain ui` once to start it again. Use `brain ui --foreground` for terminal
-diagnostics; background startup output is saved in the workspace's `state/ui.log`
-(or the configured state directory).
-
-On **macOS**, install the workspace's login service once to have Brain start
-automatically after you sign in, and recover after an unexpected process exit:
 
 ```bash
 brain service install
-brain service status
-brain ui
 ```
 
-This uses a user LaunchAgent and needs no `sudo`. Keep **Auto Refresh: When idle**
-enabled; its existing preference is preserved. Terminal and browser can both be
-closed. `brain service stop` (or `brain ui stop`) stops safely while idle and
-stays stopped until you start it again or next sign in. `brain service start`
-resumes it; `brain service uninstall` removes login startup while preserving
-workspace data. `brain service install --port 0` supports another workspace on
-an automatically selected port. Company-managed Macs may require approval for
-background activity or access to the project folder in System Settings.
+`brain init` finds the Git repositories, takes read-only snapshots and builds the
+local index; it writes only beside the repositories, never inside them.
+`brain service install` starts the local UI now and again at every sign-in
+(macOS LaunchAgent or Windows per-user startup, no administrator rights). On
+Linux, or to start it just for this session, use `brain ui`.
 
-The Brain view also includes **Storage & recovery**. It previews or safely
-reclaims only unpinned old generations, snapshots, and shards; current state and
-every ticket-pinned evidence generation remain protected. Capacity checks measure
-actual file sizes without reading source contents. Optional query-cache writes
-have a short scan budget and never make valid Semantic retrieval unavailable.
-Full write/cleanup inventory streams large directories instead of failing at
-the quick-probe item/time ceiling. Quota and free-disk checks still apply;
-status remains a bounded estimate, not permission to write from a partial sum.
-The latest refresh result, including failures and recovery guidance, survives
-browser reloads and UI restarts. A temporary UI health-check failure preserves
-the registered instance instead of starting a competing server.
+Try everything on sample repositories first with `brain demo`.
 
-The investigation workspace puts tickets first: each card shows its pinned
-generation and wave, and opening it exposes that ticket's history and handoff
-folder. Light/dark glass surfaces are bundled locally, with keyboard and
-reduced-motion support. **Health & recovery** provides configuration reload,
-diagnostics, model verification and safe cleanup. Configuration reload validates
-your edit without rewriting the file; it does not retarget an existing ticket.
+## Connect your AI
 
-An unchanged, compatible registered Semantic generation is validated and reused
-without rechunking source or calling the embedding model. During an incremental
-refresh, unchanged repositories reuse their validated shards. Changed repositories
-first reuse the compatible embedding cache, then recover identical model inputs'
-vectors from the registered parent shard—even after cache eviction. Recovery
-validates the pack/input contract, pinned source, card identities and shard hash;
-only new/changed inputs or inputs that cannot be validated need model work.
-This also works with compatible v1.0.7 state, without a schema migration, model
-reinstall, cache reset or prerequisite full rebuild. Recovery is repo-scoped and
-bounded; unavailable/corrupt prior data or an exhausted recovery budget falls back
-explicitly to the managed cache/model pipeline. Old ticket generations remain
-immutable and protected by existing reachability GC.
-
-Refresh progress separates intact-shard/cache reuse, recovered old vectors and
-new embeddings, with the current repository's reuse/rebuild reason. Overall
-embedding ETA is shown only after the remaining repository reuse checks; it uses
-model time, not cached-card counts or Git time. Git freshness being unverified
-does not mean the published index is broken: automatic checks retry with backoff,
-while actual missing/incompatible components still require attention. This is not
-a promise that a cold enterprise workspace can be embedded in five minutes.
-
-`brain init` recursively discovers Git repositories, fetches allowed remote
-refs, creates immutable snapshots, builds local intelligence, and writes Brain
-state beside—not inside—the repositories. It never checks out, resets, cleans,
-edits, builds, tests, or commits target code.
-
-After initialization, an explicit `brain refresh` or cockpit **Refresh Brain**
-safely adds newly cloned repositories to `brain.toml` and includes them in that
-same refresh. Use `--no-discover`, or clear **Find and add new repositories**,
-when the workspace intentionally excludes another Git repository below its root.
-
-The local cockpit opens on `127.0.0.1` with a random session token. Paste a
-ticket, review the selected edition and freshness, then start an investigation.
-
-Prefer the CLI?
-
-```bash
-brain start ABC-1234 --ticket-file ticket.md --target claude
-brain continue ABC-1234 --clipboard --target claude
-```
-
-For Microsoft 365 Copilot, create the permanent Agent setup kit once:
+**Microsoft 365 Copilot.** Create the Agent setup kit once and follow its
+`SETUP.md`:
 
 ```bash
 brain agent-kit m365
 ```
 
-See the [M365 setup guide](docs/USER_GUIDE.md#6-create-a-persistent-m365-copilot-agent)
-for the files to add to Agent Builder and the Protocol v5 multi-wave workflow.
+Then start each ticket in the UI (or `brain start TICKET --ticket-file ticket.md --target m365`)
+and upload the handoff file it names. Brain tells you when the kit changes and
+needs re-pasting; otherwise it never does.
 
-Try the full flow without using your own repositories:
+**Claude Desktop, Claude Code, Cursor, JetBrains or VS Code agents.** Let the
+agent call Brain directly over MCP, with no copying:
 
 ```bash
-brain demo
-cd project-brain-demo
-brain ui
+brain mcp config --host claude-desktop --write
 ```
+
+Hosts: `claude-desktop`, `claude-code`, `vscode`, `cursor`, `jetbrains`. See
+[Agents that call Brain directly](docs/USER_GUIDE.md#agents-that-call-brain-directly-mcp).
+
+**Any other chat.** `brain start TICKET --ticket-file ticket.md` copies the
+handoff to your clipboard; paste the AI's reply back with
+`brain continue TICKET --clipboard`.
 
 ## Editions
 
-| Edition | Local capability | Network or hosted inference |
+| Edition | Adds | Needs |
 |---|---|---|
-| **Core** | Exact, lexical, structural, graph, history, and ticket experience | None |
-| **Semantic** | Core plus local semantic-card retrieval | None after the optional pack is installed |
-| **Precision** | Semantic plus local candidate reranking | None after the optional packs are installed |
+| **Core** | Exact, lexical, structural, graph, history and ticket-experience retrieval | Nothing else |
+| **Semantic** | Local semantic-card retrieval | `brain model install semantic` |
+| **Precision** | Local candidate reranking | `brain model install precision` |
 
-Optional model packs are separately published, checksum-pinned, verified before
-registration, and restricted to a Brain-managed loopback runtime. Install them
-only when your environment permits:
-
-```bash
-brain model install semantic
-brain model install precision
-brain capabilities
-```
-
-Read [Model Pack Operations](docs/MODEL_PACKS.md) for provenance, corporate TLS,
-offline installation, verification, benchmarking, and removal. Core does not
-need a model pack, vector service, API key, or cloud index.
-
-## What Project Brain investigates
-
-- exact content and path search across many repositories;
-- class, interface, method, function, implementation, and caller evidence;
-- pinned MPS v9 models/descriptors, exact nested subflow scopes across repositories, forward/reverse connections and language-definition anchors;
-- Java/Spring MVC, Feign, Kafka, configuration, persistence, and test links;
-- ordered execution and cross-repository integration flows;
-- impact, test, contract, and configuration/data surfaces;
-- Git pickaxe/history and ticket-labelled local experience;
-- bounded runtime anchors, hypotheses, evidence frontier, and multi-wave state;
-- full and delta Protocol v5 checkpoints with stable evidence lineage.
-
-Every ticket pins one immutable Atlas/Semantic serving generation. A refresh may
-publish a newer generation for later tickets, but it cannot silently change the
-source or Semantic component used by an investigation already in progress.
-Heuristic flows and slices are navigation candidates until their exact pinned
-source locations are verified.
-
-MPS is part of the ordinary context retrieval pipeline: model/concept names and
-decoded property values supply bounded lexical candidates, including CamelCase
-and phrase matches. A code anchor does not suppress model candidates from the
-same objective. One context can contain code and pinned model evidence, without
-a separate MPS request format or entry mode. Names remain discovery candidates;
-model/node IDs establish reference targets. Existing tickets keep their pinned
-component; refresh publishes the richer discovery terms for new tickets.
-
-MPS navigation preserves each callsite and actual target node. An exact nested
-anchor follows its subtree; incoming impact follows precise callers and labels
-references to enclosing nodes as `ancestor_context`. Shared targets and cycles
-retain distinct connections while deduplicating expansion. `via_connection`
-records one discovery chain, rather than every possible execution path.
-Continue byte-omitted steps with `next_step_anchor`, then use the frontier's
-`continuation_anchor`: `#refs:offset` pages connections in the same mode and
-pinned ticket; depth/node `refocus` starts another bounded traversal. Connection
-pages resume a scope's direct connections; downstream scopes can be rediscovered
-in later requests and keep stable connection identities for ticket deduplication.
-Structural connections need language/aspect/generator/test evidence to establish business
-execution, branch guards, data bindings, retries and transactions.
-
-## How it works
-
-```text
-                      INVESTIGATION_REQUEST v5
-ChatGPT / Claude / M365 ─────────────────────────┐
-                                                ▼
-Repositories ── immutable snapshots ── Workspace Intelligence Atlas
-                                                │
-Project map + history + ticket memory ──────────┤
-                                                ▼
-                              bounded retrieval + exact verification
-                                                │
-                                                ▼
-                                  source-backed context checkpoint
-```
-
-The retrieval cascade starts with similar investigations and generation-pinned
-Repo, Module, and Entity cards; expands typed relationships; uses targeted
-lexical, path, structural, and optional semantic retrieval; optionally reranks
-candidates; and finally hydrates exact source. Missing optional components cause
-an explicit Core fallback, never fabricated evidence or newer-generation
-substitution.
-
-The first response is a full checkpoint. Follow-ups normally return bounded
-deltas identified by stable `context_id` / `base_context_id` lineage. Duplicate
-plans are rejected instead of repeating expensive search. There is no fixed
-ticket round limit or extra continuation approval: each submitted request has
-its own resource budget. No-progress and coverage signals guide the next
-evidence request; they do not lock the ticket or change its pinned generation.
-If retrieval saves a context but its AI handoff cannot be written, the UI offers
-**Open saved evidence** so you can copy the existing result without repeating
-retrieval. The internal `context-NNN.md` remains available in that ticket's history.
+Model packs are optional, checksum-pinned and served only on `127.0.0.1`. See
+[Model Pack Operations](docs/MODEL_PACKS.md).
 
 ## Privacy and safety
 
-- Target repositories remain read-only.
-- Project Brain never executes target code or runs target tests.
-- There is no hosted Project Brain inference or source-indexing service.
-- Runtime model calls, when enabled, stay on `127.0.0.1`.
-- Brain-generated source evidence, local repository paths, `.env`, keys,
-  workspace configuration, indexes, model packs, and ticket runs are excluded
-  by the default `.gitignore`.
-- The local UI binds only to IPv4 loopback and uses a per-process bearer token.
-- Generated context can still contain proprietary source or secrets already in
-  a repository; review it before sharing it outside your approved environment.
+- Target repositories stay read-only; Brain never runs their code or tests.
+- There is no hosted Project Brain service; model runtimes stay on `127.0.0.1`.
+- The local UI listens on loopback only and uses a per-process token.
+- Handoffs contain your source code. Share them only with AI services your
+  company approves, and review them for secrets already in your repositories.
 
-Project Brain cannot prove behavior created by reflection, dynamic dependency
-injection, generated code, external data, or runtime feature flags. It reports
-those limits and asks for runtime evidence rather than pretending static
-analysis is certain.
-
-Read the complete [Security Policy](SECURITY.md) and
-[third-party notices](THIRD_PARTY.md) before using Project Brain with private
-code.
+Read the [Security Policy](SECURITY.md) and [third-party notices](THIRD_PARTY.md)
+before using Project Brain with private code.
 
 ## Documentation
 
 | Document | Use it for |
 |---|---|
-| [User Guide](docs/USER_GUIDE.md) | Installation, configuration, workflows, commands, and troubleshooting |
-| [Model Pack Operations](docs/MODEL_PACKS.md) | Pack provenance, verification, offline use, and tuning |
-| [Release Notes](RELEASE_NOTES.md) | Current release changes and upgrade instructions |
-| [Changelog](CHANGELOG.md) | Version-by-version changes |
-| [Security Policy](SECURITY.md) | Supported versions, threat model, and private reporting |
+| [User Guide](docs/USER_GUIDE.md) | Installation options, configuration, workflows, commands, troubleshooting |
+| [How it works](docs/HOW_IT_WORKS.md) | Retrieval, pinning, refresh and UI behaviour in detail |
+| [MPS and IPF evidence](docs/MPS_IPF.md) | JetBrains MPS model retrieval and flow navigation |
+| [Model Pack Operations](docs/MODEL_PACKS.md) | Semantic and Precision packs: provenance, offline use, tuning |
+| [Release Notes](RELEASE_NOTES.md) · [Changelog](CHANGELOG.md) | What changed |
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Start with
-[CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities through a private
-GitHub Security Advisory, not a public issue.
+Issues and focused pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Report vulnerabilities through a private GitHub Security Advisory, not a public issue.
 
 ## License
 

@@ -48,6 +48,18 @@ IGNORED_DIRS = {".git", ".idea", ".venv", "node_modules", "target", "build", "di
 SENSITIVE_FILE_NAMES = {".env", ".envrc", "credentials", "credentials.json", "service-account.json", "id_rsa", "id_ed25519", "keystore"}
 SENSITIVE_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".jks"}
 DISCOVERY_IGNORED_DIRS = IGNORED_DIRS | {".runs", ".codex", ".agents", "state", "generated", "knowledge"}
+# MPS generator output stays searchable (stack traces land there) but is labelled
+# so the AI proposes edits in the authoring model, not in generated files.
+GENERATED_PATH_RE = re.compile(r"(?:^|/)(?:source_gen|source_gen\.caches|classes_gen)/")
+GENERATED_SOURCE_LABEL = "generated source (MPS generator output: identify the authoring model node before proposing an edit)"
+
+
+def is_generated_path(path: str) -> bool:
+    return GENERATED_PATH_RE.search(path.replace("\\", "/")) is not None
+
+
+def _display_kind(item: "Evidence") -> str:
+    return f"{item.kind}, {GENERATED_SOURCE_LABEL}" if is_generated_path(item.path) else item.kind
 MAX_REPOSITORY_DISCOVERY_ENTRIES = 100_000
 MAX_REPOSITORY_DISCOVERY_DEPTH = 12
 MAX_REPOSITORY_DISCOVERY_SECONDS = 1.0
@@ -3521,6 +3533,28 @@ def retrieve_context(
             emit("complete", evidence_count=len(bundle.evidence), physical_operations_completed=trace.physical_backend_operations)
             return bundle
 
+        # Joint code/model retrieval: identifiers decoded from the matched model
+        # nodes join this request's lexical plan after the explicit anchors and
+        # before objective prose terms. The operation budget still applies.
+        derived_code_terms = [item["search"] for item in bundle.mps_navigation.get("code_candidates") or []
+                              if item["search"] not in {str(item.get("query") or "") for item in request["searches"]}]
+        if derived_code_terms:
+            explicit = {str(item.get("value") or "") for item in request.get("anchors") or []} | set(request.get("resolve") or [])
+            position = next((index for index, item in enumerate(request["searches"]) if item.get("query") not in explicit),
+                            len(request["searches"]))
+            searches = [*request["searches"][:position], *({"query": value, "repos": []} for value in derived_code_terms),
+                        *request["searches"][position:]]
+            compiled_plan = compile_request({**request, "searches": searches}, max_effective_operations=settings.max_effective_operations)
+            trace.requested_operations = compiled_plan.requested_operations
+            trace.effective_operations = len(compiled_plan.operations)
+            if compiled_plan.deferred_operations and trace.stop_reason == "coverage_satisfied":
+                trace.stop_reason = "operation_budget"
+            bundle.warnings.append(
+                "Identifiers decoded from pinned MPS node properties were searched as code candidates: "
+                + ", ".join(f"`{value}`" for value in derived_code_terms)
+                + ". A name match is navigation; it does not prove a generator or runtime binding."
+            )
+
         candidates: list[SearchHit] = []
         from .atlas import route as route_atlas
 
@@ -4797,7 +4831,7 @@ def pack_delta_context(
         source_block = _source_markdown_block(item.content, _language(item.path))
         output.extend([
             f"### {_public_evidence_id(progress, item)} — {item.repo} — `{item.path}:{item.line_start}-{item.line_end}`", "",
-            f"Kind: {item.kind}  ", f"Found by: {', '.join(item.found_by)}", "",
+            f"Kind: {_display_kind(item)}  ", f"Found by: {', '.join(item.found_by)}", "",
             *source_block, "",
         ])
     output.extend(["## Stable candidate changes", ""])
@@ -5654,7 +5688,7 @@ def pack_context(
         source_block = _source_markdown_block(item.content, _language(item.path))
         output.extend([
             f"### {index}. {_public_evidence_id(progress, item)} — {item.repo} — `{item.path}:{item.line_start}-{item.line_end}`",
-            "", f"Kind: {item.kind}  ", f"Found by: {found}", "",
+            "", f"Kind: {_display_kind(item)}  ", f"Found by: {found}", "",
             *source_block, "",
         ])
     if bundle.additional_candidates:
@@ -6416,6 +6450,12 @@ def start_session(settings: Settings, ticket: str, ticket_text: str) -> tuple[st
             if omitted:
                 sections.append("[Project Brain omitted unsafe or excess bytes. Navigation excerpt only; ask Brain for focused evidence instead of copying the full workspace map.]")
             sections.append("")
+    if pinned_atlas is not None:
+        from .mps_index import model_catalog
+
+        catalog = model_catalog(settings, pinned_atlas)
+        if catalog:
+            sections.extend(["## MPS model catalog (pinned generation, navigation only)", "", catalog.strip(), ""])
     content, _ = _bounded_utf8_text(
         "\n".join(sections).rstrip() + "\n",
         MAX_START_ARTIFACT_BYTES,

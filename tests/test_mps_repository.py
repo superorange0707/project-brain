@@ -99,6 +99,16 @@ class MpsRepositoryTests(unittest.TestCase):
         self.assertEqual("ready", generation.component("mps_models")["status"])
         self.assertIn("FlowA", mps_index.read_source(self.settings, "service", "a.mps", generation))
 
+    def test_nongit_component_uses_the_validated_seal_without_reopening_it(self) -> None:
+        state, _ = snapshot_indexes(self.settings, publish=False)
+        with mock.patch("brain.mps_index.read_managed_text", side_effect=AssertionError("seal reopened after validation")):
+            component = mps_index.build_component(self.settings, state)
+            payload = json.loads(Path(component["_artifact_source"]).read_text())
+            self.assertTrue(mps_index.validate_membership(self.settings, payload))
+        self.assertEqual("ready", component["status"])
+        self.assertEqual(3, component["details"]["models"])
+        self.assertTrue(mps_index.validate_payload(payload, payload["snapshots"], component))
+
     def test_v5_model_routes_direct_files_and_old_ticket_pin_survive_refresh_and_gc(self) -> None:
         self.commit_fixture()
         snapshot_indexes(self.settings)
@@ -473,3 +483,96 @@ class MpsRepositoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MpsJointRetrievalTests(unittest.TestCase):
+    """Code and model evidence for one ticket: derived identifiers, generated labels, catalog, experience, golden."""
+
+    setUp = MpsRepositoryTests.setUp
+    write_models = MpsRepositoryTests.write_models
+    git = MpsRepositoryTests.git
+    commit_fixture = MpsRepositoryTests.commit_fixture
+    request = staticmethod(MpsRepositoryTests.request)
+
+    def test_model_property_identifiers_seed_code_search_after_explicit_anchors(self) -> None:
+        source = (self.repository / "a.mps").read_bytes().replace(
+            b'<node concept="c" id="call" role="h">',
+            b'<node concept="c" id="call" role="h"><property role="p" value="com.example.flows.ApprovePaymentHandler"/>')
+        (self.repository / "a.mps").write_bytes(source)
+        java = self.repository / "src/main/java/com/example/flows/ApprovePaymentHandler.java"
+        java.parent.mkdir(parents=True)
+        java.write_text("package com.example.flows;\n\npublic class ApprovePaymentHandler {\n    public void handle() {}\n}\n")
+        snapshot_indexes(self.settings)
+        start_session(self.settings, "MPS-JOINT", "Trace a flow and its handler")
+        content, _, _ = create_context(self.settings, "MPS-JOINT", self.request(objective="Trace FlowA"))
+        self.assertIn("class ApprovePaymentHandler", content)
+        self.assertIn("Identifiers decoded from pinned MPS node properties were searched as code candidates: `ApprovePaymentHandler`", content)
+        trace = session_state(self.settings, "MPS-JOINT")["request_history"][-1]["retrieval"]["trace"]
+        candidate = trace["mps_navigation"]["code_candidates"][0]
+        self.assertEqual({"value": "com.example.flows.ApprovePaymentHandler", "search": "ApprovePaymentHandler",
+                          "anchor": "service/a.mps#id:call", "role": "name"}, {k: candidate[k] for k in ("value", "search", "anchor", "role")})
+        # An exact model read stays model-only: no derived code search.
+        start_session(self.settings, "MPS-JOINT-EXACT", "Read one model node")
+        content, _, _ = create_context(self.settings, "MPS-JOINT-EXACT", self.request(
+            objective="Inspect the call node", anchors=[{"kind": "file_hint", "value": "service/a.mps#id:call"}]))
+        self.assertNotIn("class ApprovePaymentHandler", content)
+        self.assertTrue(session_state(self.settings, "MPS-JOINT-EXACT")["request_history"][-1]["retrieval"]["trace"]["mps_only"])
+
+    def test_generated_source_is_labelled_but_still_retrievable(self) -> None:
+        from brain.core import GENERATED_SOURCE_LABEL, is_generated_path
+
+        generated = self.repository / "source_gen/com/example/flows/FlowAGenerated.java"
+        generated.parent.mkdir(parents=True)
+        generated.write_text("package com.example.flows;\n\npublic class FlowAGenerated {\n    public void run() {}\n}\n")
+        snapshot_indexes(self.settings)
+        start_session(self.settings, "MPS-GEN", "Inspect generated flow code")
+        content, _, _ = create_context(self.settings, "MPS-GEN", self.request(
+            objective="Inspect FlowAGenerated", anchors=[{"kind": "symbol", "value": "FlowAGenerated"}]))
+        self.assertIn("class FlowAGenerated", content)
+        kind_line = next(line for line in content.splitlines() if line.startswith("Kind: ") and "requested symbol definition" in line)
+        self.assertTrue(kind_line.rstrip().endswith(GENERATED_SOURCE_LABEL), kind_line)
+        self.assertTrue(is_generated_path("solution/source_gen.caches/x/Y.java"))
+        self.assertTrue(is_generated_path("solution\\classes_gen\\Y.class"))
+        self.assertFalse(is_generated_path("src/main/java/source_generator/Y.java"))
+
+    def test_start_handoff_and_agent_kit_carry_the_pinned_model_catalog(self) -> None:
+        from brain.agent import create_m365_agent_kit
+
+        snapshot_indexes(self.settings)
+        start, _ = start_session(self.settings, "MPS-CATALOG", "Which flows exist?")
+        self.assertIn("## MPS model catalog (pinned generation, navigation only)", start)
+        self.assertIn("- `service:a.mps` (1 roots): `FlowA (example.language.Step)`", start)
+        self.assertIn("MPS model catalog", create_m365_agent_kit(self.settings)["knowledge"])
+        self.assertIn("`FlowB (example.language.Step)`", create_m365_agent_kit(self.settings)["knowledge"])
+        self.assertIsNone(mps_index.model_catalog(replace(self.settings, atlas_generation=None)))
+
+    def test_ticket_labelled_model_changes_enter_experience(self) -> None:
+        from brain.experience import build_experience_index
+
+        self.commit_fixture()
+        self.write_models("FlowA2")
+        self.git("commit", "-am", "IPF-7 rename the approval flow")
+        self.settings.repo("service").source_sha = self.git("rev-parse", "HEAD")
+        index = build_experience_index(replace(self.settings, experience_enabled=True), changed_only=False)
+        case = next(item for item in index["cases"] if item["ticket"] == "IPF-7")
+        self.assertIn("service:a.mps", case["paths"])
+
+    def test_golden_suite_scores_expected_model_anchors(self) -> None:
+        from brain.evaluation import evaluate_golden
+
+        snapshot_indexes(self.settings)
+        suite = self.root / "golden.json"
+        suite.write_text(json.dumps({"name": "mps", "cases": [
+            {"id": "flow-a", "split": "holdout",
+             "request": {"version": 5, "mode": "flow_trace", "objective": "Trace FlowA"},
+             "expect": {"model_anchors": ["service/a.mps#id:a", "service/b.mps#id:inside"]}},
+            {"id": "wrong", "split": "holdout",
+             "request": {"version": 5, "mode": "flow_trace", "objective": "Trace FlowA"},
+             "expect": {"model_anchors": ["service/z.mps#id:missing"]}},
+            {"id": "no-expectation", "split": "holdout", "request": {"version": 5, "mode": "root_cause", "objective": "Inspect unchanged_code"},
+             "expect": {"production_files": ["service:code.py"]}},
+        ]}), encoding="utf-8")
+        report = evaluate_golden(self.settings, suite)
+        by_id = {item["id"]: item["model_anchor_recall"] for item in report["cases"]}
+        self.assertEqual({"flow-a": 1.0, "wrong": 0.0, "no-expectation": None}, by_id)
+        self.assertEqual(0.5, report["summary"]["model_anchor_recall"])

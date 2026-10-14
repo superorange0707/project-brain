@@ -676,11 +676,14 @@ class WindowsCompatibilityTest(unittest.TestCase):
         precision = (root / ".github/workflows/precision-pack-windows.yml").read_text(encoding="utf-8")
         semantic_builder = (root / "scripts/build_semantic_pack.py").read_text(encoding="utf-8")
         precision_builder = (root / "scripts/build_precision_pack.py").read_text(encoding="utf-8")
-        self.assertIn("Native Windows Python ${{ matrix.python-version }}", ci)
-        for version in ('"3.11"', '"3.12"', '"3.13"', '"3.14"'):
-            self.assertIn(version, ci)
+        # Native Windows runs the whole suite on every ready pull request and
+        # on all supported Python versions at release; it is never a subset.
+        self.assertIn("os: windows-latest", ci)
+        self.assertIn("python -m unittest discover -s tests -v", ci)
         self.assertIn("project-brain-$env:GITHUB_REF_NAME-windows-amd64.zip", release)
         self.assertIn("Native Windows Python ${{ matrix.python-version }}", release)
+        for version in ('"3.11"', '"3.12"', '"3.13"', '"3.14"'):
+            self.assertIn(version, release)
         self.assertIn("886b229dcd5e7bec0c9918002b77345d27c84e3c", release)
         self.assertIn("scripts/windows/zoekt-windows-amd64.patch", release)
         self.assertIn("Stable v1 model-pack catalog readiness", release)

@@ -46,8 +46,13 @@ def installed(settings: Settings) -> bool:
 def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(["/bin/launchctl", *args], capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise BrainError("Could not contact your macOS login service manager; retry from your logged-in Mac session.") from error
+    except subprocess.TimeoutExpired as error:
+        raise BrainError(
+            f"macOS launchctl {args[0]} timed out after 15 seconds; its completion could not be confirmed. "
+            "Check brain service status before retrying."
+        ) from error
+    except OSError as error:
+        raise BrainError(f"Could not execute /bin/launchctl {args[0]}: {str(error)[:1500]}") from error
     if check and result.returncode:
         raise BrainError(
             f"macOS launchctl {args[0]} failed: {result.stderr.strip()[:1500]}. "
@@ -148,7 +153,7 @@ def _wait_ready(settings: Settings, label: str, *, timeout: float = 30) -> None:
 
 def _require_macos() -> None:
     if sys.platform != "darwin":
-        raise BrainError("Login services currently support macOS. Use brain ui for terminal-independent operation on this platform.")
+        raise BrainError("Login services currently support macOS and Windows. Use brain ui for terminal-independent operation on this platform.")
 
 
 def service(settings: Settings, action: str, *, port: int | None = None) -> dict[str, Any]:

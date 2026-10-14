@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from .catalog import (
     current_generation,
     current_generation_ref,
+    generation_predates_binary,
     generation_root,
     generations as catalog_generations,
     source_signature,
@@ -623,6 +624,9 @@ def dashboard_status(settings: Settings) -> dict[str, Any]:
         health = "Freshness unverified"
     else:
         health = "Healthy"
+    from .agent import agent_kit_status
+    from .upgrade import status_update
+
     return {
         "version": __import__("brain").__version__,
         "edition": requested,
@@ -630,6 +634,9 @@ def dashboard_status(settings: Settings) -> dict[str, Any]:
         "reason": reason,
         "health": health,
         "core": {"ready": core_ready, "source_freshness": source_freshness},
+        "generation_predates_binary": generation_predates_binary(current_generation_ref(settings)),
+        "agent_kit": agent_kit_status(settings),
+        "update": status_update(settings),
         "semantic": semantic,
         "capabilities": available,
         "freshness": repo_freshness,

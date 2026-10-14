@@ -179,6 +179,47 @@ def source_signature(snapshots: dict[str, str]) -> str:
     return "sha256:" + hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def schema_fingerprint() -> str:
+    """Identity of every constant that changes published generation content.
+
+    Keyed on schema/extractor constants only, never ``brain.__version__``, so a
+    release that changes no serving schema re-points instead of republishing.
+    The modules are imported lazily because they import this one.
+    """
+    from . import atlas, index, investigation, mps_index, relations, semantic
+
+    # ponytail: a hand-listed set, not module source hashes; add any new
+    # per-generation schema constant here or its bump will not auto-refresh.
+    constants = {
+        "atlas": [atlas.ATLAS_SCHEMA_VERSION, atlas.EXTRACTOR_VERSION],
+        "catalog": SCHEMA_VERSION,
+        "index": [index.SCHEMA_VERSION, index.LEXICAL_COMPONENT_SCHEMA_VERSION],
+        "investigation": [
+            investigation.JAVA_INTELLIGENCE_SCHEMA_VERSION,
+            investigation.RUNTIME_ANCHOR_SCHEMA_VERSION,
+            investigation.GENERATION_INTELLIGENCE_INPUT_SCHEMA_VERSION,
+        ],
+        "mps_index": [mps_index.SCHEMA_VERSION, mps_index.PARSER_VERSION],
+        "relations": relations.RELATIONSHIP_EXTRACTOR_VERSION,
+        "semantic": semantic.semantic_schema_version(),
+    }
+    payload = json.dumps(constants, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def generation_predates_binary(ref: AtlasGenerationRef | None) -> bool:
+    """Whether a published generation's recorded fingerprint is missing or stale.
+
+    Reads the stored manifest only and never raises.  A legacy manifest without
+    the key is unknown, which counts as drift.
+    """
+    if ref is None:
+        return False
+    manifest = ref.manifest.get("schema_manifest")
+    recorded = manifest.get("brain_schema_fingerprint") if isinstance(manifest, dict) else None
+    return recorded != schema_fingerprint()
+
+
 def _without_local_state(value: Any) -> Any:
     """Remove publication/runtime fields that cannot define portable identity."""
     if isinstance(value, dict):
@@ -1293,6 +1334,7 @@ def publish_generation(
                     )
         signature = source_signature({str(item["repo"]): str(item["sha"]) for item in snapshots})
         schema_manifest = {
+            "brain_schema_fingerprint": schema_fingerprint(),
             "catalog": SCHEMA_VERSION,
             "components": {name: str(value.get("schema_version") or "1") for name, value in component_values.items()},
         }

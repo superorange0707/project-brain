@@ -38,7 +38,7 @@ from brain.platforms import native_command
 from brain.relations import _relationship_payload_hash, generate_relationship_map, related_relationships
 from brain.semantic import build_semantic_index, search_semantic
 from brain.sync import (
-    _export_snapshot, _git_archive_to_path, _sealed_snapshot_is_intact,
+    _export_snapshot, _git_archive_to_path, _sealed_snapshot_is_intact, _validated_snapshot_seal,
     _snapshot_metadata, _snapshot_seal, _snapshot_seal_path,
 )
 
@@ -199,6 +199,42 @@ class AtlasGenerationTests(unittest.TestCase):
         self.assertIsNotNone(second)
         self.assertEqual(first.identity, second.identity)
         self.assertEqual(first.generation, second.generation)
+
+    def test_schema_fingerprint_drift_republishes_once_and_keeps_pinned_generations(self) -> None:
+        from brain.catalog import schema_fingerprint
+        from brain.ops import refresh_brain
+
+        (self.repository / "service.py").write_text("VALUE = 'STABLE'\n", encoding="utf-8")
+        subprocess.run([native_command("git"), "init", "-q", "-b", "main"], cwd=self.repository, check=True)
+        subprocess.run([native_command("git"), "config", "user.name", "Atlas test"], cwd=self.repository, check=True)
+        subprocess.run([native_command("git"), "config", "user.email", "atlas@example.invalid"], cwd=self.repository, check=True)
+        subprocess.run([native_command("git"), "add", "service.py"], cwd=self.repository, check=True)
+        subprocess.run([native_command("git"), "commit", "-qm", "stable source"], cwd=self.repository, check=True)
+        settings = load_settings(self.config)
+        refresh_brain(settings, fetch=False, discover=False)
+        first = current_generation_ref(settings)
+        self.assertIsNotNone(first)
+        self.assertEqual(schema_fingerprint(), first.manifest["schema_manifest"]["brain_schema_fingerprint"])
+        pinned = replace(settings, atlas_generation=first, atlas_generation_mode="pinned")
+        sha = first.snapshots["service"]
+
+        bumped = "sha256:" + "0" * 64
+        with mock.patch("brain.catalog.schema_fingerprint", return_value=bumped):
+            refresh_brain(settings, fetch=False, discover=False)
+            second = current_generation_ref(settings)
+            self.assertEqual(first.generation + 1, second.generation)
+            self.assertNotEqual(first.identity, second.identity)
+            self.assertEqual(bumped, second.manifest["schema_manifest"]["brain_schema_fingerprint"])
+            refresh_brain(settings, fetch=False, discover=False)
+            self.assertEqual(second.generation, current_generation_ref(settings).generation)
+
+        retained = resolve_generation(settings, generation=first.generation)
+        self.assertIsNotNone(retained)
+        self.assertEqual(first.identity, retained.identity)
+        self.assertEqual(
+            [("service.py", 1, "VALUE = 'STABLE'")],
+            query_index(pinned, pinned.repo("service"), "STABLE", max_results=10, snapshot_sha=sha),
+        )
 
     def test_current_projection_failure_cannot_commit_a_missing_generation(self) -> None:
         generation_one = self.publish("sha-projection-g1", "g1.py", "G1_MARKER")
@@ -801,10 +837,12 @@ class AtlasGenerationTests(unittest.TestCase):
         seal_path.write_text(json.dumps(_snapshot_seal(target, snapshot)), encoding="utf-8")
         with mock.patch("brain.sync.os.name", "nt"):
             self.assertTrue(_sealed_snapshot_is_intact(target, seal_path, snapshot))
+            self.assertEqual(json.loads(seal_path.read_text()), _validated_snapshot_seal(target, seal_path, snapshot))
             metadata = source.stat()
             source.write_text("class Evil {}\n", encoding="utf-8")
             os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
             self.assertFalse(_sealed_snapshot_is_intact(target, seal_path, snapshot))
+            self.assertIsNone(_validated_snapshot_seal(target, seal_path, snapshot))
 
     def test_semantic_and_relationships_use_git_objects_when_snapshot_export_is_missing(self) -> None:
         producer = self.repository

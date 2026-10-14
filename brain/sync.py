@@ -405,16 +405,32 @@ def _sealed_snapshot_is_intact(
     timeout_seconds: float = MAX_GIT_SNAPSHOT_STAGE_SECONDS,
     scan_budget: _SnapshotScanBudget | None = None,
 ) -> bool:
+    return _validated_snapshot_seal(
+        target, seal_path, sha, max_items=max_items,
+        timeout_seconds=timeout_seconds, scan_budget=scan_budget,
+    ) is not None
+
+
+def _validated_snapshot_seal(
+    target: Path,
+    seal_path: Path,
+    sha: str,
+    *,
+    max_items: int = MAX_GIT_SNAPSHOT_ITEMS,
+    timeout_seconds: float = MAX_GIT_SNAPSHOT_STAGE_SECONDS,
+    scan_budget: _SnapshotScanBudget | None = None,
+) -> dict[str, object] | None:
+    """Return the seal read by this validation, avoiding a second mutable read."""
     if not target.is_dir() or target.is_symlink() or not seal_path.is_file():
-        return False
+        return None
     try:
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         if seal_path.is_symlink():
-            return False
+            return None
         with seal_path.open("rb") as source:
             raw = source.read(MAX_GIT_SNAPSHOT_SEAL_BYTES + 1)
         if len(raw) > MAX_GIT_SNAPSHOT_SEAL_BYTES:
-            return False
+            return None
         expected = json.loads(raw.decode("utf-8"))
         expected_files = expected.get("files") if isinstance(expected, dict) else None
         expected_metadata = {
@@ -432,7 +448,7 @@ def _sealed_snapshot_is_intact(
             and expected_metadata == metadata
         )
         if not metadata_matches:
-            return False
+            return None
         seal_stat = seal_path.stat()
         cache_key = (
             str(target.resolve()), seal_stat.st_dev, seal_stat.st_ino, seal_stat.st_size,
@@ -442,7 +458,7 @@ def _sealed_snapshot_is_intact(
         # On POSIX, ctime makes a same-size/restored-mtime mutation observable.
         # Windows ctime is creation time, so it must recheck content hashes.
         if os.name != "nt" and cache_key in _SNAPSHOT_SEAL_CACHE:
-            return True
+            return expected
         valid = expected == _snapshot_seal(
             target, sha, max_items=max_items, deadline=deadline, scan_budget=scan_budget,
         )
@@ -450,9 +466,9 @@ def _sealed_snapshot_is_intact(
             if len(_SNAPSHOT_SEAL_CACHE) >= 2_048:
                 _SNAPSHOT_SEAL_CACHE.clear()
             _SNAPSHOT_SEAL_CACHE.add(cache_key)
-        return valid
+        return expected if valid else None
     except (AttributeError, OSError, TimeoutError, TypeError, ValueError, json.JSONDecodeError):
-        return False
+        return None
 
 
 _WINDOWS_RESERVED_COMPONENTS = {

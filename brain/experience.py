@@ -48,6 +48,10 @@ PATCH_SUFFIXES = CONFIG_SUFFIXES | {
     ".kts", ".md", ".php", ".proto", ".py", ".rb", ".rs", ".scala", ".sh", ".sql", ".swift",
     ".tf", ".tfvars", ".tpl", ".ts", ".tsx", ".vue", ".zsh",
 }
+# Ticket-labelled model changes teach which flows a kind of ticket touches.
+from .mps import MODEL_SUFFIXES as _MODEL_SUFFIXES  # noqa: E402
+
+PATCH_SUFFIXES = PATCH_SUFFIXES | _MODEL_SUFFIXES
 SENSITIVE_PATH = re.compile(
     r"(^|/)(?:\.env(?:\.|$)|\.git-credentials$|\.netrc$|\.npmrc$|\.pypirc$|authorized_keys$|"
     r"id_(?:dsa|ecdsa|ed25519|rsa)$|settings\.xml$|.*(?:credential|password|private[-_.]?key|secret|token).*)|"

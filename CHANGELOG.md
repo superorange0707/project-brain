@@ -2,6 +2,77 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [1.0.34] - 2026-10-14
+
+- Seed the ordinary code search with identifiers decoded from matched MPS node
+  properties (package-qualified or CamelCase values), placed after explicit
+  anchors and inside the existing operation budget. The handoff lists them as
+  navigation candidates; a name match is not a generator or runtime binding.
+- Label evidence under `source_gen`, `source_gen.caches` and `classes_gen` as
+  generated source so the AI locates the authoring model node before proposing
+  an edit. Generated files remain searchable.
+- Add an MPS model catalog (root labels and concepts per pinned model file) to
+  the start handoff and the M365 Agent Kit knowledge file.
+- Index model and descriptor paths in ticket-labelled Git experience.
+- Score `expect.model_anchors` (`repo/path.mps#id:node`) as `model_anchor_recall`
+  in `brain evaluate --golden`.
+- Reuse the validated managed snapshot seal during MPS component builds instead
+  of re-reading it; record refresh phase timings in the scale regression.
+- Upgrades no longer need a manual **Refresh Brain**: each published generation
+  records a fingerprint of every serving schema/extractor/parser constant, and
+  idle auto-refresh republishes when the running Brain's fingerprint differs.
+  The first refresh after this release republishes once; old tickets keep their
+  pinned generations. `brain status` and the UI Health panel report the drift.
+- The M365 Agent Kit records hashes of the rendered instructions and knowledge.
+  `brain status` and the UI Health panel report only when one changed, so
+  re-pasting into Agent Builder is no longer an every-release step. The
+  knowledge file is now `PROJECT_KNOWLEDGE.txt` (Agent Builder embeds `.txt`,
+  not `.md`); a stale `PROJECT_KNOWLEDGE.md` is removed on regeneration.
+- Add `brain upgrade`: Homebrew installs delegate to `brew update/trust/upgrade`
+  and the login service is reinstalled; standalone installs download the
+  platform archive from the pinned GitHub Release, verify it against
+  `SHA256SUMS.txt`, check the staged `brain --version`, stop the idle UI and
+  rename each shipped file aside (a running Windows `brain.exe` can be renamed),
+  restoring everything on failure. Source/pip/uv installs are not mutated. The
+  new binary republishes only on schema drift, restarts the UI and reports the
+  Agent Kit. `--check`, `--version`, offline `--archive`/`--sha256` and
+  `--release-base-url` are supported; exit 75 means the UI is busy. Installed
+  binaries check for updates daily (opt out with
+  `PROJECT_BRAIN_NO_UPDATE_CHECK=1`) and show them in `brain status` and Health.
+- Add `brain mcp`, a stdlib Model Context Protocol (stdio) server, and
+  `brain mcp config --host claude-desktop|claude-code|vscode|cursor|jetbrains
+  [--write]`. Agents call `brain_start`, `brain_continue`, `brain_handoff`,
+  `brain_session`, `brain_resume`, `brain_feedback` and `brain_status`, which run
+  the existing retrieval in-process under the same locks; results are paged at
+  80,000 characters. No delete/model/edition/storage tools and no arbitrary file
+  reads. Microsoft 365 Copilot keeps the file handoff.
+- `brain service install|start|stop|status|uninstall` now works on Windows
+  through a per-user `Run` registry value (no administrator rights): the UI and
+  idle refresh start again after every sign-in, as the LaunchAgent does on macOS.
+- CI: run pull-request checks once per head on a representative matrix (Linux
+  3.11/3.14, Windows 3.14) with cancellation of superseded runs and job
+  timeouts; skip draft pull requests; run one post-merge check on `main`; move
+  the PyInstaller smoke to a path-filtered workflow with a single macOS runner.
+  The full OS/Python matrix remains the tagged-release qualification. Group
+  Dependabot action bumps and remove the one-off v1.0.14/v1.0.27 macOS workflows.
+
+## [1.0.33] - 2026-10-07
+
+- Retrieve code and pinned MPS model evidence in one context: code anchors no
+  longer suppress matching model terms, CamelCase and separator variants share
+  candidate matching, and short identifiers such as `PE` are retained.
+- Follow exact nested-node subtrees across repositories; reverse impact keeps
+  precise caller nodes and labels enclosing-node references `ancestor_context`.
+  Shared targets retain each callsite while expansion is deduplicated.
+- Page bounded connection lists with `#refs:offset`; byte-omitted steps keep a
+  continuation cursor and depth/node frontiers start a new focused traversal.
+- Publish discovery profile v2 on refresh for new tickets; v1 components and
+  pinned ticket generations remain readable.
+- Skip the Java method regex scan when no owning class or opening parenthesis
+  exists, within the unchanged parser time and row bounds.
+- Require exact authoring-node edits, before/after values, affected usages and
+  acceptance assertions in AI delivery guidance.
+
 ## [1.0.32] - 2026-10-05
 
 - Retry transient Windows sharing violations during atomic state publication,

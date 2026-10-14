@@ -847,7 +847,15 @@
     }
     function renderBrain(brain, background) {
       var semantic = brain.semantic || {};
-      document.getElementById("recovery-guidance").textContent = brain.health === "Healthy" ?
+      var kit = brain.agent_kit || {};
+      var update = brain.update || {};
+      document.getElementById("recovery-guidance").textContent = update.update_available ?
+        "Project Brain " + update.latest + " is available: run brain upgrade from this workspace." :
+        kit.status === "stale" ?
+        "M365 Agent Kit changed (" + (kit.changed || []).join(", ") + "): run brain agent-kit m365 and replace it in Agent Builder." :
+        brain.generation_predates_binary ?
+        "The published generation predates this Brain version; the next refresh (idle auto-refresh or Refresh Brain) publishes a new generation. Existing tickets keep their pinned generation." :
+        brain.health === "Healthy" ?
         "No readiness issue detected. Diagnostics and safe storage cleanup remain available." :
         (brain.reason || (brain.core && brain.core.ready ? "The published generation remains usable. Git freshness is separate from index readiness; refresh publishes newer snapshots without replacing pinned ticket evidence." : "Refresh Brain to build or align the configured source snapshots. If you edited brain.toml, re-read it first."));
       document.getElementById("brain-health").textContent = brain.health || "—";

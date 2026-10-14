@@ -73,6 +73,33 @@ unmatched. A poisoned artifact is rejected; source reads never fall back to a
 newer working tree. A failed optional refresh retains an intact component only
 when its source snapshots still align.
 
+## Code beside the model
+
+Identifiers decoded from the matched or traced nodes' property values join the
+same request's code search when they look like code: a package-qualified type
+(`com.bank.flows.ApprovePaymentHandler`, searched by its simple name) or a
+CamelCase name with at least two words. They are placed after the explicit
+anchors and before objective prose terms, at most four per request, inside the
+existing operation budget. The navigation JSON lists them under
+`code_candidates` and the handoff warns which were searched. A name match is
+navigation only: the project's language, generator or runtime source must prove
+the binding. Exact `#id:` model reads stay model-only and derive nothing.
+
+Evidence under `source_gen`, `source_gen.caches` or `classes_gen` keeps its
+ordinary search ranking but is labelled generated source in the handoff, so a
+stack trace into generated code leads to the authoring model node rather than
+to a hand edit of the generated file.
+
+Every start handoff and the M365 Agent Kit knowledge file include an MPS model
+catalog: for each pinned model file, the root node labels and their concepts
+(at most 24 roots per file, 8 KB in total). Use those names in `resolve` or a
+`file_hint`; business meaning still needs the structure/aspect sources.
+
+Ticket-labelled commits that change model or descriptor files are indexed by
+`brain experience`, so a new ticket can see which models earlier tickets of the
+same kind touched. A private golden suite can score node-level retrieval with
+`expect.model_anchors` (see the user guide's golden replay section).
+
 ## Optional project flow semantics
 
 To label a role as a project-declared `flow_call`, `transition`, `branch`, `join`

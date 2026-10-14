@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from dataclasses import asdict
@@ -168,6 +169,13 @@ def _parser() -> argparse.ArgumentParser:
     model.add_argument("--samples", type=int, default=3, help="benchmark samples per public synthetic workload (1-10)")
     model.add_argument("--latency-budget-ms", type=int, default=3000, help="Precision candidate-pool p95 budget for autotune")
 
+    upgrade = commands.add_parser("upgrade", help="upgrade this Brain installation (Homebrew or standalone) in one step")
+    upgrade.add_argument("--check", action="store_true", help="only report the current and latest versions")
+    upgrade.add_argument("--version", dest="target_version", metavar="X.Y.Z", help="install this release instead of the latest")
+    upgrade.add_argument("--archive", help="offline: a downloaded release archive for this platform")
+    upgrade.add_argument("--sha256", help="offline: the archive's SHA-256 when SHA256SUMS.txt cannot be fetched")
+    upgrade.add_argument("--release-base-url", help="release mirror base URL (https:// or file://)")
+    upgrade.add_argument("--finish", action="store_true", help=argparse.SUPPRESS)
     commands.add_parser("freshness", help="compare pinned source snapshots and index state")
     commands.add_parser("storage", help="show local Brain storage usage")
     gc = commands.add_parser("gc", help="remove unpinned old index generations")
@@ -258,7 +266,13 @@ def _parser() -> argparse.ArgumentParser:
     ui.add_argument("--no-open", action="store_true", help="do not open the browser automatically")
     ui.add_argument("--foreground", action="store_true", help="keep the UI attached to this terminal for diagnostics")
 
-    service = commands.add_parser("service", help="manage this workspace's macOS login/background service")
+    mcp = commands.add_parser("mcp", help="Model Context Protocol server for Claude, VS Code, Cursor and JetBrains agents")
+    mcp.add_argument("action", nargs="?", choices=("serve", "config"), default="serve",
+                     help="serve (default; hosts launch this over stdio) or config (print/write a host entry)")
+    mcp.add_argument("--host", choices=("claude-desktop", "claude-code", "vscode", "cursor", "jetbrains"),
+                     help="host to configure with the config action")
+    mcp.add_argument("--write", action="store_true", help="merge the entry into the host's configuration file")
+    service = commands.add_parser("service", help="start this workspace at sign-in (macOS LaunchAgent, Windows Run key)")
     service.add_argument("action", choices=("install", "start", "status", "stop", "uninstall"))
     service.add_argument("--port", type=int, help="install with this loopback port; 0 chooses a free port")
     service.add_argument("--json", action="store_true", help="print service status as JSON")
@@ -500,6 +514,17 @@ def _print_hits(hits: list, empty: str = "No matches.") -> None:
             current = hit.repo
             print(f"\n[{current}]")
         print(f"{hit.path}:{hit.line}: {hit.text.strip()}")
+
+
+def _login_service():
+    """Sign-in startup backend: Windows Run key, otherwise the macOS LaunchAgent."""
+    if os.name == "nt":
+        from . import win_service
+
+        return win_service
+    from . import mac_service
+
+    return mac_service
 
 
 def execute(args: argparse.Namespace) -> int:
@@ -1011,15 +1036,47 @@ def execute(args: argparse.Namespace) -> int:
                 print(f"- {repo['name']}: {repo['status']} {repo['sha'] or 'unknown'}")
             print(f"Ticket memory: {status['summary']['experience_cases']} committed cases")
             print(f"Investigations: {len(status['sessions'])}")
+            brain_status = status.get("brain") or {}
+            if brain_status.get("generation_predates_binary"):
+                print("Index: the published generation predates this Brain version; the next refresh republishes it.")
+            update = brain_status.get("update") or {}
+            if update.get("update_available"):
+                print(f"Project Brain {update['latest']} is available: run brain upgrade.")
+            kit = brain_status.get("agent_kit") or {}
+            if kit.get("status") == "stale":
+                print(f"M365 Agent Kit changed ({', '.join(kit['changed'])}): run brain agent-kit m365 and replace it in Agent Builder.")
         return 0
-    if args.command == "service":
-        from .mac_service import service
+    if args.command == "mcp":
+        from .mcp import describe, serve, write_host_config
 
-        status = service(settings, args.action, port=args.port)
+        if args.action == "serve":
+            return serve(settings.config_path)
+        if not args.host:
+            raise BrainError("brain mcp config needs --host claude-desktop|claude-code|vscode|cursor|jetbrains")
+        print(describe(settings, args.host))
+        if args.write:
+            written = write_host_config(settings, args.host)
+            print(f"Wrote {written}; restart or reconnect {args.host} to load it." if written else
+                  "This host has no configuration file; paste the entry above.")
+        return 0
+    if args.command == "upgrade":
+        from .upgrade import UpgradeBusy, finish, upgrade
+
+        if args.finish:
+            return finish(settings)
+        try:
+            return upgrade(settings, version=args.target_version, archive=args.archive, sha256=args.sha256,
+                           release_base_url=args.release_base_url, check_only=args.check)
+        except UpgradeBusy as error:
+            print(f"{error}. Retry brain upgrade when it is idle.", file=sys.stderr)
+            return 75
+    if args.command == "service":
+        status = _login_service().service(settings, args.action, port=args.port)
         if args.json:
             print(json.dumps(status, indent=2))
         else:
-            print("macOS login service: " + ("installed" if status["installed"] else "not installed"))
+            print(("Windows sign-in startup: " if os.name == "nt" else "macOS login service: ")
+                  + ("installed" if status["installed"] else "not installed"))
             print(f"Brain UI: running on 127.0.0.1:{status['port']}" if status["running"] else "Brain UI: stopped")
             print(f"Log: {status['log']}")
         return 0
@@ -1060,6 +1117,10 @@ def execute(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     _configure_windows_stdio()
+    if getattr(sys, "frozen", False):
+        from .upgrade import cleanup_retired
+
+        cleanup_retired()  # Windows keeps a replaced running .exe until the next start.
     try:
         return execute(_parser().parse_args(argv))
     except (BrainError, OSError, ValueError, RuntimeError) as exc:

@@ -25,7 +25,7 @@ directories can still be searched.
 
 ## 2. Installation
 
-macOS, Windows, Linux and Python distributions are at **v1.0.33**.
+macOS, Windows, Linux and Python distributions are at **v1.0.34**.
 Use the platform-specific commands below.
 
 ### Homebrew (recommended on macOS)
@@ -48,8 +48,8 @@ toolchain. Homebrew maps `superorange0707/tap` to the separate
 ### Linux installer
 
 ```bash
-curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.33/install-project-brain.sh
-sh install-project-brain.sh --version 1.0.33
+curl -fsSLO https://github.com/superorange0707/project-brain/releases/download/v1.0.34/install-project-brain.sh
+sh install-project-brain.sh --version 1.0.34
 ```
 
 This selects amd64/arm64, verifies `SHA256SUMS.txt`, and installs the four
@@ -58,8 +58,8 @@ adjacent executables in `~/.local/bin` without changing Brain workspace state.
 ### Standalone macOS/Linux archive
 
 Use the verified
-[v1.0.33 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.33)
-or [v1.0.33 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.33)
+[v1.0.34 Mac archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.34)
+or [v1.0.34 Linux archives](https://github.com/superorange0707/project-brain/releases/tag/v1.0.34)
 for the matching arm64/amd64 platform. Keep `brain`,
 `codebase-memory-mcp`, `zoekt`, and `zoekt-index` in the same directory on
 `PATH`.
@@ -70,9 +70,9 @@ When direct `.ps1` Release Asset downloads are blocked but `git clone` is
 allowed, obtain the exact tagged installer from the repository:
 
 ```powershell
-git clone --depth 1 --branch v1.0.33 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.34 https://github.com/superorange0707/project-brain.git project-brain-installer
 cd project-brain-installer
-.\scripts\install-project-brain.ps1 -Version 1.0.33
+.\scripts\install-project-brain.ps1 -Version 1.0.34
 brain.exe --version
 ```
 
@@ -90,7 +90,7 @@ For a ZIP already downloaded in a browser or transferred from another machine,
 put its published `SHA256SUMS.txt` in the same directory and run the same script:
 
 ```powershell
-.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.33-windows-amd64.zip"
+.\scripts\install-project-brain.ps1 -ArchivePath "$env:USERPROFILE\Downloads\project-brain-v1.0.34-windows-amd64.zip"
 ```
 
 The version is read from the official filename. This path performs no network
@@ -106,14 +106,14 @@ approve the installer.
 
 ### Manual native Windows 11 x64 standalone
 
-Download `project-brain-v1.0.33-windows-amd64.zip` and the published
+Download `project-brain-v1.0.34-windows-amd64.zip` and the published
 `SHA256SUMS.txt` from the same release. Verify the ZIP before extraction, then
 keep `brain.exe`, `codebase-memory-mcp.exe`, `zoekt.exe`, and
 `zoekt-index.exe` together:
 
 ```powershell
-Get-FileHash .\project-brain-v1.0.33-windows-amd64.zip -Algorithm SHA256
-Expand-Archive .\project-brain-v1.0.33-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
+Get-FileHash .\project-brain-v1.0.34-windows-amd64.zip -Algorithm SHA256
+Expand-Archive .\project-brain-v1.0.34-windows-amd64.zip -DestinationPath "$env:LOCALAPPDATA\ProjectBrain\bin"
 $env:PATH = "$env:LOCALAPPDATA\ProjectBrain\bin;$env:PATH"
 brain.exe --version
 brain.exe --help
@@ -136,7 +136,7 @@ the executable does not reset them.
 ### uv tool
 
 ```bash
-uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.33"
+uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.34"
 ```
 
 Upgrade later with:
@@ -148,7 +148,7 @@ uv tool upgrade project-brain-context
 ### pipx
 
 ```bash
-pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.33"
+pipx install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.34"
 ```
 
 ### From a source checkout
@@ -324,9 +324,9 @@ being killed. For foreground diagnostics, run `brain service stop` before
 `brain service install --port 0` for automatic port selection when running more
 than one workspace. Reinstalling without `--port` preserves that selection.
 
-The service retains a stable Homebrew executable link across upgrades. Stop it
-before upgrading, then run `brain service install` to reconcile its definition
-and resume it. Source/venv installations require their interpreter and source
+The service retains a stable Homebrew executable link across upgrades.
+`brain upgrade` stops it, upgrades, runs `brain service install` to reconcile
+its definition and resumes it. Source/venv installations require their interpreter and source
 checkout to remain in place. Logs are private at the configured state's
 `ui.log`; the service plist does not contain the UI token or exported terminal
 credentials. Login startup has a fresh macOS environment: use your approved
@@ -338,6 +338,19 @@ project folders. Check **System Settings → General → Login Items & Extension
 and the relevant folder access setting if registration succeeds but startup does
 not. Company MDM policies still apply. Brain reports failed readiness explicitly;
 it does not elevate privileges or change these policies.
+
+### Windows sign-in startup
+
+On Windows, `brain service install` (from an initialized workspace) adds one
+value to your own `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` key and
+starts the UI now. At each sign-in Windows runs
+`brain -c <workspace>\brain.toml ui --no-open`, which starts the background UI
+and its idle refresh and then exits. No administrator rights, Task Scheduler
+or Windows service are involved. `brain service start|stop|status|uninstall`
+work as on macOS; `uninstall` removes only this workspace's value, and
+`--port` is kept across reinstalls. Unlike macOS, nothing restarts the UI after
+a crash; `brain ui` reopens it. Company policy can disable Run-key startup
+items; Brain then reports the UI as stopped after sign-in.
 
 ### What “latest” means
 
@@ -736,11 +749,18 @@ or `holdout` as `split`, a normal request mapping, and explicit expected paths:
     "expect": {
       "production_files": ["trading-service:src/main/java/demo/EligibilityEvaluator.java"],
       "test_config_files": ["trading-service:src/test/java/demo/CustomerChangedListenerTest.java"],
-      "false_positive_files": ["trading-service:README.md"]
+      "false_positive_files": ["trading-service:README.md"],
+      "model_anchors": ["payments/flows/approval.mps#id:4387651209875421"]
     }
   }]
 }
 ```
+
+`model_anchors` are optional exact `repo/path.mps#id:node` anchors (as returned
+in MPS navigation) that the request is expected to match, seed or trace; they
+are scored as `model_anchor_recall`. Build cases from closed tickets: the ticket
+text is the objective, the files and model nodes touched by the fix are the
+expectation, and `brain experience --json` lists those paths per ticket.
 
 Run `brain evaluate --golden /secure/path/suite.json --split holdout`. The
 result stores only case IDs, suite hash, and aggregate metrics in
@@ -861,13 +881,13 @@ This creates:
 ```text
 generated/m365-agent/
 ├── INSTRUCTIONS.md
-├── PROJECT_KNOWLEDGE.md
+├── PROJECT_KNOWLEDGE.txt
 ├── SUGGESTED_PROMPTS.md
 └── SETUP.md
 ```
 
 Paste `INSTRUCTIONS.md` into the Agent Builder **Instructions** field. Add
-`PROJECT_KNOWLEDGE.md` plus approved IPF, architecture, API, deployment, and
+`PROJECT_KNOWLEDGE.txt` plus approved IPF, architecture, API, deployment, and
 coding-standard documents to **Knowledge**. Keep operational instructions in the
 Instructions field rather than hiding them in a knowledge document.
 Add the four title/prompt pairs from `SUGGESTED_PROMPTS.md` to **Suggested
@@ -886,6 +906,50 @@ The M365 Agent remains the user-facing investigator. It asks the developer
 directly for business, document, runtime, and environment facts. It emits a
 `INVESTIGATION_REQUEST` only when local repository evidence is required. Project Brain
 does not install a connector, request an M365 credential, or call the cloud.
+
+### Agents that call Brain directly (MCP)
+
+Claude Desktop, Claude Code (including inside the MPS 2026.1 terminal), VS Code
+with GitHub Copilot, Cursor and JetBrains AI Assistant can call Brain as a
+Model Context Protocol server instead of you copying handoffs. Connect a host
+once from your workspace:
+
+```bash
+brain mcp config --host claude-desktop --write
+brain mcp config --host claude-code --write
+brain mcp config --host vscode --write
+brain mcp config --host cursor --write
+brain mcp config --host jetbrains
+```
+
+`--write` merges a `project-brain-<workspace>` entry into the host's file
+(Claude Desktop's `claude_desktop_config.json`, `.mcp.json`, `.vscode/mcp.json`
+or `.cursor/mcp.json` in the workspace) and keeps every other server. JetBrains
+prints the JSON to paste under **Settings | Tools | AI Assistant | Model Context
+Protocol (MCP)**. For Claude Code the command also prints a
+`claude mcp add --scope user ...` line that works in every project. The entry
+uses the absolute executable and `brain.toml` paths, because hosts do not inherit
+your shell `PATH`; it never contains the UI token. Restart or reconnect the host
+afterwards.
+
+The agent then uses these tools: `brain_start`, `brain_continue` (send an
+`INVESTIGATION_REQUEST` object or a `FINAL_SOLUTION`), `brain_handoff` (further
+pages), `brain_session`, `brain_resume`, `brain_feedback` and `brain_status`.
+They run the same retrieval, pins, budgets and duplicate checks as the UI, in
+the server process, so the UI does not need to be running. Results are paged at
+80,000 characters. There are deliberately no tools to delete sessions, change
+models or editions, clean storage, or read arbitrary local files; attach
+documents yourself with `brain evidence`.
+
+| Host | Calls a local MCP server? |
+|---|---|
+| Claude Desktop, Claude Code, Cursor, JetBrains AI Assistant | Yes (stdio). |
+| VS Code / JetBrains with GitHub Copilot | Yes, when your organization enables the *MCP servers in Copilot* policy (off by default for Business/Enterprise). |
+| Microsoft 365 Copilot (Agent Builder, Copilot Studio) | No: these run in Microsoft's cloud and cannot reach your laptop. Keep the file handoff above. |
+
+An MCP host sends the retrieved source to whichever model it uses, exactly as a
+pasted handoff would, but without a manual step. Use only hosts your company
+approves for that source.
 
 ## 7. Local investigation cockpit
 
@@ -995,9 +1059,13 @@ sent into Brain, while `generated/handoffs/ABC-1234/context-010.md` is Brain's e
 the AI. Only upload the visible `context-NNN.md` file.
 
 Agent Kit v4 and Investigation Protocol v5 support continued evidence requests
-without a lifetime round limit or extra continuation approval. Regenerate the
-kit and replace your existing Agent's INSTRUCTIONS.md and PROJECT_KNOWLEDGE.md
-to update older guidance. You do not need a new Agent or a new ticket.
+without a lifetime round limit or extra continuation approval. The knowledge
+file is `PROJECT_KNOWLEDGE.txt` because Agent Builder embeds `.txt` but not `.md`
+files; its content is unchanged Markdown. You do not need to regenerate the kit
+after every upgrade: `brain status`, `brain upgrade` and the UI Health panel say
+when the rendered instructions or knowledge changed. Only then rerun
+`brain agent-kit m365` and replace the changed item in your existing Agent. You
+do not need a new Agent or a new ticket.
 
 ```bash
 brain agent-kit m365 --json
@@ -1716,6 +1784,42 @@ GitHub release descriptor and artifact downloads continue to use configured
 enterprise proxy policy plus the verified system-trust and SHA-256 checks above.
 
 ## 15. Updating and uninstalling
+
+Run `brain upgrade` from your workspace. It finds the latest release from the
+pinned `superorange0707/project-brain` GitHub Releases, then:
+
+- **Homebrew:** stops the UI or login service when idle, runs `brew update`,
+  `brew trust --formula superorange0707/tap/project-brain` (best effort) and
+  `brew upgrade superorange0707/tap/project-brain`, and reinstalls the login
+  service definition when you use one.
+- **Standalone (Windows ZIP, Linux/macOS installer):** downloads the platform
+  archive through the same TLS/proxy-aware path as model packs, verifies it
+  against the release's `SHA256SUMS.txt`, checks the staged `brain --version`,
+  stops the idle UI and renames each shipped file aside before moving the new
+  one in. Any failure restores the previous files. Windows keeps the replaced
+  running `brain.exe` as `brain.exe.brain-upgrade-old` until the next start.
+  Other files in the install directory are left alone.
+- **Python (source, pip, uv):** changes nothing and prints the matching upgrade
+  command.
+
+The new version then republishes the index once if its serving schemas changed
+(old tickets keep their pinned generations), restarts the UI if it was running,
+and reports whether the M365 Agent Kit needs re-pasting.
+
+| Command | Use |
+|---|---|
+| `brain upgrade --check` | Report current and latest versions only. |
+| `brain upgrade --version X.Y.Z` | Install a specific release. |
+| `brain upgrade --version X.Y.Z --archive FILE --sha256 HEX` | Offline: install a downloaded archive. |
+| `brain upgrade --release-base-url URL` | Use an approved internal release mirror (`https://` or `file://`). |
+
+The command exits with status 75 when the UI is busy refreshing or
+investigating; retry when it is idle. Installed binaries check for a new
+release at most once a day while the UI runs and show it in **Health**; set
+`PROJECT_BRAIN_NO_UPDATE_CHECK=1` to turn that check off. Releases up to v1.0.33
+predate this command: upgrade them once with the steps in section 2.
+
+For Python installations:
 
 ```bash
 uv tool upgrade project-brain-context
