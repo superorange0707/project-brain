@@ -101,9 +101,9 @@ class McpServerTests(unittest.TestCase):
                     call(3, "brain_start", ticket="MCP-2", ticket_text="Check the risk client contract.")]
         completed = subprocess.run(
             [sys.executable, "-m", "brain.cli", "-c", str(self.config), "mcp"], cwd=self.workspace, env=environment,
-            input="".join(json.dumps(item) + "\n" for item in messages), capture_output=True, text=True, timeout=120,
+            input="".join(json.dumps(item) + "\n" for item in messages), capture_output=True, encoding="utf-8", timeout=120,
             check=True)
-        lines = completed.stdout.splitlines()
+        lines = completed.stdout.splitlines()  # The server writes UTF-8 regardless of the console code page.
         self.assertEqual([1, 2, 3], [json.loads(line)["id"] for line in lines])
         self.assertFalse(json.loads(lines[2])["result"]["isError"])
 

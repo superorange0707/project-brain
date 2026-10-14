@@ -516,6 +516,17 @@ def _print_hits(hits: list, empty: str = "No matches.") -> None:
         print(f"{hit.path}:{hit.line}: {hit.text.strip()}")
 
 
+def _login_service():
+    """Sign-in startup backend: Windows Run key, otherwise the macOS LaunchAgent."""
+    if os.name == "nt":
+        from . import win_service
+
+        return win_service
+    from . import mac_service
+
+    return mac_service
+
+
 def execute(args: argparse.Namespace) -> int:
     if args.command == "init":
         return _init(args)
@@ -1060,12 +1071,7 @@ def execute(args: argparse.Namespace) -> int:
             print(f"{error}. Retry brain upgrade when it is idle.", file=sys.stderr)
             return 75
     if args.command == "service":
-        if os.name == "nt":
-            from .win_service import service
-        else:
-            from .mac_service import service
-
-        status = service(settings, args.action, port=args.port)
+        status = _login_service().service(settings, args.action, port=args.port)
         if args.json:
             print(json.dumps(status, indent=2))
         else:

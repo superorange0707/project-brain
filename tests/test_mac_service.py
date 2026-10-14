@@ -70,7 +70,8 @@ class MacServiceTest(unittest.TestCase):
 
         with patch("brain.mac_service._require_macos"), patch("brain.mac_service.os.getuid", return_value=501, create=True), \
                 patch("brain.mac_service._launchctl", side_effect=launchctl), \
-                patch("brain.mac_service._wait_ready"), patch("sys.stdout", new_callable=io.StringIO) as output:
+                patch("brain.mac_service._wait_ready"), patch("brain.cli._login_service", return_value=mac_service), \
+                patch("sys.stdout", new_callable=io.StringIO) as output:
             result = mac_service.service(self.settings, "install", port=0)
             self.assertTrue(result["installed"])
             self.assertTrue(result["loaded"])
