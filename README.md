@@ -25,6 +25,8 @@ Ticket ──► Chat AI ──INVESTIGATION_REQUEST──► Project Brain ─�
               └──────── pinned source evidence ◄────┘
 ```
 
+![Project Brain workspace: a ticket with its pinned start package, request, checkpoints and evidence context](docs/assets/cockpit.jpg)
+
 The AI does the reasoning; Brain does the searching. Each request is expanded
 into exact source, callers, tests, configuration, Git history and
 cross-repository links, and every piece of evidence is pinned to the snapshot
