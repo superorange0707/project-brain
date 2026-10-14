@@ -2,7 +2,7 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [Unreleased]
+## [1.0.34] - 2026-10-14
 
 - Seed the ordinary code search with identifiers decoded from matched MPS node
   properties (package-qualified or CamelCase values), placed after explicit
