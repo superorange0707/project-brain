@@ -549,7 +549,8 @@ class LocalUiTest(unittest.TestCase):
             method="POST",
             headers={"X-Brain-Token": self.token, "Content-Type": "application/json"},
         )
-        with urlopen(request, timeout=10) as response:
+        # Client wait only: /api/sync refreshes synchronously and Windows runners can exceed 10 s.
+        with urlopen(request, timeout=60) as response:
             return response.status, json.loads(response.read()), dict(response.headers)
 
     def job(self, job_id: str) -> dict:

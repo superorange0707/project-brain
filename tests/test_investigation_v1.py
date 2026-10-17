@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -77,6 +78,10 @@ from brain.semantic import (
 from brain.ui import _session_artifacts
 
 
+# Performance budgets are wall-clock; shared Windows release runners set this to 2.
+TIME_SCALE = float(os.environ.get("PROJECT_BRAIN_TEST_TIME_SCALE") or 1)
+
+
 class InvestigationV1Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -99,6 +104,7 @@ class InvestigationV1Tests(unittest.TestCase):
         (api / "src/main/java/demo/CustomerController.java").write_text(
             """package demo;
 import org.springframework.web.bind.annotation.*;
+
 @RestController
 @RequestMapping("/customers")
 class CustomerController {
@@ -3808,7 +3814,7 @@ None.
             self.assertLessEqual(opened.call_count, 3)
             self.assertLessEqual(bundle.trace["physical_backend_operations"], 3)
             self.assertLess(bundle.trace["bytes_read"], 100_000)
-            self.assertLess(refresh_ms, 30_000, json.dumps({
+            self.assertLess(refresh_ms, 30_000 * TIME_SCALE, json.dumps({
                 "repositories": count,
                 "refresh_phases": [
                     {"phase": event.get("phase"), "elapsed_ms": round(float(event.get("elapsed_ms", 0)), 3)}
@@ -3816,7 +3822,7 @@ None.
                 ],
                 "refresh_functions": refresh_timings,
             }, sort_keys=True))
-            self.assertLess(retrieval_ms, 10_000)
+            self.assertLess(retrieval_ms, 10_000 * TIME_SCALE)
             rss_after = _peak_rss_mb()
             if rss_before is not None and rss_after is not None:
                 self.assertLess(rss_after - rss_before, 512)
@@ -3840,7 +3846,7 @@ None.
             measured_refresh(settings, delta_events, delta_timings)
         delta_ms = (time.perf_counter() - delta_started) * 1_000
         self.assertEqual(1, parsed_delta.call_count)
-        self.assertLess(delta_ms, 30_000, json.dumps({
+        self.assertLess(delta_ms, 30_000 * TIME_SCALE, json.dumps({
             "repositories": 100,
             "changed_repositories": 1,
             "refresh_phases": [
