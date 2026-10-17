@@ -1,21 +1,17 @@
 name: CI
 
-# Cost policy: pull requests run one representative matrix per head and cancel
-# superseded runs; draft pull requests and work-branch backup pushes run
-# nothing; `main` gets one post-merge check. The full Python/OS matrix, native
-# packaging and model qualification run only for tagged releases (release.yml).
+# Manual only: run it from the Actions tab (or `gh workflow run ci.yml --ref BRANCH`)
+# when a change needs hosted Linux or native Windows coverage. Local checks are the
+# merge gate; tagged releases run the full OS/Python matrix, native packaging and
+# model qualification in release.yml.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,10 +20,8 @@ env:
 
 jobs:
   test:
-    # Oldest and newest supported CPython on Linux plus native Windows on the
-    # newest. Draft pull requests run nothing until they are marked ready.
+    # Oldest and newest supported CPython on Linux plus native Windows on the newest.
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
-    if: github.event_name != 'push' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -54,29 +48,8 @@ jobs:
       - name: Compile sources
         run: python -m compileall -q brain tests
 
-  post-merge:
-    # One check of the merged main commit; the pull request already ran the matrix.
-    name: Post-merge check (ubuntu-latest, Python 3.14)
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - name: Install package
-        run: python -m pip install ".[semantic]"
-      - name: Run tests
-        run: python -m unittest discover -s tests -v
-      - name: Compile sources
-        run: python -m compileall -q brain tests
-
   build:
     name: Build distributions
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

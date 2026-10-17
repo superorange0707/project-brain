@@ -1,28 +1,15 @@
 name: Standalone smoke
 
-# PyInstaller launcher checks run only when launcher-related files change.
-# Tagged releases qualify both macOS architectures and Windows in release.yml.
+# Manual only: PyInstaller launcher checks for launcher changes. Tagged releases
+# qualify both macOS architectures and Windows in release.yml.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - "brain/standalone.py"
-      - "brain/cli.py"
-      - "brain/ui.py"
-      - "brain/ui.html"
-      - "brain/mac_service.py"
-      - "brain/platforms.py"
-      - "brain/locks.py"
-      - "pyproject.toml"
-      - "MANIFEST.in"
-      - ".github/workflows/standalone-smoke.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -32,7 +19,6 @@ env:
 jobs:
   macos:
     name: Standalone macOS arm64
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -60,7 +46,6 @@ jobs:
 
   windows:
     name: Standalone Windows amd64
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: windows-latest
     timeout-minutes: 30
     steps:

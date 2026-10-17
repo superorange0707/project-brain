@@ -11,6 +11,12 @@ All notable changes are documented here. This project follows Semantic Versionin
   budget and later method-range lookups were skipped. The shared connection's
   query counter and deadline handler are removed after each flow, and the
   request scope closes its connections.
+- Close a retrieval scope's pooled catalog connections whenever the scope
+  ends (or its cache is cleared), so Windows can always delete or replace the
+  catalog database afterwards.
+- CI: the CI and standalone-smoke workflows are manual (`workflow_dispatch`);
+  pull requests and pushes start no hosted runs. Tagged releases keep the full
+  matrix, packaging and model qualification.
 - Includes every change listed under 1.0.34.
 
 ## [1.0.34] - Unpublished candidate

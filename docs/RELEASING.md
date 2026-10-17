@@ -32,7 +32,7 @@ ritual almost daily. The cadence and contract are therefore:
   triggered by the schema-drift probe when the UI is idle (or by
   `brain upgrade --finish`), and the M365 Agent Kit is regenerated only when
   Brain reports that its rendered instructions or knowledge changed.
-- Hosted CI runs once per ready pull request and once post-merge; the full
+- Local checks gate merges; hosted CI is manual (`workflow_dispatch`). The full
   OS/Python matrix, native packaging and model qualification run on the tag.
 
 ## Core release and Homebrew
