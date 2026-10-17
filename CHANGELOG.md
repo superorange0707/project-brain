@@ -2,7 +2,23 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.35] - 2026-10-14
+## [1.0.36] - 2026-10-18
+
+- Python call-binding analysis measures its 0.25-second CPU budget on the
+  parsing thread (`time.thread_time`) instead of the whole process, so busy UI,
+  refresh or worker threads can no longer make a small file's bindings appear
+  unresolved.
+- Release qualification: wall-clock performance benchmarks in the test suite
+  scale with `PROJECT_BRAIN_TEST_TIME_SCALE` (2 on shared Windows runners, 1
+  elsewhere), and the UI test client waits up to 60 seconds for synchronous
+  refresh responses. Product limits are unchanged.
+- Includes every change listed under 1.0.35 and 1.0.34.
+
+## [1.0.35] - Unpublished candidate
+
+- Withheld after native Windows release validation hit wall-clock test
+  budgets and the process-wide binding CPU budget fixed in 1.0.36. The
+  changes below are included in 1.0.36.
 
 - Reuse one catalog database connection per retrieval request for runtime
   anchor and execution-flow lookups instead of opening one per lookup. A

@@ -44,6 +44,8 @@ jobs:
       - name: Install package
         run: python -m pip install ".[semantic]"
       - name: Run tests
+        env:
+          PROJECT_BRAIN_TEST_TIME_SCALE: ${{ runner.os == 'Windows' && '2' || '1' }}
         run: python -m unittest discover -s tests -v
       - name: Compile sources
         run: python -m compileall -q brain tests

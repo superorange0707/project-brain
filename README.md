@@ -47,18 +47,18 @@ the ticket started from. You apply the resulting change in your own IDE.
 | macOS | `brew install superorange0707/tap/project-brain` |
 | Windows 11 x64 | Installer below, or the portable [ZIP](https://github.com/superorange0707/project-brain/releases/latest) |
 | Linux | `curl -fsSLO https://github.com/superorange0707/project-brain/releases/latest/download/install-project-brain.sh && sh install-project-brain.sh` |
-| Python 3.11–3.14 | `uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.35"` |
+| Python 3.11–3.14 | `uv tool install "project-brain-context @ git+https://github.com/superorange0707/project-brain.git@v1.0.36"` |
 
 **Windows.** No administrator rights or Python are needed. Run the installer
 from a temporary folder (on machines that block direct `.ps1` downloads, cloning
 the tagged repository works):
 
 ```powershell
-git clone --depth 1 --branch v1.0.35 https://github.com/superorange0707/project-brain.git project-brain-installer
+git clone --depth 1 --branch v1.0.36 https://github.com/superorange0707/project-brain.git project-brain-installer
 ```
 
 ```powershell
-.\project-brain-installer\scripts\install-project-brain.ps1 -Version 1.0.35
+.\project-brain-installer\scripts\install-project-brain.ps1 -Version 1.0.36
 ```
 
 It verifies the release ZIP against `SHA256SUMS.txt`, installs it under
@@ -66,7 +66,7 @@ It verifies the release ZIP against `SHA256SUMS.txt`, installs it under
 Offline and blocked-PowerShell options are in the
 [User Guide](docs/USER_GUIDE.md#2-installation).
 
-**Upgrading** from v1.0.35 onward is one command, run from your workspace:
+**Upgrading** from v1.0.36 onward is one command, run from your workspace:
 
 ```bash
 brain upgrade

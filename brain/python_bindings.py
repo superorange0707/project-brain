@@ -9,7 +9,7 @@ from typing import Any
 MAX_BINDING_SOURCE_BYTES = 1_000_000
 MAX_BINDING_NODES = 100_000
 MAX_BINDING_CALLS = 8_192
-MAX_BINDING_SECONDS = .25
+MAX_BINDING_SECONDS = .25  # CPU seconds of the parsing thread; other threads' work must not count.
 
 
 def source_bindings(content: str) -> tuple[dict[Any, Any], dict[str, int], frozenset[str] | None]:
@@ -20,7 +20,7 @@ def source_bindings(content: str) -> tuple[dict[Any, Any], dict[str, int], froze
     """
     if len(content) > MAX_BINDING_SOURCE_BYTES or len(content.encode('utf-8')) > MAX_BINDING_SOURCE_BYTES:
         return {}, {}, None
-    deadline = time.process_time() + MAX_BINDING_SECONDS
+    deadline = time.thread_time() + MAX_BINDING_SECONDS
     scopes: list[dict[str, Any]] = []
     calls: list[tuple[int, int, str, str | None]] = []
     nodes = 0
@@ -60,7 +60,7 @@ def source_bindings(content: str) -> tuple[dict[Any, Any], dict[str, int], froze
             def visit(self, node: ast.AST) -> None:
                 nonlocal nodes
                 nodes += 1
-                if nodes > MAX_BINDING_NODES or time.process_time() >= deadline:
+                if nodes > MAX_BINDING_NODES or time.thread_time() >= deadline:
                     raise ValueError('binding budget')
                 super().visit(node)
 
@@ -157,7 +157,7 @@ def source_bindings(content: str) -> tuple[dict[Any, Any], dict[str, int], froze
                 # not modelled; never infer their calls from the outer scope.
                 for child in ast.walk(node):
                     nodes += 1
-                    if nodes > MAX_BINDING_NODES or time.process_time() >= deadline:
+                    if nodes > MAX_BINDING_NODES or time.thread_time() >= deadline:
                         raise ValueError('binding budget')
                     if isinstance(child, ast.NamedExpr):
                         self.visit(child.target)
@@ -227,6 +227,6 @@ def source_bindings(content: str) -> tuple[dict[Any, Any], dict[str, int], froze
         declarations = {name: value[4] for name, value in scopes[0]['bindings'].items()
                         if value is not None and value[0] == 'definition' and not scopes[0]['dynamic']}
         namespace = frozenset(scopes[0]['bindings']) if not scopes[0]['dynamic'] else None
-        return (result, declarations, namespace) if time.process_time() < deadline else ({}, {}, None)
+        return (result, declarations, namespace) if time.thread_time() < deadline else ({}, {}, None)
     except (SyntaxError, ValueError, RecursionError, KeyError, TypeError, OverflowError, MemoryError):
         return {}, {}, None
