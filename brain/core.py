@@ -14,7 +14,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import tomllib
 import xml.etree.ElementTree as ET
@@ -534,16 +533,36 @@ def run(
 
 
 _ACTIVE_RETRIEVAL_TRACE: contextvars.ContextVar[Any | None] = contextvars.ContextVar("brain_retrieval_trace", default=None)
-_ACTIVE_RETRIEVAL_CACHE: contextvars.ContextVar[dict[tuple[Any, ...], Any] | None] = contextvars.ContextVar("brain_retrieval_cache", default=None)
 
 
-def _close_scope_connections() -> None:
-    """Close catalog connections reused within the retrieval scope about to end."""
-    pool = (_ACTIVE_RETRIEVAL_CACHE.get() or {}).get(("catalog-connections",)) or {}
-    if pool.get("thread") != threading.get_ident():
-        return  # Only the owning thread may close SQLite connections; scopes end on their owner.
-    for connection in (pool.get("connections") or {}).values():
-        connection.close()
+class _RetrievalScope:
+    """The request-local cache context variable; ending a scope closes its pooled connections.
+
+    Scopes are entered with set() and ended with reset(token) by production code
+    and tests alike. Closing here rather than at each call site means a scope
+    that ends any way at all never leaves a catalog database open: Windows cannot
+    delete or replace a file that is still open, and cyclic references can delay
+    garbage collection arbitrarily.
+    """
+
+    def __init__(self) -> None:
+        self._variable: contextvars.ContextVar[dict[tuple[Any, ...], Any] | None] = contextvars.ContextVar(
+            "brain_retrieval_cache", default=None)
+
+    def get(self) -> dict[tuple[Any, ...], Any] | None:
+        return self._variable.get()
+
+    def set(self, value: dict[tuple[Any, ...], Any] | None) -> contextvars.Token:
+        return self._variable.set(value)
+
+    def reset(self, token: contextvars.Token) -> None:
+        pool = (self._variable.get() or {}).get(("catalog-connections",))
+        if pool is not None:
+            pool.close()
+        self._variable.reset(token)
+
+
+_ACTIVE_RETRIEVAL_CACHE = _RetrievalScope()
 
 
 @contextmanager
@@ -553,7 +572,6 @@ def _pinned_source_cache_scope():
         yield
     finally:
         if token is not None:
-            _close_scope_connections()
             _ACTIVE_RETRIEVAL_CACHE.reset(token)
 _REPO_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="brain-repo")
 
@@ -2050,7 +2068,6 @@ def trace_symbol(settings: Settings, query: str, repos: Iterable[str] | None = N
         return _trace_symbol(settings, query, repos)
     finally:
         if token is not None:
-            _close_scope_connections()
             _ACTIVE_RETRIEVAL_CACHE.reset(token)
 
 
@@ -4611,7 +4628,6 @@ def retrieve_context(
         return bundle
     finally:
         trace._set_backend_headroom(0)
-        _close_scope_connections()
         _ACTIVE_RETRIEVAL_CACHE.reset(cache_token)
         _ACTIVE_RETRIEVAL_TRACE.reset(trace_token)
 
@@ -7007,7 +7023,6 @@ def create_context(
                 )
             finally:
                 _ACTIVE_RETRIEVAL_TRACE.reset(anchor_trace_token)
-                _close_scope_connections()
                 _ACTIVE_RETRIEVAL_CACHE.reset(anchor_cache_token)
             from .editions import current_edition as runtime_edition
 

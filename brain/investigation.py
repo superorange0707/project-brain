@@ -1556,26 +1556,44 @@ def resolve_runtime_anchors(
 CATALOG_CONNECTIONS_KEY = ("catalog-connections",)
 
 
+class _CatalogConnectionPool(dict):
+    """Catalog connections of one retrieval scope, owned by the scope's thread."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.thread = get_ident()
+
+    def close(self) -> None:
+        if self.thread != get_ident():
+            return  # SQLite connections are thread-bound; the owning thread ends its scope.
+        for connection in self.values():
+            connection.close()
+        self.clear()
+
+    __del__ = close  # A scope dict that is cleared or dropped still closes promptly.
+
+
 def _scoped_catalog_connection(settings: Settings) -> tuple[Any, Any]:
     """One catalog connection per retrieval scope on the scope's thread.
 
     Opening a managed SQLite database validates its path handles, which costs
     tens to hundreds of milliseconds on Windows; a 50-symbol request resolved
     anchors through ~80 separate opens. Reuse is limited to the thread that
-    owns the request scope (SQLite connections are thread-bound); the scope's
-    owner closes them through core._close_scope_connections.
+    owns the request scope; core._RetrievalScope.reset closes the pool.
     """
     from .core import _ACTIVE_RETRIEVAL_CACHE
 
     cache = _ACTIVE_RETRIEVAL_CACHE.get()
-    pool = cache.setdefault(CATALOG_CONNECTIONS_KEY, {"thread": get_ident(), "connections": {}}) if cache is not None else None
-    if pool is None or pool["thread"] != get_ident():
+    pool = cache.get(CATALOG_CONNECTIONS_KEY) if cache is not None else None
+    if cache is not None and pool is None:
+        pool = cache[CATALOG_CONNECTIONS_KEY] = _CatalogConnectionPool()
+    if pool is None or pool.thread != get_ident():
         connection = connect(settings)
         return connection, connection.close
     key = str(settings.state_dir.resolve())
-    connection = pool["connections"].get(key)
+    connection = pool.get(key)
     if connection is None:
-        connection = pool["connections"][key] = connect(settings)
+        connection = pool[key] = connect(settings)
 
     def release() -> None:
         if connection.in_transaction:

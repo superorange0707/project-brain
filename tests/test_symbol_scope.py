@@ -645,6 +645,24 @@ class SymbolScopeTests(unittest.TestCase):
             self.assertEqual(20000, connection.execute(count).fetchone()[0])  # Long enough to reach a progress handler.
             release()
 
+    def test_scope_reset_or_clear_closes_pooled_catalog_connections(self):
+        # Windows cannot delete an open database; cyclic garbage may never be collected in time.
+        pinned = self.publish()
+        token = core._ACTIVE_RETRIEVAL_CACHE.set({})
+        connection, release = investigation._scoped_catalog_connection(pinned)
+        release()
+        core._ACTIVE_RETRIEVAL_CACHE.reset(token)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute('SELECT 1')
+        token = core._ACTIVE_RETRIEVAL_CACHE.set({})
+        try:
+            connection, release = investigation._scoped_catalog_connection(pinned)
+            core._ACTIVE_RETRIEVAL_CACHE.get().clear()
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute('SELECT 1')
+        finally:
+            core._ACTIVE_RETRIEVAL_CACHE.reset(token)
+
     def test_buffered_direct_source_does_not_reserve_a_duplicate_read_before_relations(self):
         self.source.write_text(
             'package billing;\nclass Authorization {\n boolean authorize() { return helper(); }\n'
