@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
@@ -78,7 +79,7 @@ class SymbolScopeTests(unittest.TestCase):
             results = []
 
             def measured(*args, **kwargs):
-                with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+                with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                     result = resolver(*args, **kwargs)
                 results.append((result, opened.call_count))
                 return result
@@ -121,7 +122,7 @@ class SymbolScopeTests(unittest.TestCase):
         runtime = investigation.build_ticket_runtime
 
         def measured(*args, **kwargs):
-            with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+            with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                 result = resolver(*args, **kwargs)
             observed.append((stage, opened.call_count, json.loads(json.dumps(result))))
             return result
@@ -324,7 +325,7 @@ class SymbolScopeTests(unittest.TestCase):
                 batch = resolve_runtime_anchors(pinned, pinned.atlas_generation, queries)
                 self.assertEqual(warm, batch['cache_hit'])
                 for query, original in zip(queries, expected):
-                    with mock.patch.object(investigation, 'connect', side_effect=AssertionError('repeated anchor IO')):
+                    with mock.patch.object(investigation, '_scoped_catalog_connection', side_effect=AssertionError('repeated anchor IO')):
                         result = resolve_runtime_anchors(pinned, pinned.atlas_generation, [query, query])
                         self.assertEqual(original['candidates'], result['candidates'])
                         self.assertEqual(original['ambiguous'], result['ambiguous'])
@@ -354,7 +355,7 @@ class SymbolScopeTests(unittest.TestCase):
                 self.assertEqual(warm, batch['cache_hit'])
                 self.assertEqual(16, len(batch['candidates']))
                 for number in (0, 14, 15, 16, 49):
-                    with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+                    with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                         result = resolve_runtime_anchors(pinned, pinned.atlas_generation, [queries[number]])
                     self.assertEqual(0 if number < 16 else 1, opened.call_count, number)
                     self.assertEqual(expected[number]['candidates'], result['candidates'])
@@ -434,12 +435,12 @@ class SymbolScopeTests(unittest.TestCase):
             try:
                 resolve_runtime_anchors(pinned, pinned.atlas_generation, queries, use_cache=use_cache)
                 for query, original in zip(queries[:3], expected):
-                    with mock.patch.object(investigation, 'connect', side_effect=AssertionError('repeated prefix lookup')):
+                    with mock.patch.object(investigation, '_scoped_catalog_connection', side_effect=AssertionError('repeated prefix lookup')):
                         result = resolve_runtime_anchors(pinned, pinned.atlas_generation, [query], use_cache=use_cache)
                     self.assertEqual(original['candidates'], result['candidates'])
                     self.assertEqual(original['ambiguous'], result['ambiguous'])
                     self.assertTrue(result['request_cache_hit'])
-                with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+                with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                     result = resolve_runtime_anchors(pinned, pinned.atlas_generation, [queries[-1]], use_cache=use_cache)
                 self.assertEqual(1, opened.call_count, 'an unqueried negative is not a proven absence')
                 self.assertFalse(result.get('request_cache_hit', False))
@@ -464,7 +465,7 @@ class SymbolScopeTests(unittest.TestCase):
                             self.assertFalse(batch['candidates'])
                             self.assertEqual([item['value'] for item in queries], batch['inputs'])
                             self.assertEqual(0, batch['bounds']['compound_terms'])
-                            with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+                            with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                                 result = resolve_runtime_anchors(pinned, pinned.atlas_generation, [target])
                             self.assertEqual(1, opened.call_count)
                             self.assertFalse(result.get('request_cache_hit', False))
@@ -490,7 +491,7 @@ class SymbolScopeTests(unittest.TestCase):
                     batch = resolve_runtime_anchors(pinned, pinned.atlas_generation, queries)
                     self.assertEqual(50, len(batch['candidates']))
                     self.assertTrue(batch['ambiguous'])
-                    with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+                    with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                         result = resolve_runtime_anchors(pinned, pinned.atlas_generation, [queries[-1]])
                     self.assertEqual(1, opened.call_count)
                     self.assertFalse(result.get('request_cache_hit', False))
@@ -518,7 +519,7 @@ class SymbolScopeTests(unittest.TestCase):
                 batch = resolve_runtime_anchors(pinned, pinned.atlas_generation, queries)
                 self.assertEqual(32, len(batch['candidates']))
                 for query, original in zip(queries, expected):
-                    with mock.patch.object(investigation, 'connect', side_effect=AssertionError('repeated owner lookup')):
+                    with mock.patch.object(investigation, '_scoped_catalog_connection', side_effect=AssertionError('repeated owner lookup')):
                         result = resolve_runtime_anchors(pinned, pinned.atlas_generation, [query])
                     self.assertEqual(original['candidates'], result['candidates'])
                     self.assertTrue(result['ambiguous'])
@@ -548,7 +549,7 @@ class SymbolScopeTests(unittest.TestCase):
         opened_per_call = []
 
         def measured(*args, **kwargs):
-            with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+            with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                 result = resolver(*args, **kwargs)
             opened_per_call.append(opened.call_count)
             return result
@@ -603,6 +604,64 @@ class SymbolScopeTests(unittest.TestCase):
             if budget < 160:
                 self.assertTrue(bundle.unresolved)
                 self.assertNotEqual('coverage_satisfied', bundle.trace['stop_reason'])
+
+    def test_large_request_reuses_one_catalog_connection_and_leaves_it_clean(self):
+        from brain import investigation
+
+        source = ('package billing;\nclass Authorization {\n' + ''.join(
+            f' boolean method{number}() {{ return helper{number}(); }}\n'
+            f' boolean helper{number}() {{ return true; }}\n' for number in range(50)) + '}\n')
+        self.source.write_text(source, encoding='utf-8')
+        pinned = replace(self.publish(), max_effective_operations=50)
+        request = self.request()
+        request['INVESTIGATION_REQUEST'].update(
+            anchors=[{'kind': 'symbol', 'value': f'billing.Authorization.method{number}'} for number in range(50)],
+            required=['callees'],
+        )
+        opened = []
+        real_connect = investigation.connect
+
+        def connect(settings):
+            opened.append(real_connect(settings))
+            return opened[-1]
+
+        # Opening a managed database is slow on Windows; one request opened ~80 before.
+        with mock.patch.object(investigation, 'connect', side_effect=connect):
+            bundle = self.retrieve(replace(pinned, max_backend_operations=160), request)
+        self.assertIn('symbol_relation', bundle.trace['backend_ms'])
+        self.assertEqual(1, len(opened))
+        with self.assertRaises(sqlite3.ProgrammingError):
+            opened[0].execute('SELECT 1')  # Closed when the request scope ended.
+
+        # A flow whose deadline already passed must not leave its progress
+        # handler interrupting the next lookup on a shared connection.
+        with core._pinned_source_cache_scope():
+            with mock.patch.object(investigation.time, 'monotonic', side_effect=[0.0, *([10_000.0] * 50)]):
+                flow = investigation._execution_flow(pinned, pinned.atlas_generation, ['missing-entity'],
+                                                     core.ContextBundle('x', atlas_generation=pinned.atlas_generation))
+            self.assertNotEqual('typed graph is unavailable or incompatible for the pinned generation', flow.get('reason'))
+            connection, release = investigation._scoped_catalog_connection(pinned)
+            count = 'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 20000) SELECT count(*) FROM c'
+            self.assertEqual(20000, connection.execute(count).fetchone()[0])  # Long enough to reach a progress handler.
+            release()
+
+    def test_scope_reset_or_clear_closes_pooled_catalog_connections(self):
+        # Windows cannot delete an open database; cyclic garbage may never be collected in time.
+        pinned = self.publish()
+        token = core._ACTIVE_RETRIEVAL_CACHE.set({})
+        connection, release = investigation._scoped_catalog_connection(pinned)
+        release()
+        core._ACTIVE_RETRIEVAL_CACHE.reset(token)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute('SELECT 1')
+        token = core._ACTIVE_RETRIEVAL_CACHE.set({})
+        try:
+            connection, release = investigation._scoped_catalog_connection(pinned)
+            core._ACTIVE_RETRIEVAL_CACHE.get().clear()
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute('SELECT 1')
+        finally:
+            core._ACTIVE_RETRIEVAL_CACHE.reset(token)
 
     def test_buffered_direct_source_does_not_reserve_a_duplicate_read_before_relations(self):
         self.source.write_text(
@@ -777,14 +836,14 @@ class SymbolScopeTests(unittest.TestCase):
         token = core._ACTIVE_RETRIEVAL_CACHE.set({})
         try:
             old = resolve_runtime_anchors(pinned, pinned.atlas_generation, query)
-            with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+            with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                 new = resolve_runtime_anchors(newer, newer.atlas_generation, query)
             self.assertEqual(1, opened.call_count)
             self.assertNotEqual(old['candidates'][0]['entity_id'], new['candidates'][0]['entity_id'])
-            with mock.patch.object(investigation, 'connect', side_effect=AssertionError('old pin was replaced')):
+            with mock.patch.object(investigation, '_scoped_catalog_connection', side_effect=AssertionError('old pin was replaced')):
                 self.assertEqual(old['candidates'], resolve_runtime_anchors(pinned, pinned.atlas_generation, query)['candidates'])
             for options in ({'limit': 1}, {'use_cache': False}):
-                with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+                with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                     result = resolve_runtime_anchors(pinned, pinned.atlas_generation, query, **options)
                 self.assertEqual(1, opened.call_count)
                 self.assertEqual(old['candidates'], result['candidates'])
@@ -821,7 +880,7 @@ class SymbolScopeTests(unittest.TestCase):
         try:
             missing = [{'kind': 'symbol', 'value': f'billing.Missing{number}.run'} for number in range(16)]
             self.assertFalse(resolve_runtime_anchors(pinned, pinned.atlas_generation, missing + target)['candidates'])
-            with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+            with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                 found = resolve_runtime_anchors(pinned, pinned.atlas_generation, target)
             self.assertEqual(1, opened.call_count)
             self.assertTrue(found['candidates'])
@@ -831,7 +890,7 @@ class SymbolScopeTests(unittest.TestCase):
                                         [{'kind': 'symbol', 'value': f'billing.Absent{number}.run'}])
             self.assertEqual(50, len(entries))
             self.assertLessEqual(sum(map(len, entries.values())), 2 * 1024 * 1024)
-            with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+            with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                 result = resolve_runtime_anchors(pinned, pinned.atlas_generation, target, limit=1)
             self.assertEqual(1, opened.call_count)
             self.assertEqual(found['candidates'], result['candidates'])
@@ -844,7 +903,7 @@ class SymbolScopeTests(unittest.TestCase):
                 with mock.patch.object(investigation, 'MAX_ANCHOR_REQUEST_CACHE_BYTES', byte_cap):
                     resolve_runtime_anchors(pinned, pinned.atlas_generation,
                                             target + [{'kind': 'symbol', 'value': 'billing.Authorization'}], limit=1)
-                    with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+                    with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                         result = resolve_runtime_anchors(pinned, pinned.atlas_generation, target, limit=1)
                     self.assertEqual(1, opened.call_count, 'candidate-truncated batches cannot seed singleton aliases')
                     self.assertEqual(found['candidates'], result['candidates'])
@@ -882,7 +941,7 @@ class SymbolScopeTests(unittest.TestCase):
                 batch = resolve_runtime_anchors(pinned, pinned.atlas_generation,
                                                query + [{'kind': 'symbol', 'value': 'billing.Missing.authorize'}])
                 self.assertEqual(warm, batch['cache_hit'])
-                with mock.patch.object(investigation, 'connect', wraps=investigation.connect) as opened:
+                with mock.patch.object(investigation, '_scoped_catalog_connection', wraps=investigation._scoped_catalog_connection) as opened:
                     result = resolve_runtime_anchors(pinned, pinned.atlas_generation, query)
                 self.assertEqual(1, opened.call_count)
                 self.assertFalse(result.get('request_cache_hit', False))

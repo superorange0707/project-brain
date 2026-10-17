@@ -533,7 +533,36 @@ def run(
 
 
 _ACTIVE_RETRIEVAL_TRACE: contextvars.ContextVar[Any | None] = contextvars.ContextVar("brain_retrieval_trace", default=None)
-_ACTIVE_RETRIEVAL_CACHE: contextvars.ContextVar[dict[tuple[Any, ...], Any] | None] = contextvars.ContextVar("brain_retrieval_cache", default=None)
+
+
+class _RetrievalScope:
+    """The request-local cache context variable; ending a scope closes its pooled connections.
+
+    Scopes are entered with set() and ended with reset(token) by production code
+    and tests alike. Closing here rather than at each call site means a scope
+    that ends any way at all never leaves a catalog database open: Windows cannot
+    delete or replace a file that is still open, and cyclic references can delay
+    garbage collection arbitrarily.
+    """
+
+    def __init__(self) -> None:
+        self._variable: contextvars.ContextVar[dict[tuple[Any, ...], Any] | None] = contextvars.ContextVar(
+            "brain_retrieval_cache", default=None)
+
+    def get(self) -> dict[tuple[Any, ...], Any] | None:
+        return self._variable.get()
+
+    def set(self, value: dict[tuple[Any, ...], Any] | None) -> contextvars.Token:
+        return self._variable.set(value)
+
+    def reset(self, token: contextvars.Token) -> None:
+        pool = (self._variable.get() or {}).get(("catalog-connections",))
+        if pool is not None:
+            pool.close()
+        self._variable.reset(token)
+
+
+_ACTIVE_RETRIEVAL_CACHE = _RetrievalScope()
 
 
 @contextmanager
