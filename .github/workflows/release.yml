@@ -697,13 +697,14 @@ jobs:
       - name: Check tap authorization
         id: authorization
         env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          if test -n "$HOMEBREW_TAP_TOKEN"; then
+          if test -n "$HOMEBREW_TAP_DEPLOY_KEY" || test -n "$HOMEBREW_TAP_TOKEN"; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "Homebrew tap token is not configured; skipping tap update."
+            echo "Homebrew tap deploy key or token is not configured; skipping tap update."
           fi
       - name: Confirm published checksums are final
         env:
@@ -740,6 +741,7 @@ jobs:
       - name: Publish the verified formula
         if: steps.authorization.outputs.available == 'true'
         env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -753,7 +755,20 @@ jobs:
           git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C homebrew-tap add "${FORMULA#homebrew-tap/}"
           git -C homebrew-tap commit -m "project-brain ${GITHUB_REF_NAME}"
-          git -C homebrew-tap remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/superorange0707/homebrew-tap.git"
+          if test -n "$HOMEBREW_TAP_DEPLOY_KEY"; then
+            # Deploy key: write access to the tap repository only. GitHub's
+            # published ed25519 host key is pinned instead of trusted on first use.
+            TAP_SSH="$RUNNER_TEMP/tap-ssh"
+            trap 'rm -rf "$TAP_SSH"' EXIT
+            install -d -m 700 "$TAP_SSH"
+            printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$TAP_SSH/key"
+            chmod 600 "$TAP_SSH/key"
+            echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$TAP_SSH/known_hosts"
+            export GIT_SSH_COMMAND="ssh -i $TAP_SSH/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$TAP_SSH/known_hosts -o StrictHostKeyChecking=yes"
+            git -C homebrew-tap remote set-url origin git@github.com:superorange0707/homebrew-tap.git
+          else
+            git -C homebrew-tap remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/superorange0707/homebrew-tap.git"
+          fi
           git -C homebrew-tap push origin main
 
   pypi:

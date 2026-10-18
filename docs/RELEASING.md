@@ -56,13 +56,15 @@ ritual almost daily. The cadence and contract are therefore:
    v1 release gate, not an optional installer reset or workspace migration.
 4. Only after that release succeeds, the `homebrew-tap` job downloads the
    published checksum asset and compares it with the build checksum file.
-5. If both match and the repository has a narrowly scoped
-   `HOMEBREW_TAP_TOKEN` Actions secret with write access only to
-   `superorange0707/homebrew-tap`, it renders, syntax-checks, commits, and
-   pushes the formula.
+5. If both match and the repository has the `HOMEBREW_TAP_DEPLOY_KEY` Actions
+   secret (the private half of a write-enabled deploy key registered only on
+   `superorange0707/homebrew-tap`), it renders, syntax-checks, verifies with
+   `brew install/upgrade/test`, commits, and pushes the formula over SSH with
+   GitHub's published ed25519 host key pinned. A narrowly scoped
+   `HOMEBREW_TAP_TOKEN` secret is still accepted as a fallback.
 
 The Homebrew job depends on `github-release`, so a failed build, checksum step,
-or release creation cannot change the tap. If the token is absent, Core release
+or release creation cannot change the tap. If neither secret is present, Core release
 publication still succeeds and the tap remains an explicit release-engineering
 follow-up; do not put a personal token in source or a release artifact.
 
