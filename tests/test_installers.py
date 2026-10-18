@@ -108,6 +108,11 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("brew trust superorange0707/tap", job)
         self.assertNotIn('brew install --formula "$FORMULA"', job)
         self.assertNotIn('brew test "$FORMULA"', job)
+        # The tap is published with a repository-scoped deploy key and a pinned GitHub host key.
+        self.assertIn("HOMEBREW_TAP_DEPLOY_KEY", job)
+        self.assertIn("StrictHostKeyChecking=yes", job)
+        self.assertIn("github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl", job)
+        self.assertIn('trap \'rm -rf "$TAP_SSH"\' EXIT', job)
 
     def test_release_workflow_publishes_and_smokes_native_installers(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
