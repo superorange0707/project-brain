@@ -2,7 +2,7 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [Unreleased]
+## [1.0.37] - 2026-10-23
 
 - A macOS login service that this Mac will not run (company policy, or a
   workspace in `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud Drive that
