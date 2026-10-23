@@ -1,65 +1,43 @@
-# Project Brain v1.0.36 — One-Command Upgrades, MCP Agents and Joint Java/MPS Evidence
+# Project Brain v1.0.37 — Starts Reliably Where Login Items Are Blocked
 
-Upgrading no longer takes a checklist, AI agents that support the Model Context
-Protocol can call Brain directly, Windows gains sign-in startup, and code
-evidence is retrieved beside the MPS model nodes that reference it.
+Brain now handles Macs that will not run its login service, and upgrades show
+progress while the index is republished.
 
 ## What changed
 
-- **`brain upgrade`** upgrades the installation in one step: Homebrew installs
-  are delegated to Homebrew, standalone installs are downloaded from this
-  release page, verified against `SHA256SUMS.txt` and swapped in place with
-  automatic rollback. It stops and restarts the local UI for you.
-- **No more manual Refresh Brain after upgrades.** Each index generation
-  records the schemas it was built with; when a new version changes them, the
-  next idle refresh (or `brain upgrade`) republishes the index once. Existing
-  tickets keep their pinned generation.
-- **The M365 Agent Kit is re-pasted only when it changes.** `brain status` and
-  the UI Health panel report when the rendered instructions or knowledge
-  changed. The knowledge file is now `PROJECT_KNOWLEDGE.txt`, a format Agent
-  Builder accepts.
-- **`brain mcp`** lets Claude Desktop, Claude Code, Cursor and JetBrains/VS Code
-  agents start tickets, request evidence and read handoffs themselves.
-  `brain mcp config --host <host> --write` sets it up. Microsoft 365 Copilot
-  keeps the file handoff because it cannot reach a laptop.
-- **Windows sign-in startup**: `brain service install` now works on Windows
-  through a per-user startup entry, without administrator rights.
-- **Joint Java/MPS retrieval**: identifiers found in matched MPS node properties
-  are searched as code in the same request; files under `source_gen` and
-  `classes_gen` are labelled generated source; start handoffs include an MPS
-  model catalog; ticket history includes model changes; golden suites can
-  score expected model nodes.
-- **Faster large requests on Windows**: anchor and call-flow lookups share one
-  database connection per request instead of opening one per symbol.
-- **More reliable Python call evidence on busy machines**: the binding
-  analysis budget now counts only its own thread's CPU time.
-- Faster, cheaper project CI and a cleaner repository layout.
+- **No more hanging `brain ui` on locked-down Macs.** Company MDM can block
+  login items, and a login item cannot read a workspace under `~/Documents`,
+  `~/Desktop`, `~/Downloads` or iCloud Drive without Full Disk Access. When
+  the login service is refused or does not become ready, `brain ui`,
+  `brain service install` and `brain upgrade` now remove this workspace's
+  login item, start Brain in the background from the terminal and print the
+  reason, including the service's own last log line. Later `brain ui` calls
+  start immediately; `brain ui --foreground` is no longer needed.
+- **Visible upgrade progress.** When `brain upgrade` republishes the index once
+  after a version change, it prints the same timestamped phase lines as
+  `brain refresh` instead of running silently.
 
-## Upgrade from v1.0.33
+## Upgrade from v1.0.36
 
-v1.0.33 does not have `brain upgrade` yet, so this upgrade uses the previous
-steps one last time. On macOS, finish active work, then run:
+Run this from your workspace:
 
 ```sh
-brain ui stop
-brew update
-brew trust --formula superorange0707/tap/project-brain
-brew upgrade superorange0707/tap/project-brain
-brain --version
+brain upgrade
+```
+
+If the macOS login service never started on this Mac (for example, `brain ui`
+waited and then reported that the service was not ready), remove it first so
+the v1.0.36 upgrader does not wait for it, then upgrade and start Brain:
+
+```sh
+brain service uninstall
+brain upgrade
 brain ui
 ```
 
-The version must be `brain 1.0.36`. If you use the macOS login service, run
-`brain service install` instead of `brain ui`. On Windows, rerun the installer
-with `-Version 1.0.36`. From now on, `brain upgrade` is the only step.
-
-After this upgrade the index is republished once: automatically when
-**Auto Refresh** is set to *When idle*, otherwise click **Refresh Brain** once
-(`brain status` says when it is needed). If `brain status` reports that the
-M365 Agent Kit changed, regenerate it
-with `brain agent-kit m365` and replace the Instructions and the knowledge file
-(now `PROJECT_KNOWLEDGE.txt`) in Agent Builder. Workspaces, model packs and
-ticket history are kept; no model reinstall or ticket reset is needed.
+On Windows, `brain upgrade` works the same way; the installer with
+`-Version 1.0.37` also works. Workspaces, model packs, ticket history and the
+published index are kept; no refresh or Agent Kit change is needed.
 
 ---
 
