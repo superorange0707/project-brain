@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 from brain.auto_refresh import AutoRefreshService, FreshnessDecision
 from brain.cli import _refresh_all, main
 from brain.core import BrainError, create_context, load_settings, session_dir, session_state, start_session
-from brain.ops import RefreshOutcome, format_refresh_progress, refresh_brain
+from brain.ops import RefreshOutcome, format_refresh_progress, print_refresh_progress, progress_event, refresh_brain
 from brain.sync import SyncResult
 from brain.ui import (
     MAX_SESSION_ARTIFACT_RESULTS,
@@ -923,6 +923,15 @@ None beyond the stated boundary.
         with patch("brain.ops.refresh_brain", side_effect=cli_refresh), patch("builtins.print", side_effect=lambda *parts, **_kwargs: output.append(" ".join(map(str, parts)))):
             self.assertEqual(0, main(["-c", str(self.config), "refresh", "--no-fetch", "--no-discover"]))
         self.assertTrue(any("cards 3/3" in line for line in output))
+
+        report, printed = print_refresh_progress(), []
+        with patch("builtins.print", side_effect=lambda line, **_kwargs: printed.append(line)):
+            for phase, milliseconds in (("sync", 0), ("sync", 500), ("sync", 1200), ("core_index", 1300),
+                                        ("complete", 1300), ("complete", 1300)):
+                report(progress_event(phase, elapsed_ms=milliseconds))
+        # A line per phase change and per elapsed second within a phase; completion is always shown.
+        self.assertEqual(["[00:00] Reconciling repository snapshots", "[00:01] Reconciling repository snapshots",
+                          "[00:01] Building Core indexes", "[00:01] Refresh complete", "[00:01] Refresh complete"], printed)
 
     def test_start_with_sync_refuses_unaligned_semantic_without_explicit_choice(self) -> None:
         outcome = self.refresh_outcome(aligned=False, status="failed")

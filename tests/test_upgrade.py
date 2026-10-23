@@ -175,7 +175,7 @@ class UpgradeTests(unittest.TestCase):
         with mock.patch("brain.catalog.generation_predates_binary", return_value=True), \
                 mock.patch("brain.ops.refresh_brain") as refresh, mock.patch("brain.ui.start_ui") as start:
             self.assertEqual(0, finish(self.settings))
-        refresh.assert_called_once_with(self.settings, fetch=False, discover=False)
+        refresh.assert_called_once_with(self.settings, fetch=False, discover=False, progress=mock.ANY)
         start.assert_called_once()
         self.assertFalse((self.settings.state_dir / upgrade_module.STATE_FILE).exists())
         with mock.patch("brain.catalog.generation_predates_binary", return_value=False), \

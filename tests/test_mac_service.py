@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import os
@@ -18,7 +19,7 @@ from unittest.mock import patch
 from brain import mac_service
 from brain.cli import main
 from brain.core import BrainError, load_settings
-from brain.ui import _load_ui_instance, ui_instance
+from brain.ui import _load_ui_instance, start_ui, ui_instance
 
 
 class MacServiceTest(unittest.TestCase):
@@ -95,6 +96,59 @@ class MacServiceTest(unittest.TestCase):
         self.assertFalse(any("-k" in args or "sudo" in args for args in calls))
         if os.name != "nt":
             self.assertEqual(0o600, (self.settings.state_dir / "ui.log").stat().st_mode & 0o777)
+
+    def test_service_this_mac_will_not_run_is_removed_and_the_ui_starts_in_the_background(self) -> None:
+        documents = Path.home() / "Documents" / "workspace"
+        for case in ("bootstrap blocked", "never ready"):
+            with self.subTest(case=case):
+                loaded = False
+                calls = []
+
+                def run(command, **kwargs):
+                    nonlocal loaded
+                    action = command[1]
+                    calls.append(action)
+                    if action == "print":
+                        return subprocess.CompletedProcess(command, 0 if loaded else 113, "", "")
+                    if action == "bootstrap" and case == "bootstrap blocked":
+                        return subprocess.CompletedProcess(command, 5, "", "Bootstrap failed: 5: Input/output error")
+                    loaded = action == "bootstrap"
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with patch("brain.mac_service._require_macos"), patch("brain.mac_service.os.getuid", return_value=501, create=True), \
+                        patch("brain.mac_service.subprocess.run", side_effect=run), \
+                        patch("brain.mac_service._wait_ready", side_effect=BrainError("it did not become ready within 30 seconds")), \
+                        patch("brain.mac_service._start_detached") as detached, \
+                        patch("brain.cli._login_service", return_value=mac_service), \
+                        patch("sys.stdout", new_callable=io.StringIO), patch("sys.stderr", new_callable=io.StringIO) as errors:
+                    if case == "bootstrap blocked":
+                        self.assertEqual(0, main(["-c", str(self.settings.config_path), "service", "install", "--port", "0"]))
+                        detached.assert_called_once_with(self.settings, 0)
+                        self.assertIn("Input/output error", errors.getvalue())
+                        self.assertIn("Run brain service install again", errors.getvalue())
+                    else:
+                        # The reported case: brain ui with an installed service whose workspace launchd cannot read.
+                        settings = dataclasses.replace(self.settings, root=documents)
+                        self.agent.write_bytes(plistlib.dumps(mac_service._plist(settings, 8765)))
+                        with patch("brain.ui._open_ui") as opened:
+                            start_ui(settings)
+                        detached.assert_called_once_with(settings, 8765)
+                        self.assertTrue(opened.call_args.kwargs["open_browser"])
+                        self.assertIn("cannot read ~/Documents", errors.getvalue())
+                        self.assertEqual(["print", "bootstrap", "print", "bootout", "print"], calls)
+                self.assertFalse(loaded)
+                self.assertFalse(self.agent.exists())
+                self.assertFalse(mac_service.installed(self.settings))
+
+    def test_readiness_failure_quotes_the_service_log_before_the_fallback_truncates_it(self) -> None:
+        log = self.settings.state_dir / "ui.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("x" * 5000 + "\nPermissionError: [Errno 1] Operation not permitted: 'brain.toml'\n", encoding="utf-8")
+        with self.assertRaisesRegex(BrainError, r"within 0 seconds; its log ends: PermissionError: .*Operation not permitted"):
+            mac_service._wait_ready(self.settings, "label", timeout=0)
+        log.unlink()
+        with self.assertRaisesRegex(BrainError, r"within 0 seconds$"):
+            mac_service._wait_ready(self.settings, "label", timeout=0)
 
     def test_busy_or_uncertain_ui_blocks_install_and_uninstall_without_changes(self) -> None:
         self.agent.parent.mkdir()
