@@ -1392,7 +1392,7 @@ def start_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True)
         from .mac_service import installed, service
 
         if installed(settings):
-            service(settings, "start")
+            service(settings, "start")  # Falls back to a detached UI when this Mac will not run the service.
             _open_ui(_load_ui_instance(settings), open_browser=open_browser)
             return
     with _ui_lock(settings, "ui-launch.lock"):
@@ -1400,32 +1400,36 @@ def start_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True)
         if existing and _probe_ui_instance(existing):
             _open_ui(existing, open_browser=open_browser, existing=True)
             return
-        _forget_ui_instance(settings, existing)
-        command, environment = _ui_command(settings, port)
-        log_path = settings.state_dir / "ui.log"
-        with _ui_log(settings) as log:
-            log.seek(0)
-            log.truncate()
-            process = subprocess.Popen(
-                command, cwd=settings.root, env=environment, stdin=subprocess.DEVNULL,
-                stdout=log, stderr=subprocess.STDOUT, close_fds=True, **process_group_kwargs(detached=True),
-            )
-        # Keep ownership until exit when start_ui is called from a longer-lived host.
-        threading.Thread(target=process.wait, name="project-brain-ui-reaper", daemon=True).start()
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            instance = _load_ui_instance(settings)
-            if instance and _probe_ui_instance(instance):
-                _open_ui(instance, open_browser=open_browser)
-                print("Running in the background; you can close this terminal. Stop with: brain ui stop", flush=True)
-                return
-            if process.poll() is not None:
-                raise BrainError(f"The background UI exited during startup. See {log_path}, or run brain ui --foreground.")
-            time.sleep(0.1)
-        raise BrainError(
-            f"The background UI has not confirmed readiness yet. See {log_path}; "
-            "retry brain ui status before starting again."
+        _open_ui(_start_detached(settings, port), open_browser=open_browser)
+        print("Running in the background; you can close this terminal. Stop with: brain ui stop", flush=True)
+
+
+def _start_detached(settings: Settings, port: int) -> dict[str, Any]:
+    """Start the UI server detached from this terminal; the caller holds ui-launch.lock and no UI is ready."""
+    _forget_ui_instance(settings)
+    command, environment = _ui_command(settings, port)
+    log_path = settings.state_dir / "ui.log"
+    with _ui_log(settings) as log:
+        log.seek(0)
+        log.truncate()
+        process = subprocess.Popen(
+            command, cwd=settings.root, env=environment, stdin=subprocess.DEVNULL,
+            stdout=log, stderr=subprocess.STDOUT, close_fds=True, **process_group_kwargs(detached=True),
         )
+    # Keep ownership until exit when start_ui is called from a longer-lived host.
+    threading.Thread(target=process.wait, name="project-brain-ui-reaper", daemon=True).start()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        instance = _load_ui_instance(settings)
+        if instance and _probe_ui_instance(instance):
+            return instance
+        if process.poll() is not None:
+            raise BrainError(f"The background UI exited during startup. See {log_path}, or run brain ui --foreground.")
+        time.sleep(0.1)
+    raise BrainError(
+        f"The background UI has not confirmed readiness yet. See {log_path}; "
+        "retry brain ui status before starting again."
+    )
 
 
 def serve_ui(settings: Settings, *, port: int = 8765, open_browser: bool = True) -> None:

@@ -580,25 +580,14 @@ def execute(args: argparse.Namespace) -> int:
         )
         return 0
     if args.command == "refresh":
-        from .ops import format_refresh_progress, refresh_brain
-
-        last_phase = ""
-        last_second = -1
-
-        def report_progress(event: dict[str, object]) -> None:
-            nonlocal last_phase, last_second
-            phase = str(event.get("phase") or "")
-            second = int(event.get("elapsed_ms") or 0) // 1000
-            if phase != last_phase or second != last_second or phase in {"complete", "semantic_reuse"}:
-                print(format_refresh_progress(event))
-                last_phase, last_second = phase, second
+        from .ops import print_refresh_progress, refresh_brain
 
         outcome = refresh_brain(
             settings,
             fetch=not args.no_fetch,
             branch_values=args.branch,
             discover=not args.no_discover,
-            progress=report_progress,
+            progress=print_refresh_progress(),
         )
         _print_sync(outcome.sync)
         _print_graph(outcome.graph)

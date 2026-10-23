@@ -2,6 +2,17 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [Unreleased]
+
+- A macOS login service that this Mac will not run (company policy, or a
+  workspace in `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud Drive that
+  login items cannot read) no longer leaves `brain ui` waiting and failing.
+  `brain ui`, `brain service install` and `brain upgrade` remove the unusable
+  login item, start Brain in the background from the terminal and explain how
+  to get login startup back. Later `brain ui` calls start immediately.
+- `brain upgrade` shows refresh progress while it republishes the index, so a
+  long republish no longer looks like a hang.
+
 ## [1.0.36] - 2026-10-18
 
 - Python call-binding analysis measures its 0.25-second CPU budget on the

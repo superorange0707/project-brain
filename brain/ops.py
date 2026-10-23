@@ -321,6 +321,19 @@ def semantic_status(settings: Settings) -> dict[str, Any]:
     }
 
 
+def print_refresh_progress() -> Progress:
+    """Print a line per phase change, and at most one per second within a phase."""
+    last: list[Any] = ["", -1]
+
+    def report(event: dict[str, Any]) -> None:
+        current = [str(event.get("phase") or ""), int(event.get("elapsed_ms") or 0) // 1000]
+        if current != last or current[0] in {"complete", "semantic_reuse"}:
+            print(format_refresh_progress(event), flush=True)
+            last[:] = current
+
+    return report
+
+
 @workspace_exclusive
 def refresh_brain(
     settings: Settings,

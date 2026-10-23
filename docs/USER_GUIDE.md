@@ -325,19 +325,25 @@ being killed. For foreground diagnostics, run `brain service stop` before
 than one workspace. Reinstalling without `--port` preserves that selection.
 
 The service retains a stable Homebrew executable link across upgrades.
-`brain upgrade` stops it, upgrades, runs `brain service install` to reconcile
-its definition and resumes it. Source/venv installations require their interpreter and source
+`brain upgrade` stops it, upgrades, and the new version runs `brain service install`
+to reconcile its definition and resume it. Source/venv installations require their interpreter and source
 checkout to remain in place. Logs are private at the configured state's
 `ui.log`; the service plist does not contain the UI token or exported terminal
 credentials. Login startup has a fresh macOS environment: use your approved
 Git/Keychain/credential-manager configuration and VPN, rather than credentials
 or SSH-agent socket paths exported only in one terminal.
 
-macOS may request permission for background activity or access to protected
-project folders. Check **System Settings → General → Login Items & Extensions**
-and the relevant folder access setting if registration succeeds but startup does
-not. Company MDM policies still apply. Brain reports failed readiness explicitly;
-it does not elevate privileges or change these policies.
+Some Macs will not run login items: company MDM may block them, and a login
+item cannot read a workspace under `~/Documents`, `~/Desktop`, `~/Downloads` or
+iCloud Drive without Full Disk Access. When the service is refused or does not
+become ready within 30 seconds, `brain ui`, `brain service install` and
+`brain upgrade` remove this workspace's login item, start Brain in the
+background from the terminal instead and print the reason. It then works like
+`brain ui` without the service: it keeps running after you close the terminal
+and stops when you sign out. To get login startup back, move the workspace out
+of the protected folder (or allow it in **System Settings → General → Login
+Items & Extensions** if your company permits) and run `brain service install`
+again. Brain does not elevate privileges or change these policies.
 
 ### Windows sign-in startup
 

@@ -14,7 +14,7 @@ from typing import Any
 
 from .core import BrainError, Settings
 from .platforms import atomic_managed_bytes_write, read_managed_bytes
-from .ui import _load_ui_instance, _probe_ui_instance, _ui_command, _ui_lock, _ui_log, ui_instance
+from .ui import _load_ui_instance, _probe_ui_instance, _start_detached, _ui_command, _ui_lock, _ui_log, ui_instance
 
 
 def _agent_path(settings: Settings) -> Path:
@@ -145,10 +145,32 @@ def _wait_ready(settings: Settings, label: str, *, timeout: float = 30) -> None:
         if instance and _probe_ui_instance(instance) and instance.get("service") == label:
             return
         time.sleep(0.1)
-    raise BrainError(
-        f"The macOS service is installed but not ready. See {settings.state_dir / 'ui.log'}; "
-        "check background activity and project-folder access in System Settings. Retry brain service start."
-    )
+    try:  # Quote the job's own error: the fallback UI start truncates this log.
+        with open(settings.state_dir / "ui.log", "rb") as log:
+            log.seek(max(0, log.seek(0, os.SEEK_END) - 2048))
+            lines = log.read().decode("utf-8", "replace").strip().splitlines()
+    except OSError:
+        lines = []
+    raise BrainError(f"it did not become ready within {timeout:g} seconds"
+                     + (f"; its log ends: {lines[-1].strip()[:300]}" if lines else ""))
+
+
+def _fall_back(settings: Settings, path: Path, target: str, port: int, error: BrainError) -> None:
+    """Replace a login service this Mac will not run (company policy, protected folders) with a
+    terminal-started background UI, so later brain ui calls stop waiting for it."""
+    if _loaded(target):
+        _bootout(target)  # Also ends a KeepAlive crash loop.
+    _definition(settings)  # Recheck ownership before removing our one plist.
+    path.unlink(missing_ok=True)
+    home = Path.home()
+    folder = next((name for name in ("Desktop", "Documents", "Downloads", "Library/Mobile Documents")
+                   if settings.root.resolve().is_relative_to(home / name)), None)
+    retry = (f"Login services cannot read ~/{folder} without Full Disk Access; to start Brain at sign-in, move the "
+             "workspace to a folder such as ~/Developer and run brain service install." if folder else
+             "Run brain service install again if your company policy later allows login items.")
+    print(f"This Mac did not run the Brain login service ({error}). It was removed, and Brain now runs in the "
+          f"background from this terminal until you sign out; brain ui reopens it. {retry}", file=sys.stderr, flush=True)
+    _start_detached(settings, port)
 
 
 def _require_macos() -> None:
@@ -182,8 +204,7 @@ def service(settings: Settings, action: str, *, port: int | None = None) -> dict
                     with _ui_log(settings):
                         pass  # Create a private log before launchd opens its output paths.
                     atomic_managed_bytes_write(path.parent, path, plistlib.dumps(desired))
-                _launchctl("bootstrap", domain, str(path))
-                loaded = True
+                loaded = False  # Bootstrapped below.
             definition = desired
         elif action in {"start", "uninstall"} and definition is None:
             if action == "start":
@@ -196,12 +217,16 @@ def service(settings: Settings, action: str, *, port: int | None = None) -> dict
             if not ready or instance.get("service") != path.stem:
                 if ready:
                     _stop(settings)
-                if not loaded:
-                    _launchctl("bootstrap", domain, str(path))
-                else:
-                    _launchctl("kickstart", target)  # Never use -k, which kills active work.
-                _wait_ready(settings, path.stem)
-                loaded = True
+                try:
+                    if not loaded:
+                        _launchctl("bootstrap", domain, str(path))
+                    else:
+                        _launchctl("kickstart", target)  # Never use -k, which kills active work.
+                    loaded = True
+                    _wait_ready(settings, path.stem)
+                except BrainError as error:
+                    _fall_back(settings, path, target, int(definition["ProgramArguments"][-1]), error)
+                    definition, loaded = None, False
         elif action in {"stop", "uninstall"}:
             _stop(settings)
             if definition is not None:

@@ -342,11 +342,6 @@ def _homebrew_upgrade(settings: Settings) -> int:
         if result.returncode and required:
             raise BrainError(f"brew {arguments[0]} failed with exit code {result.returncode}; the UI stays stopped, run brain ui to reopen it")
     stable = prefix / "opt" / "project-brain" / "bin" / "brain"
-    if sys.platform == "darwin":
-        from .mac_service import installed, service
-
-        if installed(settings):
-            service(settings, "install")
     return _run_finish(settings, stable if stable.exists() else Path(shutil.which("brain") or executable))
 
 
@@ -392,10 +387,10 @@ def finish(settings: Settings) -> int:
 
     print(f"brain {__version__}", flush=True)
     if generation_predates_binary(current_generation_ref(settings)):
-        from .ops import refresh_brain
+        from .ops import print_refresh_progress, refresh_brain
 
         print("The published index predates this version; republishing it once (pinned tickets are kept).", flush=True)
-        refresh_brain(settings, fetch=False, discover=False)
+        refresh_brain(settings, fetch=False, discover=False, progress=print_refresh_progress())
     try:
         state = json.loads(read_managed_text(settings.state_dir, settings.state_dir / STATE_FILE, max_bytes=4096))
         (settings.state_dir / STATE_FILE).unlink(missing_ok=True)
@@ -404,7 +399,8 @@ def finish(settings: Settings) -> int:
     if state.get("service") and sys.platform == "darwin":
         from .mac_service import service
 
-        service(settings, "start")
+        # Install, not start: rewrite the definition for this binary, or fall back to a background UI.
+        service(settings, "install")
     elif state.get("was_running"):
         from contextlib import redirect_stdout
 
