@@ -196,14 +196,18 @@ def detect_auto_refresh(settings: Settings) -> FreshnessDecision:
                 ),
                 settings.repositories,
             ))
+        if any(drift for drift, _ in probes):
+            reasons.add("Selected source snapshots changed.")
+        if reasons:
+            # Refresh keeps the newest local ref of any repository it cannot fetch, so one
+            # unreachable or slow remote must not hold back every other repository.
+            return FreshnessDecision.refresh(*reasons)
         if any(failed for _, failed in probes):
             return FreshnessDecision("unverified", (
                 "Git freshness is unverified; automatic checks will retry. Published index readiness is unchanged. "
                 "Check Git connectivity/credentials if this persists; no index reset is required.",
             ), check_failed=True)
-        if any(drift for drift, _ in probes):
-            reasons.add("Selected source snapshots changed.")
-        return FreshnessDecision.refresh(*reasons) if reasons else FreshnessDecision.ready()
+        return FreshnessDecision.ready()
     except OSError:
         return FreshnessDecision.action_required("Storage or freshness check requires attention.", check_failed=True)
     except Exception:
@@ -295,17 +299,14 @@ class AutoRefreshService:
 
     @staticmethod
     def _refresh_failed(result: Any) -> bool:
-        semantic = getattr(result, "semantic", None)
-        sync = getattr(result, "sync", None)
-        if isinstance(result, dict):
-            semantic = result.get("semantic", semantic)
-            sync = result.get("sync", sync)
-        if isinstance(semantic, dict) and semantic.get("status") == "failed":
-            return True
-        return any(
-            (getattr(item, "status", None) if not isinstance(item, dict) else item.get("status")) == "fetch-failed"
-            for item in (sync or [])
-        )
+        semantic = result.get("semantic") if isinstance(result, dict) else getattr(result, "semantic", None)
+        return isinstance(semantic, dict) and semantic.get("status") == "failed"
+
+    @staticmethod
+    def _unfetched(result: Any) -> int:
+        sync = result.get("sync") if isinstance(result, dict) else getattr(result, "sync", None)
+        return sum((item.get("status") if isinstance(item, dict) else getattr(item, "status", None)) == "fetch-failed"
+                   for item in (sync or []))
 
     def set_mode(self, mode: str) -> dict[str, Any]:
         if mode not in self.MODES:
@@ -333,11 +334,11 @@ class AutoRefreshService:
                 "status": self._status,
             }
 
-    def _mark_failure(self, now: float) -> None:
+    def _mark_failure(self, now: float, reason: str = "Automatic refresh failed; retrying after backoff when idle.") -> None:
         self._failures += 1
         delay = min(self._max_backoff, self._backoff * (2 ** min(self._failures - 1, 30)))
         self._pending = False
-        self._pending_reason = "Automatic refresh failed; retrying after backoff when idle."
+        self._pending_reason = reason
         self._pending_signature = ()
         self._next_check = now + delay
         self._status = "unverified"
@@ -364,11 +365,19 @@ class AutoRefreshService:
                 self._mark_failure(self._clock())
             return True
         now = self._clock()
+        unfetched = self._unfetched(result)
         with self._lock:
+            self._last_refresh = _iso(now)
+            if unfetched:
+                # Published with those repositories' newest local refs. Back off so a remote that
+                # lists but cannot be fetched does not loop full refreshes.
+                self._mark_failure(now, f"Refreshed, but git fetch failed for {unfetched} "
+                                        f"{'repository' if unfetched == 1 else 'repositories'}; their newest local "
+                                        "refs were used. Check Git access; automatic checks will retry.")
+                return True
             self._pending = False
             self._pending_reason = None
             self._pending_signature = ()
-            self._last_refresh = _iso(now)
             self._next_check = now + self._cooldown
             self._failures = 0
             self._status = "ready"

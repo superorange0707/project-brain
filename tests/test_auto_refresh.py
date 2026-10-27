@@ -433,6 +433,27 @@ class AutoRefreshServiceTests(unittest.TestCase):
         self.assertTrue(decision.check_failed)
         self.assertEqual(1, detector.call_count)
         refresh.assert_not_called()
+        # An unreachable repository never hides a real reason; refresh keeps its newest local ref.
+        with patch("brain.catalog.schema_fingerprint", return_value="sha256:" + "0" * 64):
+            decision = detect_auto_refresh(self.settings)
+        self.assertEqual("refresh", decision.kind)
+        self.assertIn(SCHEMA_DRIFT_REASON, decision.reasons)
+
+    def test_refresh_with_unfetchable_repositories_is_recorded_and_backs_off(self) -> None:
+        detector = Mock(return_value=FreshnessDecision.refresh("Selected source snapshots changed."))
+        refresh = Mock(return_value={"sync": [{"status": "fetch-failed"}, {"status": "current"}]})
+        service = self.service(detector, refresh, debounce=0)
+
+        state = service.poll(force_check=True)
+        refresh.assert_called_once_with()
+        self.assertIsNotNone(state["last_refresh"])
+        self.assertIn("git fetch failed for 1 repository;", state["pending_reason"])
+        self.clock.advance(29)
+        service.poll()
+        refresh.assert_called_once_with()  # A listed-but-unfetchable remote must not loop full refreshes.
+        self.clock.advance(1)
+        service.poll()
+        self.assertEqual(2, refresh.call_count)
 
     def test_remote_probe_commands_share_one_bounded_deadline(self) -> None:
         calls: list[float] = []
