@@ -2,7 +2,24 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.37] - 2026-10-23
+## [1.0.38] - 2026-10-27
+
+- Auto Refresh (When idle) no longer stalls when one repository's remote cannot
+  be checked: previously any failed or slow `git ls-remote` probe reported Git
+  freshness as unverified and discarded every other reason, including changes
+  in other repositories and the post-upgrade republish. Real reasons now
+  trigger the refresh, which keeps the newest local ref of any repository it
+  cannot fetch.
+- A refresh in which some repositories could not be fetched is recorded as a
+  refresh (its time appears as the last refresh) with a status naming how
+  many repositories were not fetched, instead of being reported as failed.
+- Includes every change listed under 1.0.37.
+
+## [1.0.37] - Unpublished candidate
+
+- Withheld after its release run failed: a new test of the login-service
+  fallback assumed macOS and failed on Linux and Windows runners. The test is
+  fixed in 1.0.38, which includes the changes below.
 
 - A macOS login service that this Mac will not run (company policy, or a
   workspace in `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud Drive that
