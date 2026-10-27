@@ -130,11 +130,15 @@ class MacServiceTest(unittest.TestCase):
                         # The reported case: brain ui with an installed service whose workspace launchd cannot read.
                         settings = dataclasses.replace(self.settings, root=documents)
                         self.agent.write_bytes(plistlib.dumps(mac_service._plist(settings, 8765)))
-                        # start_ui consults the login service only on macOS; CI also runs this on Linux and Windows.
-                        with patch("brain.ui._open_ui") as opened, patch("brain.ui.sys.platform", "darwin"):
-                            start_ui(settings)
+                        # brain ui consults the login service only on macOS. Elsewhere call the service directly:
+                        # patching sys.platform would also switch platform-specific file handling.
+                        if sys.platform == "darwin":
+                            with patch("brain.ui._open_ui") as opened:
+                                start_ui(settings)
+                            self.assertTrue(opened.call_args.kwargs["open_browser"])
+                        else:
+                            self.assertFalse(mac_service.service(settings, "start")["installed"])
                         detached.assert_called_once_with(settings, 8765)
-                        self.assertTrue(opened.call_args.kwargs["open_browser"])
                         self.assertIn("cannot read ~/Documents", errors.getvalue())
                         self.assertEqual(["print", "bootstrap", "print", "bootout", "print"], calls)
                 self.assertFalse(loaded)

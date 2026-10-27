@@ -1,4 +1,4 @@
-# Project Brain v1.0.38 — Auto Refresh That Keeps Up, Startup That Never Hangs
+# Project Brain v1.0.39 — Auto Refresh That Keeps Up, Startup That Never Hangs
 
 Idle Auto Refresh now keeps working when some repositories' Git servers are
 unreachable, and Brain starts reliably on Macs that block login items.
@@ -24,7 +24,7 @@ unreachable, and Brain starts reliably on Macs that block login items.
   after a version change, it prints the same timestamped phase lines as
   `brain refresh` instead of running silently.
 
-v1.0.37 was tagged but not published; its changes are included here.
+v1.0.37 and v1.0.38 were tagged but not published; their changes are included here.
 
 ## Upgrade from v1.0.36
 
@@ -57,9 +57,9 @@ brain --version
 brain ui
 ```
 
-The version must be `brain 1.0.38`. The index is then republished once,
+The version must be `brain 1.0.39`. The index is then republished once,
 automatically when **Auto Refresh** is set to *When idle*, otherwise with
-**Refresh Brain**. On Windows, rerun the installer with `-Version 1.0.38`.
+**Refresh Brain**. On Windows, rerun the installer with `-Version 1.0.39`.
 
 Workspaces, model packs and ticket history are kept. If `brain status` reports
 that the M365 Agent Kit changed, regenerate it with `brain agent-kit m365` and

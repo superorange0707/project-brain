@@ -2,7 +2,17 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
-## [1.0.38] - 2026-10-27
+## [1.0.39] - 2026-10-27
+
+- Release qualification: the login-service fallback test no longer patches
+  `sys.platform` globally, which on Windows also switched managed-file reads to
+  their POSIX code path. Product code is unchanged.
+- Includes every change listed under 1.0.38 and 1.0.37.
+
+## [1.0.38] - Unpublished candidate
+
+- Withheld after native Windows release validation failed on that test. The
+  changes below are included in 1.0.39.
 
 - Auto Refresh (When idle) no longer stalls when one repository's remote cannot
   be checked: previously any failed or slow `git ls-remote` probe reported Git
@@ -18,8 +28,8 @@ All notable changes are documented here. This project follows Semantic Versionin
 ## [1.0.37] - Unpublished candidate
 
 - Withheld after its release run failed: a new test of the login-service
-  fallback assumed macOS and failed on Linux and Windows runners. The test is
-  fixed in 1.0.38, which includes the changes below.
+  fallback assumed macOS and failed on Linux and Windows runners. The changes
+  below are included in 1.0.39.
 
 - A macOS login service that this Mac will not run (company policy, or a
   workspace in `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud Drive that
