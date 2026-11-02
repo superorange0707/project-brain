@@ -9,11 +9,12 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import __version__
-from .agent import archive_final_solution, create_m365_agent_kit, response_preview
+from .agent import create_m365_agent_kit, response_preview, settle_reply
 from .core import (
     BrainError,
     add_external_evidence,
     clipboard_read,
+    clipboard_write,
     create_feedback,
     create_context,
     create_learning_template,
@@ -40,6 +41,7 @@ from .core import (
 from .relations import generate_relationship_map
 from .sync import SyncResult, parse_branch_overrides, sync_repositories
 from .graph import GraphIndexResult, index_graph
+from .edits import summary as edit_summary
 from .experience import build_experience_index, evaluate_sessions, render_similar_cases, similar_cases
 from .platforms import logical_path
 
@@ -877,11 +879,29 @@ def execute(args: argparse.Namespace) -> int:
             result = {"ticket": args.ticket, "kind": kind, "message": preview["message"]}
             print(json.dumps(result, indent=2) if args.json else preview["message"])
             return 0
-        if kind == "final_solution":
-            path = archive_final_solution(settings, args.ticket, text)
-            deliver(settings, args.ticket, text, args.target, copy=False)
-            result = {"ticket": args.ticket, "kind": kind, "path": str(path)}
-            print(json.dumps(result, indent=2) if args.json else f"Implementation plan saved: {path}\n{preview['message']}")
+        if kind in {"final_solution", "code_edits"}:
+            settled = settle_reply(settings, args.ticket, text, preview, args.target)
+            edits = settled.get("edits")
+            prompt = edits and (edits["repair_prompt"] or edits["review_prompt"])
+            copied = False
+            if prompt and args.copy is not False:
+                try:
+                    clipboard_write(prompt)
+                    copied = True
+                except BrainError:
+                    copied = False
+            if args.json:
+                print(json.dumps({"ticket": args.ticket, "kind": kind,
+                                  "path": str(settled["path"]) if "path" in settled else None,
+                                  "edits": edits, "prompt_copied": copied}, indent=2))
+                return 0
+            if "path" in settled:
+                print(f"Implementation plan saved: {settled['path']}\n{preview['message']}")
+            if edits:
+                print(edit_summary(edits))
+                if prompt:
+                    print("The prompt for the AI is on your clipboard; paste it into the same chat." if copied
+                          else "\nSend this to the AI:\n\n" + prompt)
             return 0
         def checkpoint_progress(event: dict[str, object]) -> None:
             if event.get("phase") != "first_useful_checkpoint":

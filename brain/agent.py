@@ -14,6 +14,7 @@ from .core import (
     BrainError,
     Settings,
     _request_document,
+    deliver,
     investigation_continuation,
     mark_active_artifacts,
     protocol_request_signature,
@@ -22,6 +23,7 @@ from .core import (
     session_dir,
     session_state,
 )
+from .edits import check_edits, has_edit_blocks, parse_edit_blocks
 from .locks import ticket_exclusive
 
 
@@ -106,10 +108,12 @@ def final_solution_contract(text: str) -> tuple[bool, list[str]]:
 
 
 def _has_production_change_block(text: str) -> bool:
-    """Detect payload presence, not applicability, completeness, or correctness."""
+    """Detect payload presence; applicability is checked separately by Brain's edit check."""
     for title, content in _final_solution_sections(text, include_fences=True) or []:
         if not any(alias in title for alias in _FINAL_SOLUTION_SECTIONS[5]):
             continue
+        if has_edit_blocks(content):
+            return True
         fence: str | None = None
         language = ""
         payload: list[str] = []
@@ -137,9 +141,14 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
     stripped = text.strip()
     if not stripped:
         raise BrainError("The AI response is empty")
-    final, _ = final_solution_contract(text)
+    final, missing = final_solution_contract(text)
+    edit_blocks = len(parse_edit_blocks(text)) if has_edit_blocks(text) else 0
+    edit_note = (
+        f" Brain will check its {edit_blocks} SEARCH/REPLACE block{'s' if edit_blocks != 1 else ''} against your "
+        "working tree and stage a patch only if every block applies." if edit_blocks else ""
+    )
     if final:
-        has_block = _has_production_change_block(text)
+        has_block = edit_blocks > 0 or _has_production_change_block(text)
         return {
             "valid": True,
             "kind": "final_solution",
@@ -147,14 +156,15 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
             "message": (
                 "The suggested production changes include a code/configuration block. "
                 "Review its file targets, acceptance criteria and tests before applying it; "
-                "Brain has not evaluated the proposal's correctness or run the tests."
+                "Brain has not evaluated the proposal's correctness or run the tests." + edit_note
                 if has_block else
                 "No production code/configuration block was detected under Suggested production changes. "
-                "Ask the AI for per-file diffs or replacement snippets with exact insertion locations, "
+                "Ask the AI for SEARCH/REPLACE edit blocks with exact file targets, "
                 "acceptance criteria and test assertions. For DSL/model changes, require precise editor steps; "
                 "if no source change is needed, require the reason. This plan can still be archived."
             ),
-            "operation_count": 0,
+            "edit_blocks": edit_blocks,
+            "operation_count": edit_blocks,
             "actions": [],
         }
     if _request_document(text) is not None:
@@ -178,6 +188,18 @@ def response_preview(text: str, settings: Settings | None = None, ticket: str | 
             )
             result["duplicate_of"] = int(previous.get("number") or 0) if previous else None
         return result
+    if edit_blocks:
+        incomplete = (" It is not a complete FINAL_SOLUTION (missing: " + "; ".join(missing) + "), so only the "
+                      "edits are checked." if re.search(r"(?m)^\s*(?:#{1,6}\s*)?FINAL_SOLUTION\b", text) else "")
+        return {
+            "valid": True,
+            "kind": "code_edits",
+            "label": "Code edits to check",
+            "message": "This reply contains code edits." + edit_note + incomplete,
+            "edit_blocks": edit_blocks,
+            "operation_count": edit_blocks,
+            "actions": [],
+        }
     return {
         "valid": True,
         "kind": "conversation",
@@ -219,6 +241,19 @@ def archive_final_solution(settings: Settings, ticket: str, text: str) -> Path:
             # The ticket session is authoritative; the cross-ticket prior is derived.
             pass
     return path
+
+
+def settle_reply(
+    settings: Settings, ticket: str, text: str, preview: dict[str, Any], target: str | None,
+) -> dict[str, Any]:
+    """Archive a FINAL_SOLUTION and check any edit blocks; shared by the CLI, the UI and MCP."""
+    result: dict[str, Any] = {}
+    if preview["kind"] == "final_solution":
+        result["path"] = archive_final_solution(settings, ticket, text)
+        deliver(settings, ticket, text, target, copy=False)
+    if preview.get("edit_blocks"):
+        result["edits"] = check_edits(settings, ticket, text)
+    return result
 
 
 M365_KIT_DIRECTORY = "m365-agent"
@@ -307,7 +342,7 @@ Use the attached internal IPF documentation together with the ticket and reposit
 
 ## Produce the implementation plan
 
-Decide whether enough evidence now exists to implement safely. If yes, return FINAL_SOLUTION with exact repositories, files, methods and configuration. Under Suggested production changes provide per-file fenced diffs or replacement code/configuration with exact edit locations and existing patterns. For projectional models provide precise editor steps at verified model/concept/node targets. Map each acceptance criterion to its edit and exact test/assertion; give dependency order, project-evidenced validation commands, risks and assumptions. Explain when no source edit is needed. Otherwise ask only the specific blocking question or return one focused INVESTIGATION_REQUEST v5 using the latest base_context_id. A plan is not proof of applied or validated delivery.
+Decide whether enough evidence now exists to implement safely. If yes, return FINAL_SOLUTION with exact repositories, files, methods and configuration. Under Suggested production changes give every textual edit as a FILE: line plus a SEARCH/REPLACE block copied exactly from verified source, reusing existing (shared library first) code and patterns. For projectional models provide precise editor steps at verified model/concept/node targets. Map each acceptance criterion to its edit and exact test/assertion; give dependency order, project-evidenced validation commands, risks and assumptions. Explain when no source edit is needed. Otherwise ask only the specific blocking question or return one focused INVESTIGATION_REQUEST v5 using the latest base_context_id. A plan is not proof of applied or validated delivery.
 """
     suggested_path = directory / "SUGGESTED_PROMPTS.md"
     _atomic_generated_text_write(settings, suggested_path, suggested)

@@ -1,6 +1,6 @@
 # Purpose
 
-Investigate `{{PROJECT_NAME}}` read-only and produce implementation proposals. Project Brain retrieves evidence; the AI proposes edits; the developer applies them in the IDE and returns diff/test results. Include a runnable JSON request when repository evidence is missing.
+Investigate `{{PROJECT_NAME}}` read-only and produce implementation proposals. Brain retrieves evidence; you propose edits; the developer applies them and returns diff/test results. Include a runnable JSON request when repository evidence is missing.
 
 # Evidence boundary
 
@@ -62,7 +62,7 @@ For missing/partial source, request `files`: `repo`, exact relative `path`, opti
 
 Use the newest context file. Apply deltas only to their `base_context_id`. Replace state only on a `complete_replacement` checkpoint. `incomplete_non_replacing` retains prior evidence: recover needed omitted IDs. Preserve `E####`, `A###`, `F###`, `B###`, `CTX-###`. Legacy protocols v1–v4 remain valid; new requests use v5. In legacy requests use `paths:` for a filename/path fragment; in v5 use `file_hint`.
 
-When Brain publishes a `checkpoint-NNN` first-useful handoff, consume its exact evidence immediately without treating the investigation as complete. Apply only the matching `checkpoint-delta-NNN` continuation to its declared checkpoint ID; never combine it with another ticket or generation.
+Use a first-useful `checkpoint-NNN` handoff's evidence at once; it does not end the investigation. Apply only its matching `checkpoint-delta-NNN` to that checkpoint ID, never across tickets or generations.
 
 # Investigation discipline
 
@@ -81,12 +81,21 @@ Return `FINAL_SOLUTION` only when you can provide:
 3. Ordered execution and integration flow
 4. Root cause or required behavior change
 5. Exact repositories, files, symbols, and configuration/data
-6. Suggested production changes: per-file fenced diff or replacement code/configuration, exact insertion location, necessary imports/callers and existing pattern
+6. Suggested production changes: edit blocks incl. imports/callers, reusing existing code
 7. Impact, contract, configuration/data, and test surfaces
 8. Exact tests and assertions
 9. Validation commands supplied by the project
 10. Edge cases, compatibility risks, and implementation order
 
-Prose alone, request JSON, current-source quotes and test-only snippets do not satisfy production changes. Request missing exact source before drafting code; never invent APIs/commands. For MPS give a fenced `mps` editor-operation block with verified model/node/concept/role, before/after values and source lines. Explain when no source edit is needed. Map every acceptance criterion to its edit and exact test/assertion; order small steps by dependency with an observable result. Use project-evidenced commands; proposed tests are not observed results. Report evidence collected, proposal supplied, developer applied, validation observed. No delivery percentage from coverage; review diff/test feedback before claiming delivery.
+Edit blocks, fenced:
+```text
+FILE: repo/relative/path
+<<<<<<< SEARCH
+exact current lines
+=======
+new lines
+>>>>>>> REPLACE
+```
+SEARCH: copied from evidence, indented, unique; empty for new files. No unified diffs; on EDIT CHECK FAILED resend all blocks fixed. Before adding a class/method/helper, reuse an existing one (shared libraries first) or say why none fits. Prose, JSON, quotes or test-only snippets don't count; request missing source first; never invent APIs/commands. MPS: fenced `mps` editor-operation block (verified model/node/concept/role, before/after, source lines), never text. Explain when no edit is needed. Map each acceptance criterion to its edit and exact test/assertion; order small dependent steps with observable results. Use project-evidenced commands; proposed tests are not observed results. Never claim delivery or a coverage percentage before reviewing diff/test feedback.
 
 Reply incrementally: claim, supporting/refuting E IDs, missing fact, next action. Fresh chats use RESUME plus chat-only decisions; re-read omitted source. v5 stays delta. List changes use added/removed; `reset: true` clears summaries, not evidence. Full checkpoints are for recovery. Stop retrieval once implementation is ready.

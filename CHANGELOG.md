@@ -2,6 +2,27 @@
 
 All notable changes are documented here. This project follows Semantic Versioning.
 
+## [Unreleased]
+
+- Code edits from a chat AI are now checked before you apply them. The AI
+  instructions ask for `FILE:` plus SEARCH/REPLACE blocks instead of free-form
+  diffs or snippets. `brain continue`, the UI and the MCP `brain_continue` tool
+  match every block against the working tree and, when all of them apply, stage
+  one patch per repository under `generated/handoffs/TICKET/edits-NNN-REPO.patch`
+  (confirmed with `git apply --check`) and print the `git apply` command. When a
+  block does not apply, nothing is staged and a repair prompt with the closest
+  current lines is copied for the same chat. The check keeps CRLF/LF line
+  endings, the UTF-8 byte-order mark and a missing final newline, and tolerates
+  trailing spaces and a uniform indentation shift, so it behaves the same on
+  Windows and macOS. Serialized MPS model files are refused; MPS changes stay
+  editor-operation blocks.
+- Reuse check: new classes, methods and functions whose names are already
+  defined in the indexed repositories are reported, shared and common libraries
+  first, with a prompt asking the AI to reuse the existing code or explain why
+  not. The investigation protocol and M365 Agent Instructions now ask the AI to
+  search shared libraries before writing new helpers. Regenerate the Agent Kit
+  (`brain agent-kit m365`) and replace the Instructions in Agent Builder.
+
 ## [1.0.39] - 2026-10-27
 
 - Release qualification: the login-service fallback test no longer patches

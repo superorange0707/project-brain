@@ -39,6 +39,10 @@ Project Brain is designed as a local, read-only retrieval tool:
   hosted model services. A user-invoked, hash-pinned pack installation is the
   only model-related network operation and is not a runtime dependency.
 - It does not edit, clean, reset, checkout, build, or commit target repositories.
+  The code-edit check reads the working-tree files that an AI reply's edit blocks
+  name (regular UTF-8 files inside configured repositories, no symbolic links or
+  `.git`), runs `git apply --check`, and writes the resulting patch only under the
+  generated handoff directory for the developer to apply.
 - Subprocesses use argument arrays rather than a shell.
 - Direct file requests are constrained to configured repository roots.
 - User-supplied evidence files are copied only into the ignored ticket session;

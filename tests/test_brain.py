@@ -1761,7 +1761,7 @@ path = "batch-service"
         preview = response_preview(FINAL_SOLUTION)
         self.assertEqual("final_solution", preview["kind"])
         self.assertEqual("Plan needs implementation details", preview["label"])
-        self.assertIn("per-file diffs", preview["message"])
+        self.assertIn("SEARCH/REPLACE edit blocks", preview["message"])
         production = "Update the existing branch using the local pattern."
         for block in (
             "```java\nreturn existingPolicy.evaluate(customer);\n```",

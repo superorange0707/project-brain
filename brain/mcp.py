@@ -39,7 +39,8 @@ TOOLS: list[dict[str, Any]] = [
          "ticket": _TICKET, "ticket_text": {"type": "string", "description": "Ticket title, description and acceptance criteria."},
          "refresh": {"type": "boolean", "default": False}}, "required": ["ticket", "ticket_text"]}},
     {"name": "brain_continue", "description": "Submit your INVESTIGATION_REQUEST (a JSON object, or text containing "
-     "one fenced json block) or your FINAL_SOLUTION for this ticket. Returns the next evidence context, page 1. "
+     "one fenced json block), your FINAL_SOLUTION, or SEARCH/REPLACE edit blocks for this ticket. Returns the next "
+     "evidence context, page 1, or the edit check against the developer's working tree with a staged patch. "
      "Requests are bounded; duplicate plans are rejected.", "inputSchema": {"type": "object", "properties": {
          "ticket": _TICKET, "reply": {"description": "INVESTIGATION_REQUEST object, or reply text.",
                                       "anyOf": [{"type": "object"}, {"type": "string"}]}},
@@ -145,8 +146,20 @@ def _continue(settings: Settings, arguments: dict[str, Any]) -> str:
                             + "; ".join(missing))
         raise ToolError("No INVESTIGATION_REQUEST or FINAL_SOLUTION was found. " + request_repair_prompt(
             "Send one INVESTIGATION_REQUEST JSON object, or ask the user your question directly instead of calling Brain."))
-    if result.get("kind") == "final_solution":
-        return f"FINAL_SOLUTION archived as {result.get('path')}. Present it to the user; no further Brain request is needed."
+    if result.get("kind") in {"final_solution", "code_edits"}:
+        from .edits import summary
+
+        edits = result.get("edits") or {}
+        lines = [f"FINAL_SOLUTION archived as {result.get('path')}."] if result.get("kind") == "final_solution" else []
+        if edits:
+            lines.append(summary(edits))
+            if edits.get("repair_prompt") or edits.get("review_prompt"):
+                lines.append(edits.get("repair_prompt") or edits.get("review_prompt"))
+        if edits.get("status") == "needs_repair":
+            lines.append("Send the corrected SEARCH/REPLACE blocks with brain_continue.")
+        elif result.get("kind") == "final_solution":
+            lines.append("Present it to the user; no further Brain request is needed.")
+        return "\n\n".join(lines)
     return _page(settings, ticket)
 
 

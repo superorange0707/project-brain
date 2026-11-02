@@ -1143,7 +1143,8 @@
       state.preview = plan.valid ? plan : null;
       var run = document.getElementById("run-request");
       run.disabled = !canRunRequest();
-      run.textContent = plan.kind === "final_solution" ? "Archive final plan" : "Run retrieval";
+      run.textContent = plan.kind === "final_solution" ? (plan.edit_blocks ? "Archive plan and check edits" : "Archive final plan")
+        : plan.kind === "code_edits" ? "Check edits" : "Run retrieval";
       run.dataset.label = run.textContent;
       document.getElementById("operation-count").textContent = plan.valid ? plan.operation_count : "!";
       document.getElementById("request-objective").textContent = plan.valid ? (plan.objective || plan.label) : plan.error;
@@ -1156,7 +1157,7 @@
       }
       if (plan.kind === "conversation") {
         message.innerHTML = '<div class="success"><strong>No executable request in this reply.</strong><br>If this is a repository question, choose Create request from text and review it here. For business or runtime questions, reply directly in the AI chat.</div>';
-      } else if (plan.kind === "final_solution") {
+      } else if (plan.kind === "final_solution" || plan.kind === "code_edits") {
         message.innerHTML = '<div class="success"><strong>' + esc(plan.label) + '</strong><br>' + esc(plan.message) + '</div>';
       } else if (plan.duplicate_of) {
         message.innerHTML = '<div class="error">This retrieval already ran as request ' + String(plan.duplicate_of).padStart(3, "0") + '. Clear the old reply and paste only the AI’s latest complete response. If the AI asked you a human question, answer it directly in that chat; Brain should not create another request.</div>';
@@ -1251,16 +1252,55 @@
         }
         state.contextRecovery = null;
         document.getElementById("global-error").hidden = true;
-        document.getElementById("request-message").textContent = data.kind === "final_solution" ? data.message : "";
-        showToast(data.kind === "final_solution" ? "Implementation plan saved — review the proposal and validation" : "Evidence ready — return it to the same AI chat");
+        var requestMessage = document.getElementById("request-message");
+        requestMessage.textContent = data.kind === "final_solution" ? data.message : "";
+        var edits = data.edits && data.edits.status !== "none" ? data.edits : null;
+        if (edits) renderEdits(requestMessage, edits);
+        showToast(edits && edits.status === "needs_repair" ? "Edits do not apply — copy the repair prompt to the AI"
+          : edits ? "Edits verified — apply the patch" : data.kind === "final_solution"
+          ? "Implementation plan saved — review the proposal and validation" : "Evidence ready — return it to the same AI chat");
         return true;
+    }
+    function renderEdits(container, edits) {
+      var repair = edits.status === "needs_repair";
+      var html = '<div class="' + (repair ? "error" : "success") + '"><strong>Edit check ' + esc(String(edits.check || "")) + ': ' +
+        esc(String(edits.verified)) + ' of ' + esc(String(edits.blocks)) + ' blocks apply to your working tree.</strong>';
+      if (repair) {
+        html += '<br>No patch was staged.' + edits.failures.map(function (item) {
+          return '<br>Block ' + esc(String(item.block)) + ' (' + esc(item.file || "no FILE line") + '): ' + esc(item.problem.split("\n")[0]);
+        }).join("");
+      } else {
+        html += edits.notes.map(function (note) { return '<br>' + esc(note); }).join("");
+        html += edits.patches.map(function (patch, index) {
+          return '<br>Patch for <strong>' + esc(patch.repo) + '</strong> (' + esc(patch.files.join(", ")) + '):<pre class="output">' +
+            esc(patch.apply) + '</pre><button class="button ghost" data-apply="' + index + '">Copy apply command</button>';
+        }).join("");
+        html += edits.warnings.map(function (warning) {
+          return '<br>Possible duplicate: new <code>' + esc(warning.name) + '</code> — existing ' + warning.existing.map(function (match) {
+            return esc(match.repo + "/" + match.path + ":" + match.line) + (match.shared ? " (shared library)" : "");
+          }).join(", ");
+        }).join("");
+      }
+      var prompt = edits.repair_prompt || edits.review_prompt;
+      if (prompt) html += '<br><button class="button ghost" id="copy-edit-prompt" style="margin-top:10px">' +
+        (repair ? "Copy repair prompt for AI" : "Copy reuse check for AI") + '</button>';
+      container.innerHTML = html + '</div>';
+      container.querySelectorAll("[data-apply]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          copyText(edits.patches[Number(button.dataset.apply)].apply).then(function () { showToast("Apply command copied"); }).catch(report);
+        });
+      });
+      var copyPrompt = document.getElementById("copy-edit-prompt");
+      if (copyPrompt) copyPrompt.addEventListener("click", function () {
+        copyText(prompt).then(function () { showToast(repair ? "Repair prompt copied" : "Reuse check copied"); }).catch(report);
+      });
     }
     document.getElementById("run-request").addEventListener("click", async function () {
       if (!canRunRequest()) return;
       var ticket = document.getElementById("request-ticket").value;
       var revision = state.requestRevision;
       state.retrieving = true;
-      var button = this; busy(button, true, state.preview.kind === "final_solution" ? "Archiving…" : "Retrieving…");
+      var button = this; busy(button, true, state.preview.kind === "final_solution" ? "Archiving…" : state.preview.kind === "code_edits" ? "Checking edits…" : "Retrieving…");
       var completed = false;
       try {
         completed = await runRetrieval({

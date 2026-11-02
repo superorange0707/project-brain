@@ -1111,11 +1111,13 @@ It deterministically routes the reply:
 ### Turn an implementation plan into a ticket delivery
 
 The AI instructions require a concrete proposal under **Suggested production
-changes**. Each edit should name the verified repository, relative path,
-symbol/configuration key, and exact insertion or replacement location, followed
-by a fenced diff or replacement snippet. Include needed imports and changed
-callers. For projectional DSL models, use precise editor operations at verified
-model/concept/node targets. If no source edit is needed, explain the reason.
+changes**. Each textual edit is a `FILE:` line naming the verified repository
+and relative path, followed by a SEARCH/REPLACE block (see
+[Check the AI's code edits](#check-the-ais-code-edits)). The AI names the
+symbol/configuration key and the existing code it reuses, and includes needed
+imports and changed callers. For projectional DSL models, use precise editor
+operations at verified model/concept/node targets. If no source edit is needed,
+explain the reason.
 
 Map every acceptance criterion to its edit and exact test/assertion. Order small
 steps by dependency and give an observable result for each step. Validation
@@ -1144,8 +1146,9 @@ Track delivery using observable stages, not a percentage derived from retrieval:
 | Validation observed | Actual command/output reviewed against each acceptance criterion |
 
 Brain collects context and never edits target repositories or runs their tests.
-The chat AI proposes changes, the developer applies them in the IDE, and
-**Implementation feedback** returns the diff and test output for review. A saved
+The chat AI proposes changes, Brain checks them and stages a patch, the
+developer applies it, and **Implementation feedback** returns the diff and test
+output for review. A saved
 plan or a supplied code block does not mean the ticket has been delivered. Use
 focused batched reads for decision-changing blockers; once those are resolved,
 move to the proposal and feedback instead of repeating broad retrieval.
@@ -1177,6 +1180,71 @@ Old investigations can be removed from **Project overview** with **Delete
 history**. The confirmation names the ticket; this deletes only `.runs/TICKET`
 and that ticket's generated handoffs. Repositories, branches, and source files
 are never deleted.
+
+### Check the AI's code edits
+
+Chat output is a fragile patch format: models miscount unified-diff hunks, and
+chat rendering drops indentation or turns `-` lines into bullets. Brain
+therefore asks the AI for SEARCH/REPLACE blocks and checks every one against
+your working tree before you apply anything:
+
+```text
+FILE: trading-service/src/main/java/demo/CustomerChangedListener.java
+<<<<<<< SEARCH
+        if (event.type() == CustomerEvent.Type.ADDRESS_CHANGED) {
+=======
+        if (event.type() == CustomerEvent.Type.ADDRESS_CHANGED
+                || event.type() == CustomerEvent.Type.JURISDICTION_CHANGED) {
+>>>>>>> REPLACE
+```
+
+SEARCH is copied from the delivered source and must match exactly one place in
+the current file; an empty SEARCH creates a new file. Copy the AI's reply with
+the chat's copy button rather than by selecting text, then route it as usual:
+
+```bash
+brain continue ABC-1234 --clipboard
+```
+
+A `FINAL_SOLUTION` with edit blocks is archived and checked; a reply that holds
+only edit blocks (for example a corrected set) is checked on its own. The same
+happens in the UI (**Archive plan and check edits** / **Check edits**) and
+through the MCP `brain_continue` tool.
+
+- **All blocks apply.** Brain writes one standard patch per repository to
+  `generated/handoffs/TICKET/edits-NNN-REPOSITORY.patch`, confirms it with
+  `git apply --check`, and prints the command to apply it, for example
+  `git -C /work/trading-service apply …/edits-001-trading-service.patch`.
+  Brain never applies it for you.
+- **Any block fails.** Brain stages nothing and copies a repair prompt
+  (`PROJECT BRAIN — EDIT CHECK FAILED`) to the clipboard. It names each failed
+  block and shows the closest current lines; paste it into the same chat and
+  the AI resends the corrected set. Use `--no-copy` to print it instead.
+
+The check tolerates what chats typically damage, and reports it: trailing
+spaces, and indentation shifted uniformly across a block. Lines the AI kept
+unchanged keep their original bytes. It preserves each file's CRLF or LF line
+endings, UTF-8 byte-order mark and missing final newline, so the patch applies
+the same way on Windows and macOS. It rejects paths outside the configured
+repositories, `.git`, symbolic links, non-UTF-8 files, and serialized JetBrains
+MPS models (`.mps`, `.mpsr`, `.mpl`, `.msd`, `.devkit`); MPS changes stay
+editor-operation blocks applied in MPS.
+
+**Reuse check.** When the edits add a class, method or function whose name is
+already defined elsewhere in the indexed repositories, Brain lists the existing
+definitions, shared or common libraries first (repositories whose name or tags
+contain `shared`, `common`, `lib`, `core`, `platform`, `sdk` or `util`). The
+patch is still staged; a `PROJECT BRAIN — REUSE CHECK` prompt is copied so the
+AI either reuses that code or explains why it cannot. The AI instructions
+already ask it to search shared libraries before writing new helpers; this
+check catches the cases it missed. Getters, setters and common names such as
+`toString` or `handle` are not reported.
+
+`brain continue --json` adds an `edits` object (`status` is `verified`,
+`verified_with_warnings`, `needs_repair` or `none`, plus `failures`, `notes`,
+`warnings`, `patches`, `repair_prompt` and `review_prompt`). Each check is
+recorded in the ticket session as `edit_checks`, so you can count the rounds a
+ticket needed.
 
 ### Request a complete known source file
 
@@ -1652,6 +1720,10 @@ Project Brain does not:
 - execute repository code or tests;
 - run checkout/reset/clean;
 - upload generated context.
+
+The code-edit check reads only the working-tree files that the AI's edit blocks
+name inside configured repositories, and runs `git apply --check`, which changes
+nothing. The staged patch is applied by the developer.
 
 Its only normal network activity is `git fetch origin`, performed by the user's
 installed Git. Private intranet GitLab needs no GitLab API or Project Brain

@@ -765,7 +765,7 @@ None beyond the stated boundary.
         )
         self.assertEqual("final_solution", final["data"]["kind"])
         self.assertEqual("Plan needs implementation details", final["data"]["label"])
-        self.assertIn("per-file diffs", final["data"]["message"])
+        self.assertIn("SEARCH/REPLACE edit blocks", final["data"]["message"])
         self.assertEqual("ready_to_implement", final["data"]["session"]["status"])
         self.assertTrue((self.root / ".runs/UI-1/current-handoff.md").is_file())
         self.assertTrue((self.root / "generated/handoffs/UI-1/current.md").is_file())

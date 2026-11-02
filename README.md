@@ -30,13 +30,18 @@ Ticket ──► Chat AI ──INVESTIGATION_REQUEST──► Project Brain ─�
 The AI does the reasoning; Brain does the searching. Each request is expanded
 into exact source, callers, tests, configuration, Git history and
 cross-repository links, and every piece of evidence is pinned to the snapshot
-the ticket started from. You apply the resulting change in your own IDE.
+the ticket started from. Brain checks the AI's code edits against your working
+tree and stages a patch you apply with `git apply`.
 
 - **Works with the AI you already have.** Microsoft 365 Copilot (file handoff),
   Claude Desktop, Claude Code, Cursor and JetBrains/VS Code agents (MCP), or any
   chat window (clipboard).
 - **Many repositories, one investigation.** Java/Spring, Kafka, Feign, Python,
   configuration and JetBrains MPS models in the same evidence context.
+- **Edits checked before you apply them.** The AI answers with SEARCH/REPLACE
+  blocks; Brain matches every block against your files (CRLF or LF, Windows or
+  macOS), returns a precise repair prompt when one does not fit, and flags new
+  code that duplicates existing shared-library definitions.
 - **Local and read-only.** No hosted service, no source upload by Brain, no
   build or test execution in your repositories.
 

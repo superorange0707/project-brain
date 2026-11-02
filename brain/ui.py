@@ -26,7 +26,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from .platforms import atomic_managed_text_write, open_managed_lock, process_group_kwargs, read_managed_text
 
-from .agent import archive_final_solution, create_m365_agent_kit, response_preview
+from .agent import create_m365_agent_kit, response_preview, settle_reply
 from .core import (
     BrainError,
     ContextDeliveryError,
@@ -1053,10 +1053,8 @@ class _Handler(BaseHTTPRequestHandler):
         preview = response_preview(text, settings, ticket)
         if preview["kind"] == "conversation":
             return {"ticket": ticket, **preview, "session": _session_detail(settings, ticket)}
-        if preview["kind"] == "final_solution":
-            artifact = archive_final_solution(settings, ticket, text)
-            deliver(settings, ticket, text, _target(body, settings), copy=False)
-            return {"ticket": ticket, **preview, "path": artifact.name, "session": _session_detail(settings, ticket)}
+        if preview["kind"] in {"final_solution", "code_edits"}:
+            return _settled(settings, ticket, text, preview, _target(body, settings))
         if preview.get("duplicate_of"):
             raise BrainError(f"This retrieval plan already ran as request {preview['duplicate_of']:03d}.")
         content, artifact, number = create_context(
@@ -1182,13 +1180,8 @@ class _Handler(BaseHTTPRequestHandler):
             if preview["kind"] == "conversation":
                 self._json({"ok": True, "data": {"ticket": ticket, **preview, "session": _session_detail(settings, ticket)}})
                 return
-            if preview["kind"] == "final_solution":
-                artifact = archive_final_solution(settings, ticket, text)
-                deliver(settings, ticket, text, _target(body, settings), copy=False)
-                self._json({
-                    "ok": True,
-                    "data": {"ticket": ticket, **preview, "path": artifact.name, "session": _session_detail(settings, ticket)},
-                })
+            if preview["kind"] in {"final_solution", "code_edits"}:
+                self._json({"ok": True, "data": _settled(settings, ticket, text, preview, _target(body, settings))})
                 return
             if preview.get("duplicate_of"):
                 raise BrainError(
@@ -1242,6 +1235,17 @@ def _one(query: dict[str, list[str]], key: str) -> str:
     if len(values) != 1 or not values[0]:
         raise BrainError(f"Query parameter {key} is required")
     return values[0]
+
+
+def _settled(settings: Settings, ticket: str, text: str, preview: dict[str, Any], target: str) -> dict[str, Any]:
+    settled = settle_reply(settings, ticket, text, preview, target)
+    data: dict[str, Any] = {"ticket": ticket, **preview}
+    if "path" in settled:
+        data["path"] = settled["path"].name
+    if "edits" in settled:
+        data["edits"] = settled["edits"]
+    data["session"] = _session_detail(settings, ticket)
+    return data
 
 
 def _target(body: dict[str, Any], settings: Settings | None = None) -> str:

@@ -2,3 +2,7 @@
 # Preserve the byte identities and formatting of pinned upstream model fixtures.
 tests/fixtures/mps/*.mps -text -whitespace
 tests/fixtures/mps/*.mpl -text -whitespace
+# These documents show the AI's SEARCH/REPLACE edit format, whose markers look like merge conflicts.
+brain/prompt.md conflict-marker-size=32
+brain/m365_agent_instructions.md conflict-marker-size=32
+docs/USER_GUIDE.md conflict-marker-size=32
